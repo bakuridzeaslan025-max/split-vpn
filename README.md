@@ -9,7 +9,7 @@
 - **Клиент.** `VpnService` заворачивает в TUN только подсети выбранных сервисов. Внутри — Go-библиотека (`android/tunnel/`, userspace TCP-стек из gVisor): на каждое TCP-соединение открывается TLS к relay. Соединения поднимаются по требованию, постоянного канала и keepalive нет.
 - **Сервер.** nginx с обычным сайтом-заглушкой на 443. На секретном пути за ним стоит relay (`relay/`), который пересылает байты к нужному адресу. Любой другой запрос получает 404 от nginx, неверный запрос на секретный путь — такой же 404 от relay, имитирующий nginx.
 - **Split DNS.** Имена выбранных сервисов резолвятся через DoH (Cloudflare) сквозь relay, остальные — обычным резолвером сети.
-- **Remote Config.** Список серверов (зашифрованный) и номер свежей версии приходят из Firebase Remote Config, поэтому серверы можно менять без выпуска новой версии. Встроенный список в APK — запасной.
+- **Remote Config.** Список серверов (зашифрованный) и номер свежей версии приходят из Firebase Remote Config, поэтому серверы можно менять без выпуска новой версии. Встроенный в APK список работает только до первого получения списка из Remote Config.
 
 ## Установка
 
@@ -28,7 +28,7 @@ shasum -a 256 -c split-vpn-X.Y.Z.apk.sha256   # целостность файл�
 
 Отпечаток другой — не ставь.
 
-Подписанный APK собирает и подписывает мейнтейнер у себя; сборка в CI (`release.yml`) — для воспроизводимости, ключ подписи в CI не попадает.
+APK собирает и подписывает мейнтейнер у себя, ключ подписи в CI не попадает. Побайтно сборка не воспроизводима: R8/AGP и Go-сборка (без `-trimpath`) дают разные байты, а `rc.key` и список серверов есть только у мейнтейнера. Поэтому доверие — к отпечатку подписи.
 
 ## Обновления
 
@@ -42,14 +42,16 @@ shasum -a 256 -c split-vpn-X.Y.Z.apk.sha256   # целостность файл�
 
 ## Свой сервер
 
-Шаблон — [`deploy/`](deploy/README.md): VPS, домен, Docker, пара команд `make`. Свой сервер добавляется в сборку (`vds.endpoints`) или в Remote Config своего Firebase-проекта.
+Шаблон — [`deploy/`](deploy/README.md): VPS, домен, Docker, пара команд `make`. Свой сервер добавляется в сборку (`vds.endpoints`) или в Remote Config своего Firebase-проекта. Своя сборка на своём сервере регистрируется только кодом приглашения: Play Integrity пропускает лишь APK с нашей подписью.
 
 ## Сборка из исходников
 
-Нужны Docker, `make`, JDK 17 и Android SDK. Go-часть собирается в Docker-образе с запиненными Go, NDK и gomobile.
+Нужны Docker, `make`, JDK 17+ и Android SDK. Go-часть собирается в Docker-образе с запиненными Go, NDK и gomobile.
 
 ```sh
 cd android
+echo "sdk.dir=$HOME/Library/Android/sdk" > local.properties   # или export ANDROID_HOME=…, обязательно
+cp app/google-services.stub.json app/google-services.json  # если нет своего из Firebase
 make tunnel                 # AAR с Go-туннелем → app/libs/tunnel.aar
 ./gradlew assembleDebug     # или make apk
 make test                   # Go (-race), rc/tool, Kotlin unit
@@ -57,15 +59,15 @@ make -C ../relay test
 make itest                  # инструментальные, только на эмуляторе
 ```
 
-`android/app/google-services.json` в репо нет: положи свой из Firebase (пакет `org.newvpn`) или заглушку, как в `.github/workflows/ci.yml`.
+`android/app/google-services.json` в репо нет: свой из Firebase (пакет `org.newvpn`) или заглушка `google-services.stub.json` — с ней Crashlytics и Remote Config просто не работают.
 
-`android/local.properties` (в git не попадает), все ключи необязательны:
+`android/local.properties` (в git не попадает), обязателен только `sdk.dir` (или `ANDROID_HOME`):
 
 | Ключ | Зачем |
 |---|---|
 | `sdk.dir` | путь к Android SDK |
 | `rc.key` | 64 hex, AES-ключ списка серверов (им же шифрует Remote Config) |
-| `vds.endpoints` | встроенный список серверов: `host\|ip\|port\|path`, через `;` |
+| `vds.endpoints` | встроенный список серверов (до первого ответа Remote Config): `host\|ip\|port\|path`, через `;` |
 | `integrity.project` | номер Cloud-проекта для Play Integrity; без него — только коды приглашения |
 | `keystore.file`, `keystore.pass`, `key.alias`, `key.pass` | ключ подписи |
 | `rc.sa` | ключ сервисного аккаунта для `make rc-push` и др. |

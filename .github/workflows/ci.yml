@@ -19,7 +19,7 @@ jobs:
       - run: make -C relay test
 
   android:
-    name: Kotlin unit tests
+    name: Kotlin unit tests, debug and release builds
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -40,33 +40,19 @@ jobs:
           load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      # No rc.key: the AAR has no endpoints key, the debug build gets no endpoints.
-      - run: make -C android -o docker-image tunnel
-      - name: google-services.json stub
+      # Stub Firebase config; fake but well-formed endpoints (TEST-NET-3) and
+      # key so the release variant builds too, unsigned without a keystore.
+      - name: Build config
         run: |
-          cat > android/app/google-services.json <<'JSON'
-          {
-            "project_info": {
-              "project_number": "000000000000",
-              "project_id": "ci-stub",
-              "storage_bucket": "ci-stub.appspot.com"
-            },
-            "client": [{
-              "client_info": {
-                "mobilesdk_app_id": "1:000000000000:android:0000000000000000",
-                "android_client_info": { "package_name": "org.newvpn" }
-              },
-              "oauth_client": [],
-              "api_key": [{ "current_key": "AIzaSyA00000000000000000000000000000000" }],
-              "services": { "appinvite_service": { "other_platform_oauth_client": [] } }
-            }],
-            "configuration_version": "1"
-          }
-          JSON
+          cp android/app/google-services.stub.json android/app/google-services.json
+          printf 'rc.key=%s\nvds.endpoints=%s\n' "$(printf '0%.0s' $(seq 64))" 'ci.invalid|203.0.113.1|443|/ci-stub-path' > android/local.properties
+      - run: make -C android -o docker-image tunnel
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           java-version: 17
+      - uses: gradle/actions/wrapper-validation@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
       - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
-      - run: ./gradlew testDebugUnitTest
+      # Release too: R8 and keep rules break only there.
+      - run: ./gradlew testDebugUnitTest assembleDebug assembleRelease
         working-directory: android

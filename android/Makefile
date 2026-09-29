@@ -58,7 +58,8 @@ apk: tunnel
 # Remote Config (tool in rc/tool/). rc-push writes
 # only the build_debug condition, rc-pull prints the decrypted endpoints.
 # rc-check tries every build_debug endpoint through its relay, rc-promote
-# then copies build_debug into the defaults (release) if all of them work.
+# then copies build_debug into the defaults (release) if all of them work;
+# a list equal to the defaults' is promoted unchecked, without an invite.
 # Their credential is cached in rc/.check-cred for its 7 days; without one,
 # INVITE=<code> (relay/Makefile `make invite` on the VDS).
 # local.properties: rc.key, vds.endpoints (unless rc/endpoints.json exists),
@@ -95,10 +96,8 @@ rc-test:
 	docker run --rm --platform linux/amd64 -v $(CURDIR)/../rc:/rc -w /rc/tool $(GO_ALPINE) \
 		sh -c 'go vet ./... && go test ./...'
 
-# GitHub releases. The APK is signed only here, with the upload key from
-# local.properties: CI builds an unsigned one into a draft (release.yml),
-# sign-release signs and publishes it. release-local/publish-local skip CI.
-# The keystore passwords go to apksigner through the environment, not argv.
+# GitHub releases, built and signed only here (gradle, upload key from
+# local.properties): release-local, then publish-local.
 # Then rc-push with latest_version and update_url of the new release.
 REPO := bakuridzeaslan025-max/split-vpn
 VERSION_NAME := $(shell sed -n 's/^ *versionName = "\(.*\)"/\1/p' app/build.gradle.kts)
@@ -108,7 +107,6 @@ CERT_SHA256 := 4cf035d2f09dab9f1781d6e5af593b7d5ef59dea15b45adfe4a596027fd2f8c4
 SDK_DIR := $(or $(ANDROID_HOME),$(shell $(call RC_PROP,sdk\.dir)))
 BUILD_TOOLS := $(lastword $(sort $(wildcard $(SDK_DIR)/build-tools/*/apksigner)))
 APKSIGNER := $(BUILD_TOOLS)
-ZIPALIGN := $(dir $(BUILD_TOOLS))zipalign
 # Fails unless the APK has exactly one signer and it is our certificate.
 VERIFY_APK = set -o pipefail; certs=$$($(APKSIGNER) verify --print-certs $(1)) && echo "$$certs" \
 	&& [ "$$(echo "$$certs" | grep -c '^Signer \#[0-9]* certificate SHA-256 digest: ')" = 1 ] \
@@ -116,7 +114,7 @@ VERIFY_APK = set -o pipefail; certs=$$($(APKSIGNER) verify --print-certs $(1)) &
 	|| { echo "$(1): not signed with the upload key alone"; exit 1; }
 need_tag = $(if $(shell echo '$(TAG)' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$'),,$(error usage: make $@ TAG=vX.Y.Z))
 
-.PHONY: release-local sign-release publish-local clean-tree
+.PHONY: release-local publish-local clean-tree
 # A release is built from a commit: no local edits, no untracked files.
 clean-tree:
 	@test -z "$$(git status --porcelain)" || { git status --short; echo "commit or stash first"; exit 1; }
@@ -128,26 +126,6 @@ release-local: clean-tree tunnel
 	cd build && shasum -a 256 $(notdir $(REL_APK)) > $(notdir $(REL_APK)).sha256
 	@$(call VERIFY_APK,$(REL_APK))
 	@cat $(REL_APK).sha256
-
-# Downloads the draft's unsigned APK, checks it against its .sha256, signs it,
-# replaces both assets with the signed ones and publishes the draft.
-sign-release:
-	$(need_tag)$(if $(APKSIGNER),,$(error no build-tools/*/apksigner under $(SDK_DIR)))
-	@set -e; v=$(TAG:v%=%); d=build/sign-$(TAG); rm -rf $$d; mkdir -p $$d; \
-	gh release download $(TAG) --repo $(REPO) --dir $$d --pattern "split-vpn-$$v-unsigned.apk*"; \
-	(cd $$d && shasum -a 256 -c split-vpn-$$v-unsigned.apk.sha256); \
-	$(ZIPALIGN) -P 16 -f 4 $$d/split-vpn-$$v-unsigned.apk $$d/aligned.apk; \
-	KS=$$($(call RC_PROP,keystore\.file)); \
-	KS_PASS=$$($(call RC_PROP,keystore\.pass)) KEY_PASS=$$($(call RC_PROP,key\.pass)) \
-		$(APKSIGNER) sign --ks "$$KS" --ks-key-alias "$$($(call RC_PROP,key\.alias))" \
-		--ks-pass env:KS_PASS --key-pass env:KEY_PASS --out $$d/split-vpn-$$v.apk $$d/aligned.apk; \
-	$(ZIPALIGN) -c -P 16 4 $$d/split-vpn-$$v.apk; \
-	$(call VERIFY_APK,$$d/split-vpn-$$v.apk); \
-	(cd $$d && shasum -a 256 split-vpn-$$v.apk > split-vpn-$$v.apk.sha256 && cat split-vpn-$$v.apk.sha256); \
-	gh release upload $(TAG) --repo $(REPO) --clobber $$d/split-vpn-$$v.apk $$d/split-vpn-$$v.apk.sha256; \
-	gh release delete-asset $(TAG) split-vpn-$$v-unsigned.apk --repo $(REPO) -y; \
-	gh release delete-asset $(TAG) split-vpn-$$v-unsigned.apk.sha256 --repo $(REPO) -y; \
-	gh release edit $(TAG) --repo $(REPO) --draft=false
 
 # Publishes the release-local artifacts; the tag must already be pushed.
 publish-local: clean-tree

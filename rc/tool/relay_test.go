@@ -330,3 +330,41 @@ func TestPromoteNeedsDebugValues(t *testing.T) {
 		t.Fatalf("err %v", err)
 	}
 }
+
+// A version-only promote: the defaults already hold the same list under
+// another nonce, so no relay is asked and no invite needed. rc-check still checks.
+func TestPromoteSameEndpointsSkipsCheck(t *testing.T) {
+	st := newStand(t)
+	a := newFakeRelay(t, newCred(st.now.Add(7*24*time.Hour)), "code-1")
+	ep := a.endpoint()
+	def, err := encryptEndpoints([]endpoint{ep}, testKey, strings.NewReader(strings.Repeat("d", gcmNonceSize)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := strings.Replace(debugTemplate(t, ep), `"value": "OLD"`, fmt.Sprintf(`"value": %q`, def), 1)
+
+	f, rc := newFake(t, tmpl)
+	tm, etag, _ := rc.get()
+	if err := checkAndPromote(rc, tm, etag, testKey, st.p, st.credPath, "", st.now, false, io.Discard); !errors.Is(err, errNeedInvite) {
+		t.Fatalf("rc-check: err %v", err)
+	}
+
+	f.calls = nil
+	tm, etag, _ = rc.get()
+	var out strings.Builder
+	if err := checkAndPromote(rc, tm, etag, testKey, st.p, st.credPath, "", st.now, true, &out); err != nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if a.hits.Load() != 0 || !strings.Contains(out.String(), "check skipped") {
+		t.Fatalf("relay hits %d\n%s", a.hits.Load(), out.String())
+	}
+	if want := []string{"GET /rc", "PUT /rc?validate_only=true", "PUT /rc"}; !reflect.DeepEqual(f.calls, want) {
+		t.Fatalf("calls %v", f.calls)
+	}
+	got := template(f.put)
+	for _, k := range []string{"min_version", "latest_version", "update_url"} {
+		if d, _ := got.value(k, ""); d != map[string]string{"min_version": "114", "latest_version": "115", "update_url": "https://github.com/o/r/releases/download/v0.5.7/app.apk"}[k] {
+			t.Errorf("%s: default %q", k, d)
+		}
+	}
+}

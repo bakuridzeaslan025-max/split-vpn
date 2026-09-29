@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -217,6 +218,16 @@ func checkAndPromote(rc *rcClient, t template, etag string, key []byte, p prober
 		return fmt.Errorf("%s: %w", debugCondition, err)
 	}
 	fmt.Fprintf(out, "endpoints: %d in %s\n", len(eps), debugCondition)
+	// Only the versions change: the list is already live, nothing to check
+	// and no invite needed.
+	if doPromote {
+		if d, ok := t.value("endpoints", ""); ok {
+			if def, err := decryptEndpoints(d, key); err == nil && reflect.DeepEqual(def, eps) {
+				fmt.Fprintf(out, "endpoints: same as the defaults, check skipped\n")
+				return promote(rc, t, etag, out)
+			}
+		}
+	}
 	cred, err := credential(p, eps, credPath, invite, now, out)
 	if err != nil {
 		return err
