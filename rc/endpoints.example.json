@@ -1,0 +1,4 @@
+[
+  {"host": "cover.example.org", "ip": "203.0.113.10", "port": 443, "path": "/example-path"},
+  {"host": "backup.example.org", "ip": "203.0.113.20", "port": 443, "path": "/another-path"}
+]

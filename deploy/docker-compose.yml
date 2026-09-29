@@ -1,0 +1,57 @@
+# Own server: the cover site on 443, the relay behind it at VPN_PATH.
+# `make push` lays this out in REMOTE_DIR, the relay binary is built on the
+# workstation (never on the VDS) and lands in relay/.
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  nginx:
+    image: nginx:1.30.5-alpine@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN:?}
+      - VPN_PATH=${VPN_PATH:?}
+      # nginx's own $host, $uri… must survive envsubst.
+      - NGINX_ENVSUBST_FILTER=^(DOMAIN|VPN_PATH)$$
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/templates:/etc/nginx/templates:ro
+      - ./nginx/40-https-if-cert.sh:/docker-entrypoint.d/40-https-if-cert.sh:ro
+      - ./html:/srv/site:ro
+      - ./letsencrypt:/etc/letsencrypt:ro
+      - certbot_webroot:/var/www/certbot:ro
+    restart: unless-stopped
+    logging: *logging
+
+  certbot:
+    image: certbot/certbot:v5.8.0@sha256:f70ad0adbb7e117f0fe42a63c553f28ea451edabc0148757b6efcd9735acaa20
+    entrypoint: /bin/sh
+    # The first certificate is `make cert`, this loop only renews it.
+    command: ["-c", "trap exit TERM; while :; do certbot renew -q; sleep 12h & wait $$!; done"]
+    volumes:
+      - ./letsencrypt:/etc/letsencrypt
+      - certbot_webroot:/var/www/certbot
+    restart: unless-stopped
+    logging: *logging
+
+  relay:
+    build: ./relay
+    environment:
+      - ISSUER_KEY=${ISSUER_KEY:-}
+      - CRED_PUB=${CRED_PUB:-}
+      - APP_PACKAGE=${APP_PACKAGE:-}
+      - MAX_CONNS=${MAX_CONNS:-}
+      - MAX_CONNS_PER_DEVICE=${MAX_CONNS_PER_DEVICE:-}
+      - INVITES_FILE=/data/invites
+      - REVOKED_FILE=/data/revoked
+      - INTEGRITY_SA_FILE=/data/sa.json
+    volumes:
+      - ./relay/data:/data
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  certbot_webroot:

@@ -1,0 +1,41 @@
+# No http2: the client upgrades to WebSocket over HTTP/1.1, and nginx would
+# pick h2 from Chrome's ALPN.
+server {
+    listen 443 ssl default_server;
+    server_name _;
+    ssl_reject_handshake on;
+}
+
+server {
+    listen 443 ssl;
+    server_name ${DOMAIN};
+
+    ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+
+    # Resolved per request: nginx starts without the relay, and a recreated
+    # relay container may get a new IP.
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    root /srv/site;
+    index index.html;
+
+    location = ${VPN_PATH} {
+        access_log off;
+        set $relay http://relay:4460;
+        proxy_pass $relay;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}

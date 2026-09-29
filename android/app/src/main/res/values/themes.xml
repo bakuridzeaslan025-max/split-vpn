@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.Simple" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/simple_bg</item>
+        <item name="android:statusBarColor">@color/simple_bg</item>
+        <item name="android:navigationBarColor">#FFFFFF</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">true</item>
+        <item name="android:colorAccent">#1A73E8</item>
+    </style>
+</resources>

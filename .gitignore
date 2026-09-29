@@ -1,0 +1,54 @@
+# Android build artifacts
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/local.properties
+
+# Compiled Go binary (relay)
+relay/relay
+
+# VDS ssh host and paths for relay/Makefile
+relay/.env.mk
+
+# Compiled AAR — reproducible via `make tunnel`
+android/app/libs/tunnel.aar
+
+# Endpoint key, written by `make tunnel` for the build only
+android/tunnel/key_gen.go
+
+# gomobile bind byproduct
+android/tunnel/tunnel-sources.jar
+
+# Docker build image state
+android/tunnel-builder.tar
+
+# Play upload key
+android/*.jks
+android/app/*.jks
+
+# Release bundles
+play/bundles/
+
+.idea/
+**/.DS_Store
+
+# Agent worktrees
+.claude/
+
+# Remote Config: endpoint list and the service account key (rc.sa in local.properties)
+rc/endpoints.json
+android/*-sa.json
+
+# rc-check/rc-promote credential
+rc/.check-cred
+# Own server template: secrets, host and certificates
+deploy/.env
+deploy/.env.mk
+deploy/letsencrypt/
+
+# Firebase config, CI gets a stub
+android/app/google-services.json
+
+# Private docs, separate repo
+private/
