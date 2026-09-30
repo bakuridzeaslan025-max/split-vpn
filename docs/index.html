@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Split VPN — скачать</title>
+<meta name="description" content="Split VPN для Android: через VPN идут только заблокированные сервисы, всё остальное — напрямую.">
+<link rel="icon" href="icon.png">
+<style>
+:root{--bg:#f2f2f2;--card:#fff;--ink:#202124;--dim:#5f6368;--blue:#1a73e8;--blue-ink:#fff;--line:#e0e0e0;--note:#fef7e0;--note-ink:#5f4b00}
+@media (prefers-color-scheme:dark){:root{--bg:#121212;--card:#1e1e1e;--ink:#e8eaed;--dim:#9aa0a6;--blue:#8ab4f8;--blue-ink:#10223f;--line:#333;--note:#2d2610;--note-ink:#f1d78a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 -apple-system,"Segoe UI",Roboto,sans-serif;-webkit-text-size-adjust:100%}
+main{max-width:520px;margin:0 auto;padding:32px 16px 40px}
+header{text-align:center}
+header img{width:88px;height:88px;border-radius:22px}
+h1{font-size:28px;margin:12px 0 4px}
+.lead{color:var(--dim);margin:0 0 24px}
+.card{background:var(--card);border-radius:16px;padding:20px;margin-bottom:16px}
+.dl{display:block;text-align:center;background:var(--blue);color:var(--blue-ink);text-decoration:none;font-weight:600;font-size:18px;padding:16px;border-radius:12px}
+.dl:active{opacity:.85}
+.meta{text-align:center;color:var(--dim);font-size:14px;margin:10px 0 0;min-height:21px}
+h2{font-size:18px;margin:0 0 12px}
+ol{margin:0;padding:0;list-style:none;counter-reset:s}
+ol li{counter-increment:s;position:relative;padding-left:40px;margin-bottom:14px}
+ol li:last-child{margin-bottom:0}
+ol li::before{content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;border-radius:50%;background:var(--blue);color:var(--blue-ink);font-weight:600;font-size:14px;display:flex;align-items:center;justify-content:center}
+.q{font-weight:600}
+.note{background:var(--note);color:var(--note-ink);border-radius:12px;padding:12px 14px;font-size:15px;margin-top:16px}
+footer{color:var(--dim);font-size:13px;text-align:center}
+footer a{color:var(--dim)}
+footer p{margin:6px 0}
+code{font:12px/1.4 ui-monospace,Menlo,monospace;word-break:break-all;display:block;margin-top:4px}
+</style>
+</head>
+<body>
+<main>
+<header>
+<img src="icon.png" alt="">
+<h1>Split VPN</h1>
+<p class="lead">Через VPN идут только заблокированные сервисы. Банки, Госуслуги и всё остальное работают напрямую.</p>
+</header>
+
+<div class="card">
+<h2>Как установить</h2>
+<ol role="list">
+<li>Нажми «Скачать» под этой инструкцией. Браузер может предупредить, что файл опасен, — так он пишет про любое приложение не из Google Play. Нажми <span class="q">«Всё равно скачать»</span>.</li>
+<li>Открой скачанный файл: из уведомления о загрузке или из папки «Загрузки».</li>
+<li>Android попросит разрешить установку из браузера. Нажми <span class="q">«Настройки»</span>, включи <span class="q">«Разрешить из этого источника»</span> и вернись назад.</li>
+<li>Нажми <span class="q">«Установить»</span> (или «Обновить», если приложение уже стоит). Если Play Protect или защита телефона (например, на Xiaomi) предложит проверить приложение, соглашайся или жми <span class="q">«Всё равно установить»</span>.</li>
+</ol>
+</div>
+
+<div class="card">
+<a class="dl" id="dl" href="https://github.com/bakuridzeaslan025-max/split-vpn/releases/latest">Скачать для Android</a>
+<p class="meta" id="meta"></p>
+<div class="note">Уже пользуешься Split VPN? Ставь поверх — настройки сохранятся, а VPN включится сам, если был включён.</div>
+</div>
+
+<footer>
+<p>Отпечаток подписи (SHA-256 сертификата):<code>4cf035d2f09dab9f1781d6e5af593b7d5ef59dea15b45adfe4a596027fd2f8c4</code></p>
+<p><a href="https://github.com/bakuridzeaslan025-max/split-vpn/releases">Все версии</a> · <a href="https://github.com/bakuridzeaslan025-max/split-vpn">Исходный код</a> · <a href="https://bakuridzeaslan025-max.github.io/split-vpn-privacy/">Конфиденциальность</a></p>
+</footer>
+</main>
+<script>
+fetch("https://api.github.com/repos/bakuridzeaslan025-max/split-vpn/releases/latest")
+  .then(r => r.ok ? r.json() : Promise.reject())
+  .then(rel => {
+    // Without the API (60 requests an hour per IP, and mobile NAT shares one) the button stays on the release page.
+    const apk = rel.assets.find(a => a.name === "split-vpn.apk") || rel.assets.find(a => a.name.endsWith(".apk"));
+    if (!apk) return;
+    document.getElementById("dl").href = apk.browser_download_url;
+    const mb = (apk.size / 1048576).toLocaleString("ru-RU", {maximumFractionDigits: 1});
+    const date = new Date(rel.published_at).toLocaleDateString("ru-RU", {day: "numeric", month: "long"});
+    document.getElementById("meta").textContent = `Версия ${rel.tag_name.replace(/^v/, "")} · ${mb} МБ · ${date}`;
+  })
+  .catch(() => {});
+</script>
+</body>
+</html>
