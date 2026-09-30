@@ -23,11 +23,13 @@ object CdnRoutes {
             Route("52.29.238.0", 24),
             Route("52.200.46.0", 24),
             Route("54.236.104.0", 24),
-            Route("108.156.60.0", 24),
+            Route("65.8.131.0", 24),
         ),
         "twitter" to listOf(
+            Route("104.18.37.0", 24),
             Route("151.101.204.0", 24),
             Route("162.159.140.0", 24),
+            Route("172.64.150.0", 24),
             Route("172.66.0.0", 24),
         ),
         "cloudflare" to listOf(
