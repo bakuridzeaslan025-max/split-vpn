@@ -1,5 +1,7 @@
 # Split VPN
 
+[![Downloads](https://img.shields.io/github/downloads/bakuridzeaslan025-max/split-vpn/total)](https://github.com/bakuridzeaslan025-max/split-vpn/releases)
+
 *Split-tunnel VPN for Android. Only the blocked services you pick (Telegram, YouTube, Instagram, X, …) go through your own server abroad; everything else stays direct, at full speed and with local addresses. The relay hides behind an ordinary website on 443. GPL-3.0. The rest of this README is in Russian.*
 
 Приложение для Android, которое пускает через VDS только выбранные заблокированные сервисы. Остальной трафик идёт напрямую: банки, Госуслуги и маркетплейсы видят российский IP, скорость не страдает, батарея почти не тратится.
