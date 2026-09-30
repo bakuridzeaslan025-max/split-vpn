@@ -1,7 +1,7 @@
 # Политика конфиденциальности Split VPN / Split VPN Privacy Policy
 
 Публичная версия: `privacy-site/index.html` (тот же текст, RU + EN на одной странице).
-Дата вступления в силу: 21 сентября 2026 г.
+Дата вступления в силу: 30 сентября 2026 г.
 
 ---
 
@@ -43,9 +43,11 @@
 - **Запрос отключения оптимизации батареи** — по желанию пользователя, чтобы система не останавливала VPN в фоне.
 - **Автозапуск после перезагрузки** — восстановление VPN, если он был включён до перезагрузки.
 
-#### 7. Отчёты о сбоях и третьи стороны
+#### 7. Отчёты о сбоях, настройки и третьи стороны
 
-Для диагностики сбоев приложение использует Firebase Crashlytics (Google). При сбое или внутренней ошибке в Google автоматически отправляется отчёт: стек вызовов, модель устройства, версии Android и приложения, идентификатор установки Firebase, список включённых в приложении сервисов и последние технические строки журнала приложения. Перед отправкой из них удаляются сетевые адреса, а строки с именами сайтов, к которым подключался пользователь, в отчёт не попадают вовсе. Отчёты хранятся до 90 дней и используются только для исправления ошибок; Google обрабатывает их по нашему поручению в соответствии со своей политикой конфиденциальности. Отключить отправку отчётов в приложении нельзя. Кроме Firebase Crashlytics и Play Integrity API, в приложении нет сторонних SDK; рекламы, рекламных идентификаторов и трекеров нет. Мы не продаём данные и не передаём их третьим лицам для их собственных целей.
+Для диагностики сбоев приложение использует Firebase Crashlytics (Google). При сбое или внутренней ошибке в Google автоматически отправляется отчёт: стек вызовов, модель устройства, версии Android и приложения, идентификатор установки Firebase, список включённых в приложении сервисов и последние технические строки журнала приложения. Перед отправкой из них удаляются сетевые адреса, а строки с именами сайтов, к которым подключался пользователь, в отчёт не попадают вовсе. Отчёты хранятся до 90 дней и используются только для исправления ошибок; Google обрабатывает их по нашему поручению в соответствии со своей политикой конфиденциальности. Отключить отправку отчётов в приложении нельзя.
+
+Настройки приложения (список серверов, номер последней версии, адрес страницы загрузки) приходят из Firebase Remote Config (Google): приложение запрашивает их при включении VPN и затем раз в несколько часов. В запросе передаются идентификатор установки Firebase, версии приложения и Android, язык, регион и часовой пояс устройства и тип сборки; сведения о трафике и о том, какие сайты открывал пользователь, не передаются. Кроме Firebase Crashlytics, Firebase Remote Config и Play Integrity API, в приложении нет сторонних SDK; рекламы, рекламных идентификаторов и трекеров нет. Мы не продаём данные и не передаём их третьим лицам для их собственных целей.
 
 #### 8. Дети
 
@@ -99,9 +101,11 @@ To get server access without sign-up, on first launch and about once a week the 
 - **Request to ignore battery optimizations** — optional, at the user's request, so the system does not stop the VPN in the background.
 - **Start after reboot** — restores the VPN if it was on before the reboot.
 
-#### 7. Crash reports and third parties
+#### 7. Crash reports, settings and third parties
 
-To diagnose crashes the app uses Firebase Crashlytics (Google). When the app crashes or hits an internal error, a report is sent to Google automatically: the stack trace, device model, Android and app versions, the Firebase installation ID, the list of services enabled in the app and the most recent technical lines of the app log. Network addresses are removed from them before sending, and lines naming the sites the user connected to are never included. Reports are kept for up to 90 days and are used only to fix bugs; Google processes them on our behalf under its own privacy policy. Crash reporting cannot be turned off in the app. Apart from Firebase Crashlytics and the Play Integrity API the app contains no third-party SDKs, and no ads, advertising identifiers or trackers. We do not sell data or share it with third parties for their own purposes.
+To diagnose crashes the app uses Firebase Crashlytics (Google). When the app crashes or hits an internal error, a report is sent to Google automatically: the stack trace, device model, Android and app versions, the Firebase installation ID, the list of services enabled in the app and the most recent technical lines of the app log. Network addresses are removed from them before sending, and lines naming the sites the user connected to are never included. Reports are kept for up to 90 days and are used only to fix bugs; Google processes them on our behalf under its own privacy policy. Crash reporting cannot be turned off in the app.
+
+The app's settings (the server list, the latest version number, the download page address) come from Firebase Remote Config (Google): the app requests them when the VPN is turned on and then every few hours. The request carries the Firebase installation ID, the app and Android versions, the device language, region and time zone, and the build type; nothing about the traffic or the sites the user visited is sent. Apart from Firebase Crashlytics, Firebase Remote Config and the Play Integrity API the app contains no third-party SDKs, and no ads, advertising identifiers or trackers. We do not sell data or share it with third parties for their own purposes.
 
 #### 8. Children
 
