@@ -31,6 +31,7 @@ type config struct {
 	MinVersion    int    `json:"min_version"`
 	LatestVersion int    `json:"latest_version"`
 	UpdateURL     string `json:"update_url"`
+	DailyQuotaMB  int    `json:"daily_quota_mb"`
 }
 
 func (c config) validate() error {
@@ -39,6 +40,8 @@ func (c config) validate() error {
 		return errors.New("config: min_version and latest_version are versionCodes, 1 or more")
 	case c.MinVersion > c.LatestVersion:
 		return errors.New("config: min_version above latest_version")
+	case c.DailyQuotaMB < 0:
+		return errors.New("config: daily_quota_mb is required, 0 or more (0 = no limit)")
 	}
 	// The download page the app opens in the browser.
 	if u, err := url.Parse(c.UpdateURL); err != nil || u.Scheme != "https" || u.Host == "" {
@@ -48,7 +51,8 @@ func (c config) validate() error {
 }
 
 func loadConfig(path string) (config, error) {
-	var c config
+	// 0 means no limit, so a missing key must not decode to it.
+	c := config{DailyQuotaMB: -1}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return c, err
@@ -130,13 +134,14 @@ func debugExpression(appID string) string {
 	return fmt.Sprintf(`app.id == '%s' && app.customSignal['build'].exactlyMatches(['debug'])`, appID)
 }
 
-// values are the four RC keys.
+// values are the five RC keys.
 func values(c config, blob string) [][3]string {
 	return [][3]string{
 		{"endpoints", "STRING", blob},
 		{"min_version", "NUMBER", strconv.Itoa(c.MinVersion)},
 		{"latest_version", "NUMBER", strconv.Itoa(c.LatestVersion)},
 		{"update_url", "STRING", c.UpdateURL},
+		{"daily_quota_mb", "NUMBER", strconv.Itoa(c.DailyQuotaMB)},
 	}
 }
 
@@ -161,12 +166,12 @@ func push(rc *rcClient, t template, etag string, appID string, c config, blob st
 	if err != nil {
 		return fmt.Errorf("publish: %w", err)
 	}
-	fmt.Fprintf(out, "published version %s: min_version %d, latest_version %d, update_url %s, endpoints set (%s)\n",
-		ver, c.MinVersion, c.LatestVersion, c.UpdateURL, debugCondition)
+	fmt.Fprintf(out, "published version %s: min_version %d, latest_version %d, update_url %s, daily_quota_mb %d, endpoints set (%s)\n",
+		ver, c.MinVersion, c.LatestVersion, c.UpdateURL, c.DailyQuotaMB, debugCondition)
 	return nil
 }
 
-// promote copies the build_debug values of the four keys into their
+// promote copies the build_debug values of the five keys into their
 // defaults: release builds get exactly what was checked. The condition
 // stays as it is.
 func promote(rc *rcClient, t template, etag string, out io.Writer) error {
@@ -193,8 +198,8 @@ func promote(rc *rcClient, t template, etag string, out io.Writer) error {
 		return fmt.Errorf("publish: %w", err)
 	}
 	get := func(k string) string { s, _ := t.value(k, ""); return s }
-	fmt.Fprintf(out, "published version %s: defaults = %s: min_version %s, latest_version %s, update_url %s, endpoints as checked\n",
-		ver, debugCondition, get("min_version"), get("latest_version"), get("update_url"))
+	fmt.Fprintf(out, "published version %s: defaults = %s: min_version %s, latest_version %s, update_url %s, daily_quota_mb %s, endpoints as checked\n",
+		ver, debugCondition, get("min_version"), get("latest_version"), get("update_url"), get("daily_quota_mb"))
 	return nil
 }
 

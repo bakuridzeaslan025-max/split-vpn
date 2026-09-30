@@ -99,7 +99,7 @@ func newFake(t *testing.T, tmpl string) (*fakeRC, *rcClient) {
 	return f, &rcClient{base: srv.URL + "/rc", http: srv.Client(), token: "tok"}
 }
 
-var testConfig = config{MinVersion: 110, LatestVersion: 114, UpdateURL: "https://o.github.io/r/"}
+var testConfig = config{MinVersion: 110, LatestVersion: 114, UpdateURL: "https://o.github.io/r/", DailyQuotaMB: 1024}
 
 // A console-made template: endpoints with its own default and another
 // condition, min_version inside a group, fields the tool does not know.
@@ -157,13 +157,15 @@ func TestPush(t *testing.T) {
 	check("min_version", debugCondition, "110")
 	check("latest_version", debugCondition, "114")
 	check("update_url", debugCondition, testConfig.UpdateURL)
+	check("daily_quota_mb", debugCondition, "1024")
 	check("unrelated", "", "x")
 	if _, dup := got["parameters"].(map[string]any)["min_version"]; dup {
 		t.Error("min_version duplicated at the top level")
 	}
-	latest := got.findParam("latest_version")
-	if latest["valueType"] != "NUMBER" || latest["defaultValue"].(map[string]any)["useInAppDefault"] != true {
-		t.Errorf("new parameter %v", latest)
+	for _, name := range []string{"latest_version", "daily_quota_mb"} {
+		if p := got.findParam(name); p["valueType"] != "NUMBER" || p["defaultValue"].(map[string]any)["useInAppDefault"] != true {
+			t.Errorf("new parameter %s %v", name, p)
+		}
 	}
 	s, _ := got.value("endpoints", debugCondition)
 	if eps, err := decryptEndpoints(s, testKey); err != nil || !reflect.DeepEqual(eps, testEndpoints) {
@@ -234,6 +236,7 @@ func TestPull(t *testing.T) {
 		"endpoints\n  default: endpoints: bad base64\n  build_debug:\n    cover.example.org|203.0.113.10|443|/test-path\n    backup.example.net|198.51.100.7|8443|/backup-path\n",
 		"min_version\n  default: 100\n  build_debug: -\n",
 		"update_url\n  default: -\n",
+		"daily_quota_mb\n  default: -\n",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("no %q in\n%s", want, out.String())
@@ -295,15 +298,22 @@ func TestConfig(t *testing.T) {
 		return err
 	}
 	const good = "https://o.github.io/r/"
-	if err := load(`{"min_version":114,"latest_version":115,"update_url":"` + good + `"}`); err != nil {
-		t.Fatal(err)
+	for _, q := range []string{"2048", "0"} {
+		if err := load(`{"min_version":114,"latest_version":115,"update_url":"` + good + `","daily_quota_mb":` + q + `}`); err != nil {
+			t.Fatalf("daily_quota_mb %s: %v", q, err)
+		}
 	}
 	for _, s := range []string{
-		`{"min_version":115,"latest_version":114,"update_url":"` + good + `"}`,
-		`{"min_version":114.5,"latest_version":115,"update_url":"` + good + `"}`,
-		`{"min_version":"114","latest_version":115,"update_url":"` + good + `"}`,
-		`{"latest_version":115,"update_url":"` + good + `"}`,
-		`{"min_version":114,"latest_version":115,"update_url":"` + good + `","extra":1}`,
+		`{"min_version":115,"latest_version":114,"update_url":"` + good + `","daily_quota_mb":2048}`,
+		`{"min_version":114.5,"latest_version":115,"update_url":"` + good + `","daily_quota_mb":2048}`,
+		`{"min_version":"114","latest_version":115,"update_url":"` + good + `","daily_quota_mb":2048}`,
+		`{"latest_version":115,"update_url":"` + good + `","daily_quota_mb":2048}`,
+		`{"min_version":114,"latest_version":115,"update_url":"` + good + `","daily_quota_mb":2048,"extra":1}`,
+		`{"min_version":114,"latest_version":115,"update_url":"` + good + `"}`,
+		`{"min_version":114,"latest_version":115,"update_url":"` + good + `","daily_quota_mb":-1}`,
+		`{"min_version":114,"latest_version":115,"update_url":"` + good + `","daily_quota_mb":"2048"}`,
+		`{"min_version":114,"latest_version":115,"update_url":"` + good + `","daily_quota_mb":20.5}`,
+		`{"min_version":114,"latest_version":115,"update_url":"` + good + `","daily_quota_mb":null}`,
 	} {
 		if load(s) == nil {
 			t.Errorf("%s: accepted", s)
@@ -316,7 +326,7 @@ func TestConfig(t *testing.T) {
 		"o.github.io/r/",
 		"javascript:alert(1)",
 	} {
-		if load(`{"min_version":114,"latest_version":115,"update_url":"`+u+`"}`) == nil {
+		if load(`{"min_version":114,"latest_version":115,"update_url":"`+u+`","daily_quota_mb":2048}`) == nil {
 			t.Errorf("%q: accepted", u)
 		}
 	}

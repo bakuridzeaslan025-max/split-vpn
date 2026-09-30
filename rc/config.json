@@ -1,5 +1,6 @@
 {
   "min_version": 114,
   "latest_version": 116,
-  "update_url": "https://bakuridzeaslan025-max.github.io/split-vpn/"
+  "update_url": "https://bakuridzeaslan025-max.github.io/split-vpn/",
+  "daily_quota_mb": 2048
 }

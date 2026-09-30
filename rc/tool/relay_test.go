@@ -157,7 +157,8 @@ func debugTemplate(t *testing.T, eps ...endpoint) string {
     "endpoints": {"defaultValue": {"value": "OLD"}, "conditionalValues": {"build_debug": {"value": %q}}, "valueType": "STRING"},
     "min_version": {"defaultValue": {"value": "100"}, "conditionalValues": {"build_debug": {"value": "114"}}, "valueType": "NUMBER"},
     "latest_version": {"defaultValue": {"useInAppDefault": true}, "conditionalValues": {"build_debug": {"value": "115"}}, "valueType": "NUMBER"},
-    "update_url": {"defaultValue": {"value": "old"}, "conditionalValues": {"build_debug": {"value": "https://o.github.io/r/"}}, "valueType": "STRING"}
+    "update_url": {"defaultValue": {"value": "old"}, "conditionalValues": {"build_debug": {"value": "https://o.github.io/r/"}}, "valueType": "STRING"},
+    "daily_quota_mb": {"defaultValue": {"useInAppDefault": true}, "conditionalValues": {"build_debug": {"value": "1024"}}, "valueType": "NUMBER"}
   }
 }`, blob)
 }
@@ -187,7 +188,7 @@ func TestPromoteWhenAllWork(t *testing.T) {
 		t.Fatalf("calls %v, want %v", f.calls, want)
 	}
 	got := template(f.put)
-	for _, k := range []string{"endpoints", "min_version", "latest_version", "update_url"} {
+	for _, k := range []string{"endpoints", "min_version", "latest_version", "update_url", "daily_quota_mb"} {
 		d, _ := got.value(k, "")
 		dbg, ok := got.value(k, debugCondition)
 		if !ok || d != dbg {
@@ -362,8 +363,8 @@ func TestPromoteSameEndpointsSkipsCheck(t *testing.T) {
 		t.Fatalf("calls %v", f.calls)
 	}
 	got := template(f.put)
-	for _, k := range []string{"min_version", "latest_version", "update_url"} {
-		if d, _ := got.value(k, ""); d != map[string]string{"min_version": "114", "latest_version": "115", "update_url": "https://o.github.io/r/"}[k] {
+	for _, k := range []string{"min_version", "latest_version", "update_url", "daily_quota_mb"} {
+		if d, _ := got.value(k, ""); d != map[string]string{"min_version": "114", "latest_version": "115", "update_url": "https://o.github.io/r/", "daily_quota_mb": "1024"}[k] {
 			t.Errorf("%s: default %q", k, d)
 		}
 	}
