@@ -76,6 +76,12 @@ internal class FakeBackend : Backend {
         configError?.let { throw it }
         return config
     }
+    /** Go's counter: what setQuota set plus what the test adds. */
+    @Volatile var used = 0L
+    @Volatile var limit = 0L
+    val quotasSet = CopyOnWriteArrayList<Pair<Long, Long>>()
+    override fun setQuota(used: Long, limit: Long) { this.used = used; this.limit = limit; quotasSet += used to limit }
+    override fun usage() = used
     override fun register(addr: String, sni: String, path: String, kind: Int, proof: ByteArray): ByteArray {
         registered += kind to proof
         registerError?.let { throw it }

@@ -135,13 +135,24 @@ func upgrade(c net.Conn, ep *relayTarget, cred []byte) (*bufio.Reader, error) {
 	}
 }
 
-// bufConn reads through the bufio.Reader that parsed the 101.
+// bufConn reads through the bufio.Reader that parsed the 101. It is the
+// relay session past the handshake, so it counts the quota both ways.
 type bufConn struct {
 	net.Conn
 	r *bufio.Reader
 }
 
-func (c *bufConn) Read(p []byte) (int, error) { return c.r.Read(p) }
+func (c *bufConn) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	countQuota(n)
+	return n, err
+}
+
+func (c *bufConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	countQuota(n)
+	return n, err
+}
 
 // CredExpires returns the credential's expiry as unix seconds, 0 if malformed.
 func CredExpires(cred []byte) int64 {
@@ -218,6 +229,10 @@ func Start(tunFd int, vpnAddr string, sni string, path string, cred []byte, doma
 	setLogger(logger)
 	setDomains(domains)
 	protector = host
+	// SetQuota before the first Start had no one to tell.
+	if overQuota() && host != nil {
+		go host.QuotaExceeded()
+	}
 	routeCacheSet(newRouteCache(cacheFile, routes, host))
 	if len(cred) != credSize {
 		return fmt.Errorf("no credential")
@@ -559,8 +574,8 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 	}
 	cancel()
 	if err != nil {
-		// During an outage the relay's own lines tell the story.
-		if direct || !health.down() {
+		// During an outage or over the quota, the relay's own lines tell the story.
+		if direct || !health.down() && !errors.Is(err, errQuota) {
 			log.Printf("sni %s → %s:%d %s: %v", name, dstIP, dstPort, way(direct), err)
 		}
 		return
@@ -593,6 +608,9 @@ func way(direct bool) string {
 // sends the 7-byte header. The returned conn is tracked so Stop() can
 // force-close it.
 func dialRelay(ctx context.Context, cred []byte, dstIP net.IP, dstPort uint16) (net.Conn, error) {
+	if overQuota() {
+		return nil, errQuota
+	}
 	if err := health.allow(); err != nil {
 		return nil, err
 	}

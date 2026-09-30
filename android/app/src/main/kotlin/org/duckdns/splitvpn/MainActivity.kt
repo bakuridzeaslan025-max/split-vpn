@@ -139,6 +139,7 @@ class MainActivity : Activity() {
     private var waiting: Waiting? = null
     // Null until the first snapshot.
     private var versions: Versions? = null
+    private var usage: Usage? = null
     private var started = false
     private var updateWhenKnown = false
 
@@ -149,8 +150,9 @@ class MainActivity : Activity() {
             if (state == VpnState.CONNECTED && !waitingNow) ticker.postDelayed(this, 1000)
         }
     }
+    private val midnight = Runnable { render() }
 
-    private val vpn = VpnClient(this) { st, err, lines, since, w, v ->
+    private val vpn = VpnClient(this) { st, err, lines, since, w, v, u ->
         if (st == VpnState.CONNECTED && state != VpnState.CONNECTED) {
             // The code is one-shot on the issuer: once we are in, forget it.
             invite = null
@@ -162,6 +164,7 @@ class MainActivity : Activity() {
         connectedAt = since
         waiting = w
         versions = v ?: versions
+        usage = u ?: usage
         render()
         if (updateWhenKnown && v != null) {
             updateWhenKnown = false
@@ -224,6 +227,7 @@ class MainActivity : Activity() {
             setOnClickListener { shareLog() }
         }
         findViewById<View>(R.id.toggleButton).setOnClickListener {
+            if (quotaOut) return@setOnClickListener
             when (state) {
                 VpnState.DISCONNECTED -> startVpn()
                 VpnState.ERROR -> if (offlineRetry) stopVpn() else startVpn()
@@ -300,6 +304,7 @@ class MainActivity : Activity() {
         vpn.unbind()
         started = false
         ticker.removeCallbacks(tick)
+        ticker.removeCallbacks(midnight)
     }
 
     override fun onResume() {
@@ -374,6 +379,10 @@ class MainActivity : Activity() {
         renderClock()
         renderError()
         renderUpdate()
+        renderUsage()
+        // The service pushes nothing on a used-up day, so the new one needs its own redraw.
+        ticker.removeCallbacks(midnight)
+        if (started && quotaOut) ticker.postDelayed(midnight, untilMidnight())
         findViewById<TextView>(R.id.logText).text =
             if (log.isEmpty()) "Журнал начат" else log.reversed().joinToString("\n")
     }
@@ -447,22 +456,25 @@ class MainActivity : Activity() {
         )
         val green = 0xFF1E8E3E.toInt()
         val grey = 0xFF9AA0A6.toInt()
+        // Not a failure but nothing to press until midnight: greyed out like busy.
+        val inert = busy || quotaOut
         dot.background = box(if (waitingNow) AMBER else if (on) green else if (busy) grey else 0xFF5F6368.toInt(), radius = 4f)
         findViewById<View>(R.id.buttonDot).background =
-            box(if (waitingNow) AMBER else if (on) green else if (busy) grey else Color.WHITE, radius = 5f)
+            box(if (waitingNow) AMBER else if (on) green else if (inert) grey else Color.WHITE, radius = 5f)
         findViewById<TextView>(R.id.buttonLabel).apply {
-            text = when (state) {
+            text = if (quotaOut) "Лимит на сегодня исчерпан" else when (state) {
                 VpnState.CONNECTING -> "Подключение…"
                 VpnState.DISCONNECTING -> "Отключение…"
                 VpnState.CONNECTED -> "Выключить"
                 VpnState.ERROR -> if (offlineRetry) "Выключить" else "Подключить"
                 VpnState.DISCONNECTED -> "Подключить"
             }
-            setTextColor(if (on) getColor(R.color.simple_ink) else if (busy) getColor(R.color.simple_dim) else Color.WHITE)
+            setTextColor(if (on) getColor(R.color.simple_ink) else if (inert) getColor(R.color.simple_dim) else Color.WHITE)
         }
+        button.isEnabled = !inert
         button.background = when {
             on -> box(Color.WHITE, 0xFFDADCE0.toInt(), 30f)
-            busy -> box(0xFFE8EAED.toInt(), radius = 30f)
+            inert -> box(0xFFE8EAED.toInt(), radius = 30f)
             else -> box(getColor(R.color.simple_blue), radius = 30f)
         }
     }
@@ -513,7 +525,9 @@ class MainActivity : Activity() {
             return
         }
         action.visibility = View.VISIBLE
-        if (state != VpnState.ERROR && !updateRequired) {
+        // A used-up day is told by the toggle and the usage line: a normal state, not a failure.
+        // A stale one is over. An update still shows: the one thing to do right now.
+        if (!updateRequired && (state != VpnState.ERROR || quotaError)) {
             view.visibility = View.GONE
             return
         }
@@ -533,6 +547,27 @@ class MainActivity : Activity() {
         text.setTextColor(ink)
         action.setTextColor(if (needCode) 0xFFA8C7FA.toInt() else ink)
         view.background = box(if (needCode) 0xFF322F2F.toInt() else 0xFFFCE8E6.toInt(), radius = 16f)
+    }
+
+    // Also with the app closed when it happened: the service may be gone, the count is not.
+    // Past midnight the snapshot is yesterday's: the service would start again.
+    private val quotaOut get() = usage?.day == Quota.today() &&
+        (quotaError || state == VpnState.DISCONNECTED && usage?.exceeded == true)
+    private val quotaError get() = state == VpnState.ERROR && error == TunnelVpnService.ERR_QUOTA
+
+    private fun untilMidnight(): Long {
+        val now = java.time.ZonedDateTime.now()
+        return java.time.Duration.between(now, now.toLocalDate().plusDays(1).atStartOfDay(now.zone)).toMillis() + 1000
+    }
+
+    private fun renderUsage() {
+        val u = usage?.takeIf { it.limit > 0 }
+        findViewById<TextView>(R.id.usageText).apply {
+            visibility = if (u == null) View.GONE else View.VISIBLE
+            val used = u?.takeIf { it.day == Quota.today() }?.used ?: 0
+            if (u != null) text = "Сегодня через VPN: ${Quota.format(used)} из ${Quota.format(u.limit)}" +
+                if (quotaOut) ", снова после 00:00" else ""
+        }
     }
 
     // Also before any try to connect: the service would only refuse.

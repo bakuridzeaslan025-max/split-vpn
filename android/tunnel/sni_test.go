@@ -109,6 +109,8 @@ type fakeProtector struct {
 	stale atomic.Int32
 	dns   string
 	down  []bool
+	quota atomic.Int32
+	steps atomic.Int32
 }
 
 func (f *fakeProtector) Protect(fd int) bool {
@@ -124,6 +126,8 @@ func (f *fakeProtector) RelayDown(down bool) {
 	f.down = append(f.down, down)
 	f.mu.Unlock()
 }
+func (f *fakeProtector) QuotaExceeded() { f.quota.Add(1) }
+func (f *fakeProtector) QuotaProgress() { f.steps.Add(1) }
 
 func (f *fakeProtector) protected() []int {
 	f.mu.Lock()

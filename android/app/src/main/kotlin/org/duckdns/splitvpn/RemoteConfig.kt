@@ -3,7 +3,8 @@ package org.duckdns.splitvpn
 import android.content.Context
 
 /** Remote Config keys as fetched. */
-internal data class RcValues(val endpoints: String, val minVersion: Long, val latestVersion: Long, val updateUrl: String)
+/** [dailyQuotaMb]: null when RC has no such key. */
+internal data class RcValues(val endpoints: String, val minVersion: Long, val latestVersion: Long, val updateUrl: String, val dailyQuotaMb: Long? = null)
 
 /** The versions part of Remote Config; the UI gets it in VpnClient's snapshot. */
 data class Versions(val min: Long = 0, val latest: Long = 0, val url: String = "") {
@@ -55,6 +56,7 @@ internal object RemoteConfig {
                 .putLong(KEY_LATEST_VERSION, v.latestVersion)
                 .putString(KEY_UPDATE_URL, v.updateUrl)
                 .apply()
+            Quota.setLimitMb(ctx, v.dailyQuotaMb)
         }
         // Not published for this build's condition: nothing to replace the cache with.
         if (v.endpoints.isEmpty()) return

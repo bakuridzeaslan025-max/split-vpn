@@ -36,6 +36,12 @@ type Host interface {
 	// until it does again; RelayDown(false): it does. Called with the
 	// health tracker locked, so it must not call back into Go.
 	RelayDown(down bool)
+	// QuotaExceeded: the relay traffic reached SetQuota's limit; relay
+	// sessions are refused from now on. Called once, off Go's locks.
+	QuotaExceeded()
+	// QuotaProgress: the relay traffic crossed another step (64 MB) since
+	// SetQuota; Usage has the count. Off Go's locks, once per step.
+	QuotaProgress()
 }
 
 type routeCache struct {

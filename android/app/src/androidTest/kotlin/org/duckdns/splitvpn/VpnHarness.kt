@@ -34,7 +34,7 @@ class VpnHarness {
 
     @Volatile private var synced = false
 
-    private val client = VpnClient(ctx) { s, e, l, _, w, _ ->
+    private val client = VpnClient(ctx) { s, e, l, _, w, _, _ ->
         state = s; error = e; waiting = w; synced = true
         log.clear(); log.addAll(l)
     }
@@ -96,10 +96,14 @@ class VpnHarness {
      * [forgetCred]: register afresh, one invite per call. A first start on the stand takes one too.
      * [rcList]: endpoints as if from Remote Config ([rcList] builds it) instead of the stand's
      * single one; on a running tunnel it is a new list, the start itself is skipped.
+     * [quotaMb]: the daily limit, as if from Remote Config; it stays until the next one.
+     * [quotaReset]: today's count starts from zero.
      */
-    fun start(vararg services: String, forgetCred: Boolean = false, rcList: String? = null) {
+    fun start(vararg services: String, forgetCred: Boolean = false, rcList: String? = null, quotaMb: Long? = null, quotaReset: Boolean = false) {
         val i = Intent(ctx, TunnelVpnService::class.java).setAction(TunnelVpnService.ACTION_START)
             .putStringArrayListExtra(TunnelVpnService.EXTRA_SERVICES, arrayListOf(*services))
+        quotaMb?.let { i.putExtra(TunnelVpnService.EXTRA_QUOTA_MB, it) }
+        if (quotaReset) i.putExtra(TunnelVpnService.EXTRA_QUOTA_RESET, true)
         if (endpoint != null) {
             if (rcList != null) i.putExtra(TunnelVpnService.EXTRA_RC_ENDPOINTS, rcList)
             else i.putExtra(TunnelVpnService.EXTRA_ENDPOINT, endpoint)

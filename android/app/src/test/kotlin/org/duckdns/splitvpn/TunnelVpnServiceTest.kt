@@ -54,7 +54,7 @@ class TunnelVpnServiceTest {
         shadowOf(app).setComponentNameAndServiceForBindService(
             ComponentName(app, TunnelVpnService::class.java), binder
         )
-        return VpnClient(app) { s, e, l, _, _, _ -> onSnap(Snap(s, e, l.map { it.substringAfter("  ") })) }.also { it.bind() }
+        return VpnClient(app) { s, e, l, _, _, _, _ -> onSnap(Snap(s, e, l.map { it.substringAfter("  ") })) }.also { it.bind() }
     }
 
     @Test
@@ -93,7 +93,7 @@ class TunnelVpnServiceTest {
         shadowOf(app).setComponentNameAndServiceForBindService(
             ComponentName(app, TunnelVpnService::class.java), binder
         )
-        VpnClient(app) { _, _, _, s, _, _ -> since += s }.bind()
+        VpnClient(app) { _, _, _, s, _, _, _ -> since += s }.bind()
         ShadowLooper.idleMainLooper()
         assertEquals(TunnelState.connectedAt, since.last())
 
@@ -224,7 +224,7 @@ class TunnelVpnServiceTest {
         TunnelState.set(VpnState.CONNECTED)
         TunnelState.setWaiting(Waiting.NO_SERVER)
         val got = mutableListOf<Waiting?>()
-        VpnClient(app) { _, _, _, _, w, _ -> got += w }.also {
+        VpnClient(app) { _, _, _, _, w, _, _ -> got += w }.also {
             val binder = controller.get().onBind(Intent(TunnelVpnService.ACTION_BIND))!!
             shadowOf(app).setComponentNameAndServiceForBindService(ComponentName(app, TunnelVpnService::class.java), binder)
         }.bind()
@@ -298,7 +298,7 @@ class TunnelVpnServiceTest {
         val got = mutableListOf<VpnState>()
         val binder = svc.onBind(Intent(TunnelVpnService.ACTION_BIND))!!
         shadowOf(app).setComponentNameAndServiceForBindService(ComponentName(app, TunnelVpnService::class.java), binder)
-        VpnClient(app) { st, _, _, _, _, _ -> got += st }.bind()
+        VpnClient(app) { st, _, _, _, _, _, _ -> got += st }.bind()
         fake!!.release()
         awaitState(VpnState.DISCONNECTED)
         ShadowLooper.idleMainLooper()
@@ -354,7 +354,7 @@ class TunnelVpnServiceTest {
         val got = mutableListOf<Versions?>()
         val binder = controller.get().onBind(Intent(TunnelVpnService.ACTION_BIND))!!
         shadowOf(app).setComponentNameAndServiceForBindService(ComponentName(app, TunnelVpnService::class.java), binder)
-        VpnClient(app) { _, _, _, _, _, v -> got += v }.bind()
+        VpnClient(app) { _, _, _, _, _, v, _ -> got += v }.bind()
         ShadowLooper.idleMainLooper()
         assertEquals(Versions(3, newer, url), got.last())
     }
@@ -369,7 +369,7 @@ class TunnelVpnServiceTest {
         val got = mutableListOf<Versions?>()
         val binder = svc.onBind(Intent(TunnelVpnService.ACTION_BIND))!!
         shadowOf(app).setComponentNameAndServiceForBindService(ComponentName(app, TunnelVpnService::class.java), binder)
-        VpnClient(app) { _, _, _, _, _, v -> got += v }.bind()
+        VpnClient(app) { _, _, _, _, _, v, _ -> got += v }.bind()
         svc.onStartCommand(Intent(TunnelVpnService.ACTION_START), 0, 1)
         val deadline = System.currentTimeMillis() + 5_000
         while (got.lastOrNull()?.latest != newer && System.currentTimeMillis() < deadline) {

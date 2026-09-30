@@ -60,6 +60,9 @@ internal interface Backend {
     fun decryptEndpoints(blob: String): String
     /** Fetches and activates Remote Config, blocking; throws when it cannot. */
     fun fetchConfig(): RcValues
+    /** Relay bytes used today and the limit (0: none); over it Go refuses the relay and tells the host. */
+    fun setQuota(used: Long, limit: Long)
+    fun usage(): Long
 }
 
 internal object GoBackend : Backend {
@@ -102,8 +105,12 @@ internal object GoBackend : Backend {
         // release installed over a debug build would keep "debug".
         Tasks.await(rc.setCustomSignals(CustomSignals.Builder().put("build", if (BuildConfig.DEBUG) "debug" else "release").build()), 10, TimeUnit.SECONDS)
         Tasks.await(rc.fetchAndActivate(), 60, TimeUnit.SECONDS)
-        return RcValues(rc.getString("endpoints"), rc.getLong("min_version"), rc.getLong("latest_version"), rc.getString("update_url"))
+        // Not asLong(): a typo in the console would throw and cost the endpoints too.
+        val quota = rc.getValue("daily_quota_mb").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString()?.trim()?.toLongOrNull()
+        return RcValues(rc.getString("endpoints"), rc.getLong("min_version"), rc.getLong("latest_version"), rc.getString("update_url"), quota)
     }
+    override fun setQuota(used: Long, limit: Long) = tunnel.Tunnel.setQuota(used, limit)
+    override fun usage() = tunnel.Tunnel.usage()
     override fun integrityToken(ctx: Context, nonce: ByteArray): ByteArray? {
         val project = BuildConfig.INTEGRITY_PROJECT
         if (project == 0L) return null
@@ -158,10 +165,15 @@ class TunnelVpnService : VpnService() {
         const val EXTRA_RC_ENDPOINTS = "rc_endpoints"
         const val EXTRA_CA = "ca"
         const val EXTRA_FORGET_CRED = "forget_cred"
+        // Debug builds: the daily limit in MB, as if Remote Config had sent
+        // it, and today's count back to zero.
+        const val EXTRA_QUOTA_MB = "quota_mb"
+        const val EXTRA_QUOTA_RESET = "quota_reset"
         const val ERR_NEED_CODE = "Нужен код доступа"
         const val ERR_NO_SERVER = "Не удалось обновить доступ: нет связи с сервером. Повторите позже"
         const val ERR_OFFLINE = "Нет сети. Доступ обновится сам, когда сеть появится"
         const val ERR_UPDATE_REQUIRED = "Эта версия больше не поддерживается — обновите приложение"
+        const val ERR_QUOTA = "Дневной лимит трафика исчерпан"
         private const val ERR_ESTABLISH = "VPN establish failed"
 
         // Failures of normal life: no network, VDS down, access denied, no VPN
@@ -212,6 +224,8 @@ class TunnelVpnService : VpnService() {
         private const val WHY_NEW_LIST = "new list"
         private const val CHANNEL_ID = "vpn_channel"
         private const val NOTIFICATION_ID = 1
+        private const val QUOTA_NOTIFICATION_ID = 2
+        private const val QUOTA_CHANNEL_ID = "quota_channel"
     }
 
     // host is for SNI/cert only; the client never resolves it (would loop
@@ -348,6 +362,8 @@ class TunnelVpnService : VpnService() {
         backend.trustCA(if (testStand) intent?.getStringExtra(EXTRA_CA).orEmpty() else "")
         if (ep != null) AppLog.i("test endpoint ${ep[0]} ${ep[1]}:${ep[2]}")
         if (testStand && intent?.getBooleanExtra(EXTRA_FORGET_CRED, false) == true) Credentials.clear(this, test = true)
+        if (intent?.hasExtra(EXTRA_QUOTA_MB) == true) Quota.setLimitMb(this, intent.getLongExtra(EXTRA_QUOTA_MB, Quota.DEFAULT_MB))
+        if (intent?.getBooleanExtra(EXTRA_QUOTA_RESET, false) == true) Quota.save(this, 0, Quota.today())
         if (testRc) {
             // Each test starts from its list's first, whatever worked in the last one.
             Endpoints.setWorking(this, null, test = true)
@@ -362,7 +378,7 @@ class TunnelVpnService : VpnService() {
 
     private fun push(to: Messenger) {
         try {
-            to.send(VpnClient.snapshot(TunnelState.state, TunnelState.lastError, TunnelState.logLines(), TunnelState.connectedAt, TunnelState.waiting, RemoteConfig.versions(this)))
+            to.send(VpnClient.snapshot(TunnelState.state, TunnelState.lastError, TunnelState.logLines(), TunnelState.connectedAt, TunnelState.waiting, RemoteConfig.versions(this), Usage(usedNow(), Quota.limit(this), Quota.today())))
         } catch (_: RemoteException) {
             clients -= to
         }
@@ -442,6 +458,8 @@ class TunnelVpnService : VpnService() {
                 updateWaiting()
             }
         }
+        override fun quotaExceeded() { mainHandler.post { onQuotaExceeded() } }
+        override fun quotaProgress() { mainHandler.post { onQuotaProgress() } }
     }
     @Volatile private var relayDown = false
     // Underlying networks with internet, to tell "no network" from "the
@@ -690,10 +708,90 @@ class TunnelVpnService : VpnService() {
     private fun applyConfig(v: RcValues, decrypt: (String) -> String) {
         val before = Endpoints.cached(this, testRc)
         val versions = RemoteConfig.versions(this)
+        val limit = Quota.limit(this)
         RemoteConfig.apply(this, v, decrypt, testRc)
         val after = Endpoints.cached(this, testRc)
         if (after != null) mainHandler.post { onNewList(changed = after != before) }
         if (RemoteConfig.versions(this) != versions) mainHandler.post { onNewVersions() }
+        if (Quota.limit(this) != limit) mainHandler.post { onNewLimit() }
+    }
+
+    // Main thread only. A lower limit already used up stops the tunnel via
+    // Go's QuotaExceeded; a raised one lets the next tap through.
+    private fun onNewLimit() {
+        AppLog.i("quota: limit ${Quota.limit(this)} bytes")
+        if (countDay >= 0) backend.setQuota(backend.usage(), Quota.limit(this))
+        synchronized(lock) {
+            if (TunnelState.state == VpnState.ERROR && TunnelState.lastError == ERR_QUOTA && !Quota.exceeded(usedNow(), Quota.limit(this))) {
+                TunnelState.set(VpnState.DISCONNECTED)
+                getSystemService(NotificationManager::class.java).cancel(QUOTA_NOTIFICATION_ID)
+            }
+        }
+        pushAll()
+    }
+
+    // The day Go's count began, -1 before any in this process. Go's counter
+    // outlives Stop, so after it the count is still Go's to tell.
+    @Volatile private var countDay = -1L
+
+    private fun usedNow() = if (countDay == Quota.today()) backend.usage() else Quota.used(this)
+
+    // Main thread only. Midnight has passed since the count began: today's starts at zero.
+    private fun rollDay(): Boolean {
+        val today = Quota.today()
+        if (countDay < 0 || countDay == today) return false
+        backend.setQuota(0, Quota.limit(this))
+        countDay = today
+        Quota.save(this, 0, today)
+        AppLog.i("quota: new day")
+        return true
+    }
+
+    // Main thread only. Go's step of traffic: to prefs, and to the UI with it.
+    // A killed process loses at most a step of the day.
+    private fun onQuotaProgress() {
+        if (countDay < 0 || synchronized(lock) { stopping || TunnelState.state != VpnState.CONNECTING && TunnelState.state != VpnState.CONNECTED }) return
+        if (rollDay()) return
+        Quota.save(this, backend.usage(), countDay)
+        pushAll()
+    }
+
+    // Main thread only. Go refuses the relay from now on; the VPN goes off
+    // for the rest of the day, so the apps are not left with a dead route.
+    private fun onQuotaExceeded() {
+        if (synchronized(lock) { stopping || TunnelState.state != VpnState.CONNECTING && TunnelState.state != VpnState.CONNECTED }) return
+        // Go's count may still be yesterday's: only traffic rolls the day.
+        if (rollDay()) return
+        // Raised meanwhile: Go judged by the old limit.
+        if (!Quota.exceeded(backend.usage(), Quota.limit(this))) return
+        AppLog.i("quota: ${backend.usage()} of ${Quota.limit(this)} bytes used, stopping")
+        vpnPrefs.edit().putBoolean(KEY_WANTED, false).apply()
+        cancelRetry()
+        notifyQuota()
+        stopTunnel(stopSelfWhenDone = true, error = ERR_QUOTA)
+    }
+
+    // The tunnel goes down in the background, often with the app closed:
+    // the notification is how the user learns why.
+    private fun notifyQuota() {
+        val nm = getSystemService(NotificationManager::class.java)
+        // Not the VPN's quiet channel: this one has to be noticed.
+        nm.createNotificationChannel(NotificationChannel(QUOTA_CHANNEL_ID, "Лимит трафика", NotificationManager.IMPORTANCE_DEFAULT))
+        val open = android.app.PendingIntent.getActivity(
+            this, 1,
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            android.app.PendingIntent.FLAG_IMMUTABLE,
+        )
+        nm.notify(
+            QUOTA_NOTIFICATION_ID,
+            Notification.Builder(this, QUOTA_CHANNEL_ID)
+                .setContentTitle(ERR_QUOTA)
+                .setContentText("VPN выключен. Включите его снова после 00:00")
+                .setSmallIcon(android.R.drawable.ic_menu_compass)
+                .setContentIntent(open)
+                .setAutoCancel(true)
+                .build(),
+        )
     }
 
     private fun onNewVersions() {
@@ -770,6 +868,18 @@ class TunnelVpnService : VpnService() {
             fail("Не выбран ни один сервис")
             return
         }
+        val used = Quota.used(this)
+        val limit = Quota.limit(this)
+        if (Quota.exceeded(used, limit)) {
+            AppLog.i("startTunnel: quota $used of $limit bytes used today")
+            // Boot and always-on would only come back here.
+            vpnPrefs.edit().putBoolean(KEY_WANTED, false).apply()
+            fail(ERR_QUOTA)
+            // A limit raised in RC lifts the refusal (onNewLimit); nothing else would fetch it.
+            fetchConfig("quota")
+            return
+        }
+        getSystemService(NotificationManager::class.java).cancel(QUOTA_NOTIFICATION_ID)
         // Persisted only when these routes really go in, so a null-intent
         // restart reproduces what was running, not what was asked last.
         vpnPrefs.edit().putStringSet(KEY_SERVICES, serviceIds).apply()
@@ -816,6 +926,14 @@ class TunnelVpnService : VpnService() {
                 var cred = ensureCredential(invite)
                 fd = establishTun(enabled)
                 AppLog.i("TUN established, fd=${fd.fd}, starting Go tunnel")
+                // countDay first: a fetch landing meanwhile sets Go itself,
+                // or its limit is read here, or it lost to ours and goes again.
+                val day = Quota.today()
+                countDay = day
+                val limitNow = Quota.limit(this)
+                backend.setQuota(used, limitNow)
+                if (Quota.limit(this) != limitNow) mainHandler.post { onNewLimit() }
+                Quota.save(this, used, day)
                 try {
                     startGo(fd, cred, enabled)
                 } catch (e: Exception) {
@@ -1079,7 +1197,8 @@ class TunnelVpnService : VpnService() {
 
     private fun enabled(): List<Service> = running?.first ?: emptyList()
 
-    private fun stopTunnel(stopSelfWhenDone: Boolean = false) {
+    /** [error]: the state to end in instead of DISCONNECTED. */
+    private fun stopTunnel(stopSelfWhenDone: Boolean = false, error: String? = null) {
         synchronized(lock) {
             if (stopping) {
                 AppLog.i("stopTunnel: already stopping, skip")
@@ -1123,10 +1242,18 @@ class TunnelVpnService : VpnService() {
             }
             AppLog.i("stopTunnel done")
             relayDown = false
+            if (countDay >= 0) Quota.save(this, backend.usage(), countDay)
             if (stopSelfWhenDone) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 cancelLateNotification()
-                mainHandler.postDelayed(disconnectFallback, 3000)
+                if (error != null) {
+                    synchronized(lock) {
+                        stopping = false
+                        TunnelState.set(VpnState.ERROR, error)
+                    }
+                } else {
+                    mainHandler.postDelayed(disconnectFallback, 3000)
+                }
                 stopSelf()
             } else {
                 synchronized(lock) {
