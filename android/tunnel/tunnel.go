@@ -38,6 +38,7 @@ var (
 	mu          sync.Mutex
 	rc          *routeCache
 	s           *stack.Stack
+	linkEP      stack.LinkEndpoint
 	tunFile     *os.File
 	connsMu     sync.Mutex
 	activeConns map[net.Conn]struct{}
@@ -278,6 +279,7 @@ func Start(tunFd int, vpnAddr string, sni string, path string, cred []byte, doma
 	tunFile = os.NewFile(uintptr(tunFd), "tun")
 	doh, dohCred = newDoHClient(cred), cred
 	s = ns
+	linkEP = ep
 	proberStop = make(chan struct{})
 	go health.prober(proberStop, wake, func() error { return probeRelay(cred) })
 	mu.Unlock()
@@ -436,6 +438,8 @@ func Stop() {
 	}
 	tf := tunFile
 	tunFile = nil
+	le := linkEP
+	linkEP = nil
 	// Snapshot active connections.
 	connsMu.Lock()
 	conns := make([]net.Conn, 0, len(activeConns))
@@ -459,7 +463,13 @@ func Stop() {
 
 	// Stack.Close leaves the NIC attached, and its reader asleep in ppoll
 	// pins the TUN past close(): Android keeps the interface until a packet
-	// wakes it. RemoveNIC detaches the endpoint and waits for the reader.
+	// wakes it. RemoveNIC detaches the endpoint and waits for the reader,
+	// but under the stack's lock; on one CPU the reader delivers packets
+	// itself and may wait for that lock (a route for an ICMP reply). So
+	// detach first, outside it: RemoveNIC's own Attach(nil) is then a no-op.
+	if le != nil {
+		le.Attach(nil)
+	}
 	ns.RemoveNIC(nicID)
 	ns.Close()
 
