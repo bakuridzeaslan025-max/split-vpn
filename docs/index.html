@@ -52,7 +52,7 @@ code{font:12px/1.4 ui-monospace,Menlo,monospace;word-break:break-all;display:blo
 </div>
 
 <div class="card">
-<a class="dl" id="dl" href="https://github.com/bakuridzeaslan025-max/split-vpn/releases/latest">Скачать для Android</a>
+<a class="dl" id="dl" href="https://github.com/bakuridzeaslan025-max/split-vpn/releases/latest/download/split-vpn.apk">Скачать для Android</a>
 <p class="meta" id="meta"></p>
 <div class="note">Уже пользуешься Split VPN? Ставь поверх — настройки сохранятся, а VPN включится сам, если был включён.</div>
 </div>
@@ -66,7 +66,7 @@ code{font:12px/1.4 ui-monospace,Menlo,monospace;word-break:break-all;display:blo
 fetch("https://api.github.com/repos/bakuridzeaslan025-max/split-vpn/releases/latest")
   .then(r => r.ok ? r.json() : Promise.reject())
   .then(rel => {
-    // Without the API (60 requests an hour per IP, and mobile NAT shares one) the button stays on the release page.
+    // Without the API (60 requests an hour per IP, and mobile NAT shares one) the button keeps the direct link.
     const apk = rel.assets.find(a => a.name === "split-vpn.apk") || rel.assets.find(a => a.name.endsWith(".apk"));
     if (!apk) return;
     document.getElementById("dl").href = apk.browser_download_url;
