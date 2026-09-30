@@ -9,10 +9,15 @@ internal data class RcValues(val endpoints: String, val minVersion: Long, val la
 data class Versions(val min: Long = 0, val latest: Long = 0, val url: String = "") {
     val required get() = BuildConfig.VERSION_CODE < min
     // Not for debug: release would go on top of it.
-    val available get() = !Updater.debug && latest > BuildConfig.VERSION_CODE
+    val available get() = !debug && latest > BuildConfig.VERSION_CODE
 
-    /** "0.5.7" from ".../download/v0.5.7/file.apk"; null when the URL has no such tag. */
-    val name get() = Regex("""/v(\d+(?:\.\d+)*)/[^/]+\.apk$""").find(url)?.groupValues?.get(1)
+    /** The download page: Remote Config's, so it can move if github.io gets blocked. */
+    val page get() = url.takeIf { it.startsWith("https://") } ?: DOWNLOAD_PAGE
+
+    companion object {
+        const val DOWNLOAD_PAGE = "https://bakuridzeaslan025-max.github.io/split-vpn/"
+        internal var debug = BuildConfig.DEBUG
+    }
 }
 
 /**

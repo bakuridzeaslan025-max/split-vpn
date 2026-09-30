@@ -5,7 +5,7 @@ import android.content.Context
 import android.content.Intent
 
 /**
- * Runs in :vpn. Resumes the tunnel after reboot, and after a self-update
+ * Runs in :vpn. Resumes the tunnel after reboot, and after an update
  * (which kills the process), if the user left it on.
  */
 class BootReceiver : BroadcastReceiver() {

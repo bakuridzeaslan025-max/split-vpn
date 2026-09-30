@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="@drawable/simple_dialog"
+    android:padding="24dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="-12dp"
+        android:layout_marginEnd="-12dp"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Поделиться Split VPN"
+            android:textSize="20sp"
+            android:textColor="@color/simple_ink" />
+
+        <TextView
+            android:id="@+id/close"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:gravity="center"
+            android:contentDescription="Закрыть"
+            android:text="✕"
+            android:textSize="18sp"
+            android:textColor="@color/simple_dim" />
+    </LinearLayout>
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:lineSpacingMultiplier="1.2"
+        android:text="Наведите камеру другого телефона на код — откроется страница, где можно скачать приложение."
+        android:textSize="14sp"
+        android:textColor="@color/simple_dim" />
+
+    <ImageView
+        android:id="@+id/qr"
+        android:layout_width="220dp"
+        android:layout_height="220dp"
+        android:layout_gravity="center_horizontal"
+        android:layout_marginTop="20dp"
+        android:contentDescription="QR-код ссылки на скачивание"
+        android:scaleType="fitCenter" />
+
+    <TextView
+        android:id="@+id/send"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:layout_marginTop="20dp"
+        android:background="@drawable/simple_blue_pill"
+        android:gravity="center"
+        android:fontFamily="sans-serif-medium"
+        android:text="Отправить ссылку"
+        android:textSize="15sp"
+        android:textColor="#FFFFFF" />
+</LinearLayout>

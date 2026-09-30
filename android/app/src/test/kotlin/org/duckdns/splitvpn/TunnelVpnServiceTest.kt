@@ -41,7 +41,7 @@ class TunnelVpnServiceTest {
 
     @After
     fun tearDown() {
-        Updater.debug = true
+        Versions.debug = true
         TunnelVpnService.VERSION_FETCH_WAIT_MS = 10_000L
         fake?.release()
         awaitServiceThreads()
@@ -233,7 +233,7 @@ class TunnelVpnServiceTest {
     }
 
     private val newer = BuildConfig.VERSION_CODE + 1L
-    private val url = Updater.RELEASES + "v9.9.9/split-vpn.apk"
+    private val url = "https://mirror.example.org/split-vpn/"
 
     private fun rc(min: Long = 0, latest: Long = 0) {
         vpnPrefs().edit()
@@ -393,7 +393,7 @@ class TunnelVpnServiceTest {
 
     @Test
     fun notificationOffersTheUpdate() {
-        Updater.debug = false
+        Versions.debug = false
         rc(latest = newer)
         val n = startNotification()
         assertEquals("Доступно обновление", n.extras.getCharSequence(android.app.Notification.EXTRA_SUB_TEXT).toString())
@@ -429,7 +429,7 @@ class TunnelVpnServiceTest {
     // Still connecting when the fetch lands: the notification learns of the update anyway.
     @Test
     fun fetchedUpdateReachesTheNotificationWhileConnecting() {
-        Updater.debug = false
+        Versions.debug = false
         val svc = controller.get()
         fake = FakeBackend().apply { blockStart = true; config = RcValues("", 0, newer, url) }
         svc.backend = fake!!

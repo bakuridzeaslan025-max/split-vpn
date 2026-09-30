@@ -98,7 +98,7 @@ rc-test:
 
 # GitHub releases, built and signed only here (gradle, upload key from
 # local.properties): release-local, then publish-local.
-# Then rc-push with latest_version and update_url of the new release.
+# Then rc-push with latest_version of the new release.
 REPO := bakuridzeaslan025-max/split-vpn
 VERSION_NAME := $(shell sed -n 's/^ *versionName = "\(.*\)"/\1/p' app/build.gradle.kts)
 REL_APK := build/split-vpn-$(VERSION_NAME).apk
@@ -128,9 +128,12 @@ release-local: clean-tree tunnel
 	@cat $(REL_APK).sha256
 
 # Publishes the release-local artifacts; the tag must already be pushed.
+# The APK goes up under a fixed name too: the download page (docs/) links
+# to releases/latest/download/split-vpn.apk.
 publish-local: clean-tree
 	$(need_tag)$(if $(filter v$(VERSION_NAME),$(TAG)),,$(error TAG=$(TAG), but versionName is $(VERSION_NAME)))
 	@test "$$(git rev-parse '$(TAG)^{commit}')" = "$$(git rev-parse HEAD)" || { echo "$(TAG) is not HEAD"; exit 1; }
 	@$(call VERIFY_APK,$(REL_APK))
 	cd build && shasum -a 256 -c $(notdir $(REL_APK)).sha256
-	gh release create $(TAG) --repo $(REPO) --verify-tag --title $(TAG) --notes "SHA-256 сертификата: $(CERT_SHA256)" $(REL_APK) $(REL_APK).sha256
+	cp $(REL_APK) build/split-vpn.apk
+	gh release create $(TAG) --repo $(REPO) --verify-tag --title $(TAG) --notes "SHA-256 сертификата: $(CERT_SHA256)" $(REL_APK) $(REL_APK).sha256 build/split-vpn.apk

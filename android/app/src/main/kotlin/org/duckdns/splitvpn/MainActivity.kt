@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
@@ -28,11 +29,15 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupWindow
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.FileProvider
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.EncodeHintType
+import com.google.zxing.qrcode.QRCodeWriter
 
 class MainActivity : Activity() {
 
@@ -44,9 +49,8 @@ class MainActivity : Activity() {
 
         private const val VPN_REQUEST_CODE = 1
         private const val NOTIFICATION_REQUEST_CODE = 2
-        private const val INSTALL_PERMISSION_CODE = 3
 
-        /** From the VPN notification: update once the snapshot says to what. */
+        /** From the VPN notification: open the download page once the snapshot says which. */
         const val EXTRA_UPDATE = "update"
 
         // Set on the first auto-switch to the keep-alive tab so it never repeats.
@@ -59,10 +63,6 @@ class MainActivity : Activity() {
         private const val PRIVACY_URL = "https://bakuridzeaslan025-max.github.io/split-vpn-privacy/"
 
         private val PROBE_LINE = Regex("""^\S+\s+(.+?): (\d+ мс|ошибка)""")
-
-        // Swapped in unit tests.
-        internal var update: (android.content.Context, Long, String) -> Updater.Result = Updater::update
-        internal var background: (Runnable) -> Unit = { Thread(it, "Update").start() }
     }
 
     // What the user sees; Service.title stays the short name used in the log.
@@ -127,6 +127,7 @@ class MainActivity : Activity() {
     private var tab = "vpn"
     private var invite: String? = null
     private var inviteDialog: Dialog? = null
+    private var shareDialog: Dialog? = null
     private var menuPopup: PopupWindow? = null
     // Toasts queue up: ten taps would keep the hint on screen for twenty seconds.
     private var lockedToastAt: Long? = null
@@ -139,7 +140,6 @@ class MainActivity : Activity() {
     // Null until the first snapshot.
     private var versions: Versions? = null
     private var started = false
-    private var updating = false
     private var updateWhenKnown = false
 
     private val ticker = Handler(Looper.getMainLooper())
@@ -165,7 +165,7 @@ class MainActivity : Activity() {
         render()
         if (updateWhenKnown && v != null) {
             updateWhenKnown = false
-            if (v.available) startUpdate()
+            if (v.available) openDownloadPage()
         }
         ticker.removeCallbacks(tick)
         if (started) ticker.post(tick)
@@ -233,12 +233,12 @@ class MainActivity : Activity() {
         }
         findViewById<View>(R.id.errorAction).setOnClickListener {
             when {
-                updateRequired -> startUpdate()
+                updateRequired -> openDownloadPage()
                 error == TunnelVpnService.ERR_NEED_CODE -> showInviteDialog()
                 else -> startVpn()
             }
         }
-        findViewById<View>(R.id.updateAction).setOnClickListener { startUpdate() }
+        findViewById<View>(R.id.updateAction).setOnClickListener { openDownloadPage() }
         findViewById<View>(R.id.updateClose).setOnClickListener {
             versions?.let { prefs.edit().putLong(KEY_UPDATE_DISMISSED, it.latest).apply() }
             renderUpdate()
@@ -272,7 +272,7 @@ class MainActivity : Activity() {
         if (intent?.getBooleanExtra(EXTRA_UPDATE, false) != true) return
         showTab("vpn")
         val v = versions
-        if (v == null) updateWhenKnown = true else if (v.available) startUpdate()
+        if (v == null) updateWhenKnown = true else if (v.available) openDownloadPage()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -283,6 +283,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         inviteDialog?.dismiss()
+        shareDialog?.dismiss()
         menuPopup?.dismiss()
         super.onDestroy()
     }
@@ -525,7 +526,7 @@ class MainActivity : Activity() {
         }
         action.text = when {
             needCode -> "Ввести код"
-            updateRequired -> updateLabel
+            updateRequired -> "Обновить"
             else -> "Повторить"
         }
         val ink = if (needCode) Color.WHITE else 0xFF8C1D18.toInt()
@@ -538,8 +539,6 @@ class MainActivity : Activity() {
     private val updateRequired get() = state == VpnState.ERROR && error == TunnelVpnService.ERR_UPDATE_REQUIRED ||
         state == VpnState.DISCONNECTED && versions?.required == true
 
-    private val updateLabel get() = if (updating) "Скачивается…" else "Обновить"
-
     // The calm banner of Waiting: news, not an error. A required update is
     // the error box's business instead.
     private fun renderUpdate() {
@@ -551,45 +550,14 @@ class MainActivity : Activity() {
         if (v == null || !show) return
         view.background = box(AMBER_BG, radius = 16f)
         findViewById<TextView>(R.id.updateText).apply {
-            text = v.name?.let { "Доступна версия $it" } ?: "Доступна новая версия"
+            text = "Доступна новая версия"
             setTextColor(AMBER_INK)
         }
-        findViewById<TextView>(R.id.updateAction).apply {
-            text = updateLabel
-            setTextColor(AMBER_INK)
-        }
+        findViewById<TextView>(R.id.updateAction).setTextColor(AMBER_INK)
         findViewById<TextView>(R.id.updateClose).setTextColor(AMBER_INK)
     }
 
-    private fun startUpdate() {
-        val v = versions ?: return
-        if (updating) return
-        updating = true
-        render()
-        background(Runnable {
-            val r = update(applicationContext, v.latest, v.url)
-            runOnUiThread { if (!isDestroyed) onUpdateResult(r, v) }
-        })
-    }
-
-    private fun onUpdateResult(r: Updater.Result, v: Versions) {
-        updating = false
-        AppLog.i("update: $r")
-        when (r) {
-            Updater.Result.NEED_PERMISSION -> startActivityForResult(Updater.permissionIntent(this), INSTALL_PERMISSION_CODE)
-            // min_version raised, latest_version forgotten: nothing to download, but no way around it either.
-            Updater.Result.UP_TO_DATE -> if (v.required) openUrl(Updater.RELEASES_PAGE)
-            else prefs.edit().putLong(KEY_UPDATE_DISMISSED, v.latest).apply()
-            Updater.Result.FAILED -> {
-                Toast.makeText(this, "Не удалось скачать", Toast.LENGTH_SHORT).show()
-                openUrl(v.url)
-            }
-            // Never the URL itself: it did not pass the check.
-            Updater.Result.BAD_URL, Updater.Result.DISABLED -> openUrl(Updater.RELEASES_PAGE)
-            Updater.Result.STARTED, Updater.Result.BUSY -> Unit
-        }
-        render()
-    }
+    private fun openDownloadPage() = openUrl((versions ?: Versions()).page)
 
     private fun openUrl(url: String) {
         runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
@@ -619,6 +587,33 @@ class MainActivity : Activity() {
         input.requestFocus()
     }
 
+    private fun showShareDialog() {
+        val url = (versions ?: Versions()).page
+        val dialog = Dialog(this)
+        dialog.setContentView(R.layout.dialog_share_simple)
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setLayout(resources.displayMetrics.widthPixels - dp(48), ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+        dialog.findViewById<ImageView>(R.id.qr).setImageBitmap(qr(url, dp(220)))
+        dialog.findViewById<View>(R.id.close).setOnClickListener { dialog.dismiss() }
+        dialog.findViewById<View>(R.id.send).setOnClickListener {
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, "Split VPN — скачать: $url")
+            }
+            startActivity(Intent.createChooser(send, "Отправить ссылку"))
+        }
+        shareDialog = dialog
+        dialog.show()
+    }
+
+    private fun qr(text: String, size: Int): Bitmap {
+        val m = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, size, size, mapOf(EncodeHintType.MARGIN to 1))
+        val px = IntArray(m.width * m.height) { if (m[it % m.width, it / m.width]) Color.BLACK else Color.WHITE }
+        return Bitmap.createBitmap(px, m.width, m.height, Bitmap.Config.ARGB_8888)
+    }
+
     private fun showMenu(anchor: View) {
         val ink = getColor(R.color.simple_ink)
         val dim = 0xFF80868B.toInt()
@@ -630,6 +625,17 @@ class MainActivity : Activity() {
             elevation = dp(8f)
         }
         val popup = PopupWindow(menu, dp(264), ViewGroup.LayoutParams.WRAP_CONTENT, true)
+        menu.addView(TextView(this).apply {
+            text = "Поделиться приложением"
+            textSize = 14f
+            gravity = Gravity.CENTER_VERTICAL
+            setTextColor(ink)
+            setPadding(side, 0, side, 0)
+            setOnClickListener {
+                popup.dismiss()
+                showShareDialog()
+            }
+        }, LinearLayout.LayoutParams(-1, dp(46)))
         menu.addView(TextView(this).apply {
             text = "Политика конфиденциальности ↗"
             textSize = 14f
@@ -717,8 +723,6 @@ class MainActivity : Activity() {
         if (requestCode == VPN_REQUEST_CODE && resultCode == RESULT_OK) {
             launchService()
         }
-        // The settings screen answers RESULT_CANCELED either way.
-        if (requestCode == INSTALL_PERMISSION_CODE && Updater.canInstall(this)) startUpdate()
     }
 
     private fun launchService() {

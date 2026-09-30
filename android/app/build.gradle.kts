@@ -84,8 +84,8 @@ android {
         applicationId = "org.newvpn" // Play Console package; Kotlin namespace stays
         minSdk = 26
         targetSdk = 36
-        versionCode = 115 // an earlier internal release in Play took 68
-        versionName = "0.6.0"
+        versionCode = 116 // an earlier internal release in Play took 68
+        versionName = "0.6.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("long", "INTEGRITY_PROJECT", "${integrityProject}L")
         buildConfigField("String", "ENDPOINTS", "\"$endpointsBlob\"")
@@ -133,6 +133,7 @@ android {
 dependencies {
     implementation(files("libs/tunnel.aar"))
     implementation("androidx.core:core:1.13.1")
+    implementation("com.google.zxing:core:3.5.3")
     implementation("com.google.android.play:integrity:1.4.0")
     implementation(platform("com.google.firebase:firebase-bom:33.8.0")) // config 22.1: custom signals
     implementation("com.google.firebase:firebase-crashlytics")

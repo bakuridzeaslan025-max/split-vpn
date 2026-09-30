@@ -13,10 +13,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -33,11 +33,6 @@ type config struct {
 	UpdateURL     string `json:"update_url"`
 }
 
-// A direct APK link from GitHub releases.
-var updateURLRe = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/releases/download/v[^/]+/[^/]+\.apk$`)
-
-var errPlaceholder = errors.New("config: update_url still has the OWNER/REPO placeholder")
-
 func (c config) validate() error {
 	switch {
 	case c.MinVersion < 1 || c.LatestVersion < 1:
@@ -45,12 +40,9 @@ func (c config) validate() error {
 	case c.MinVersion > c.LatestVersion:
 		return errors.New("config: min_version above latest_version")
 	}
-	m := updateURLRe.FindStringSubmatch(c.UpdateURL)
-	if m == nil {
-		return errors.New("config: update_url must be https://github.com/<owner>/<repo>/releases/download/v…/….apk")
-	}
-	if strings.EqualFold(m[1], "OWNER") || strings.EqualFold(m[2], "REPO") {
-		return errPlaceholder
+	// The download page the app opens in the browser.
+	if u, err := url.Parse(c.UpdateURL); err != nil || u.Scheme != "https" || u.Host == "" {
+		return errors.New("config: update_url must be an https:// page")
 	}
 	return nil
 }

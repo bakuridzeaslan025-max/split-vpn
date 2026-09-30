@@ -3,8 +3,9 @@ package org.duckdns.splitvpn
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.provider.Settings
+import android.graphics.drawable.BitmapDrawable
 import android.view.View
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import java.time.Duration
@@ -50,9 +51,7 @@ class MainActivityTest {
 
     @After
     fun tearDown() {
-        Updater.debug = true
-        MainActivity.update = Updater::update
-        MainActivity.background = { Thread(it, "Update").start() }
+        Versions.debug = true
         activity?.destroy()
         service.destroy()
         ShadowLooper.idleMainLooper()
@@ -257,14 +256,7 @@ class MainActivityTest {
         assertEquals(View.VISIBLE, a.findViewById<View>(R.id.errorAction).visibility)
     }
 
-    private val url = Updater.RELEASES + "v9.9.9/split-vpn.apk"
-    private val calls = mutableListOf<Pair<Long, String>>()
-
-    private fun updater(vararg results: Updater.Result) {
-        val queue = ArrayDeque(results.toList())
-        MainActivity.update = { _, latest, u -> calls += latest to u; queue.removeFirst() }
-        MainActivity.background = { it.run() }
-    }
+    private val url = "https://mirror.example.org/split-vpn/"
 
     /** What :vpn has from Remote Config; any state change pushes a fresh snapshot. */
     private fun rc(min: Long = 0, latest: Long = 0, url: String = this.url) {
@@ -282,9 +274,14 @@ class MainActivityTest {
     private fun MainActivity.text(id: Int) = findViewById<TextView>(id).text.toString()
     private fun nextActivity() = shadowOf(app).nextStartedActivity
 
+    private fun assertOpens(url: String) {
+        val i = nextActivity()
+        assertEquals(Intent.ACTION_VIEW, i.action)
+        assertEquals(url, i.dataString)
+    }
+
     @Test
-    fun requiredUpdateIsAnErrorWithUpdateButton() {
-        updater(Updater.Result.DISABLED)
+    fun requiredUpdateIsAnErrorThatOpensThePage() {
         val a = launch()
         rc(min = newer, latest = newer)
         TunnelState.set(VpnState.ERROR, TunnelVpnService.ERR_UPDATE_REQUIRED)
@@ -293,24 +290,30 @@ class MainActivityTest {
         assertEquals("Эта версия больше не поддерживается — обновите приложение", a.text(R.id.errorText))
         assertEquals("Обновить", a.text(R.id.errorAction))
         a.findViewById<View>(R.id.errorAction).performClick()
-        assertEquals(listOf(newer to url), calls)
-        // Debug: Updater refuses, the button still leads somewhere.
-        val i = nextActivity()
-        assertEquals(Intent.ACTION_VIEW, i.action)
-        assertEquals(Updater.RELEASES_PAGE, i.dataString)
+        assertOpens(url)
     }
 
     @Test
-    fun softBannerNamesTheVersion() {
-        Updater.debug = false
+    fun softBannerOpensThePage() {
+        Versions.debug = false
         val a = launch()
         assertEquals(View.GONE, a.updateBox())
         rc(latest = newer)
         assertEquals(View.VISIBLE, a.updateBox())
-        assertEquals("Доступна версия 9.9.9", a.text(R.id.updateText))
-        assertEquals("Обновить", a.text(R.id.updateAction))
-        rc(latest = newer, url = Updater.RELEASES + "latest/split-vpn.apk")
         assertEquals("Доступна новая версия", a.text(R.id.updateText))
+        assertEquals("Обновить", a.text(R.id.updateAction))
+        a.findViewById<View>(R.id.updateAction).performClick()
+        assertOpens(url)
+        assertEquals(View.VISIBLE, a.updateBox())
+    }
+
+    @Test
+    fun notHttpsFromRemoteConfigFallsBackToOurPage() {
+        Versions.debug = false
+        val a = launch()
+        rc(latest = newer, url = "http://mirror.example.org/")
+        a.findViewById<View>(R.id.updateAction).performClick()
+        assertOpens(Versions.DOWNLOAD_PAGE)
     }
 
     @Test
@@ -318,14 +321,14 @@ class MainActivityTest {
         val a = launch()
         rc(latest = newer)
         assertEquals(View.GONE, a.updateBox())
-        Updater.debug = false
+        Versions.debug = false
         rc(latest = BuildConfig.VERSION_CODE.toLong())
         assertEquals(View.GONE, a.updateBox())
     }
 
     @Test
     fun closedBannerStaysClosedUntilTheNextVersion() {
-        Updater.debug = false
+        Versions.debug = false
         rc(latest = newer)
         var a = launch()
         assertEquals(View.VISIBLE, a.updateBox())
@@ -339,108 +342,16 @@ class MainActivityTest {
     }
 
     @Test
-    fun updateShowsProgressAndStartedLeavesTheRestToTheSystem() {
-        Updater.debug = false
-        var job: Runnable? = null
-        MainActivity.update = { _, _, _ -> Updater.Result.STARTED }
-        MainActivity.background = { job = it }
-        val a = launch()
-        rc(latest = newer)
-        a.findViewById<View>(R.id.updateAction).performClick()
-        assertEquals("Скачивается…", a.text(R.id.updateAction))
-        job!!.run()
-        assertEquals("Обновить", a.text(R.id.updateAction))
-        assertEquals(null, nextActivity())
-    }
-
-    @Test
-    fun needPermissionAsksAndRetriesOnReturn() {
-        Updater.debug = false
-        updater(Updater.Result.NEED_PERMISSION, Updater.Result.STARTED)
-        val a = launch()
-        rc(latest = newer)
-        a.findViewById<View>(R.id.updateAction).performClick()
-        val ask = nextActivity()
-        assertEquals(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, ask.action)
-        shadowOf(app.packageManager).setCanRequestPackageInstalls(true)
-        shadowOf(a).receiveResult(ask, android.app.Activity.RESULT_CANCELED, null)
-        assertEquals(2, calls.size)
-    }
-
-    @Test
-    fun deniedPermissionDoesNotLoop() {
-        Updater.debug = false
-        updater(Updater.Result.NEED_PERMISSION)
-        val a = launch()
-        rc(latest = newer)
-        a.findViewById<View>(R.id.updateAction).performClick()
-        shadowOf(app.packageManager).setCanRequestPackageInstalls(false)
-        shadowOf(a).receiveResult(nextActivity(), android.app.Activity.RESULT_CANCELED, null)
-        assertEquals(1, calls.size)
-    }
-
-    @Test
-    fun failedDownloadOffersTheBrowser() {
-        Updater.debug = false
-        updater(Updater.Result.FAILED)
-        val a = launch()
-        rc(latest = newer)
-        a.findViewById<View>(R.id.updateAction).performClick()
-        assertEquals("Не удалось скачать", ShadowToast.getTextOfLatestToast())
-        val i = nextActivity()
-        assertEquals(Intent.ACTION_VIEW, i.action)
-        assertEquals(url, i.dataString)
-    }
-
-    @Test
-    fun badUrlOpensTheReleasesPageNotTheUrl() {
-        Updater.debug = false
-        updater(Updater.Result.BAD_URL)
-        val a = launch()
-        rc(latest = newer)
-        a.findViewById<View>(R.id.updateAction).performClick()
-        assertEquals(Updater.RELEASES_PAGE, nextActivity().dataString)
-    }
-
-    @Test
-    fun upToDateHidesAndBusyIsIgnored() {
-        Updater.debug = false
-        updater(Updater.Result.BUSY, Updater.Result.UP_TO_DATE)
-        val a = launch()
-        rc(latest = newer)
-        a.findViewById<View>(R.id.updateAction).performClick()
-        assertEquals(null, nextActivity())
-        assertEquals(View.VISIBLE, a.updateBox())
-        assertEquals("Обновить", a.text(R.id.updateAction))
-        a.findViewById<View>(R.id.updateAction).performClick()
-        assertEquals(View.GONE, a.updateBox())
-    }
-
-    @Test
-    fun notificationActionUpdatesOnceTheSnapshotArrives() {
-        Updater.debug = false
-        updater(Updater.Result.STARTED)
+    fun notificationActionOpensThePageOnceTheSnapshotArrives() {
+        Versions.debug = false
         app.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).edit()
             .putLong(RemoteConfig.KEY_LATEST_VERSION, newer).putString(RemoteConfig.KEY_UPDATE_URL, url).commit()
         launch(intent = Intent(app, MainActivity::class.java).putExtra(MainActivity.EXTRA_UPDATE, true))
-        assertEquals(listOf(newer to url), calls)
-    }
-
-    // min_version raised, latest_version not: nothing to download, the page still helps.
-    @Test
-    fun requiredButUpToDateOpensTheReleasesPage() {
-        Updater.debug = false
-        updater(Updater.Result.UP_TO_DATE)
-        val a = launch()
-        rc(min = newer, latest = BuildConfig.VERSION_CODE.toLong())
-        a.findViewById<View>(R.id.errorAction).performClick()
-        assertEquals(Updater.RELEASES_PAGE, nextActivity().dataString)
-        assertEquals(0L, prefs.getLong("update_dismissed", 0))
+        assertOpens(url)
     }
 
     @Test
     fun requiredShowsBeforeAnyTryToConnect() {
-        updater(Updater.Result.DISABLED)
         val a = launch()
         assertEquals(View.GONE, a.findViewById<View>(R.id.errorBox).visibility)
         rc(min = newer, latest = newer)
@@ -449,7 +360,26 @@ class MainActivityTest {
         assertEquals(TunnelVpnService.ERR_UPDATE_REQUIRED, a.text(R.id.errorText))
         assertEquals("Обновить", a.text(R.id.errorAction))
         a.findViewById<View>(R.id.errorAction).performClick()
-        assertEquals(1, calls.size)
+        assertOpens(url)
         assertEquals(View.GONE, a.updateBox())
+    }
+
+    @Test
+    fun shareShowsTheQrAndSendsThePage() {
+        val a = launch()
+        rc(url = url)
+        a.findViewById<View>(R.id.menuButton).performClick()
+        val menu = shadowOf(app).latestPopupWindow.contentView as LinearLayout
+        (0 until menu.childCount).map { menu.getChildAt(it) as TextView }
+            .first { it.text == "Поделиться приложением" }.performClick()
+        val dialog = ShadowDialog.getLatestDialog()
+        assertTrue(dialog.isShowing)
+        assertNotNull((dialog.findViewById<ImageView>(R.id.qr).drawable as BitmapDrawable).bitmap)
+        dialog.findViewById<View>(R.id.send).performClick()
+        val chooser = nextActivity()
+        assertEquals(Intent.ACTION_CHOOSER, chooser.action)
+        @Suppress("DEPRECATION")
+        val send = chooser.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)!!
+        assertTrue(send.getStringExtra(Intent.EXTRA_TEXT)!!.endsWith(url))
     }
 }

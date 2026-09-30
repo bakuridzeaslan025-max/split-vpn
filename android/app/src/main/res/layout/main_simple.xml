@@ -175,6 +175,7 @@
                 android:paddingStart="8dp"
                 android:paddingEnd="8dp"
                 android:fontFamily="sans-serif-medium"
+                android:text="Обновить"
                 android:textSize="14sp" />
 
             <TextView

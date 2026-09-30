@@ -99,7 +99,7 @@ func newFake(t *testing.T, tmpl string) (*fakeRC, *rcClient) {
 	return f, &rcClient{base: srv.URL + "/rc", http: srv.Client(), token: "tok"}
 }
 
-var testConfig = config{MinVersion: 110, LatestVersion: 114, UpdateURL: "https://github.com/o/r/releases/download/v0.5.6/app.apk"}
+var testConfig = config{MinVersion: 110, LatestVersion: 114, UpdateURL: "https://o.github.io/r/"}
 
 // A console-made template: endpoints with its own default and another
 // condition, min_version inside a group, fields the tool does not know.
@@ -294,7 +294,7 @@ func TestConfig(t *testing.T) {
 		_, err := loadConfig(p)
 		return err
 	}
-	const good = "https://github.com/o/r/releases/download/v0.5.6/app.apk"
+	const good = "https://o.github.io/r/"
 	if err := load(`{"min_version":114,"latest_version":115,"update_url":"` + good + `"}`); err != nil {
 		t.Fatal(err)
 	}
@@ -310,33 +310,21 @@ func TestConfig(t *testing.T) {
 		}
 	}
 	for _, u := range []string{
-		"http://github.com/o/r/releases/download/v0.5.6/app.apk",
-		"https://example.org/o/r/releases/download/v0.5.6/app.apk",
-		"https://github.com/o/r/releases/latest/app.apk",
-		"https://github.com/o/r/releases/download/0.5.6/app.apk",
-		"https://github.com/o/r/releases/download/v0.5.6/app.aab",
-		"https://github.com/o/releases/download/v0.5.6/app.apk",
-		"https://github.com/<owner>/<repo>/releases/download/v0.5.6/app.apk",
+		"",
+		"http://o.github.io/r/",
+		"https:///r/",
+		"o.github.io/r/",
+		"javascript:alert(1)",
 	} {
 		if load(`{"min_version":114,"latest_version":115,"update_url":"`+u+`"}`) == nil {
-			t.Errorf("%s: accepted", u)
-		}
-	}
-	for _, u := range []string{
-		"https://github.com/OWNER/REPO/releases/download/v0.5.6/app.apk",
-		"https://github.com/owner/r/releases/download/v0.5.6/app.apk",
-		"https://github.com/o/Repo/releases/download/v0.5.6/app.apk",
-	} {
-		if err := load(`{"min_version":114,"latest_version":115,"update_url":"` + u + `"}`); !errors.Is(err, errPlaceholder) {
-			t.Errorf("%s: got %v", u, err)
+			t.Errorf("%q: accepted", u)
 		}
 	}
 }
 
-// The committed rc/config.json passes the checks rc-push makes, except the
-// placeholder repo until there is a real one: push refuses to publish that.
+// The committed rc/config.json passes the checks rc-push makes.
 func TestRepoConfig(t *testing.T) {
-	if _, err := loadConfig("../config.json"); err != nil && !errors.Is(err, errPlaceholder) {
+	if _, err := loadConfig("../config.json"); err != nil {
 		t.Fatal(err)
 	}
 }
