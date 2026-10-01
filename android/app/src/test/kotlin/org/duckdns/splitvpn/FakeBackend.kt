@@ -57,6 +57,7 @@ internal class FakeBackend : Backend {
     override fun setEndpoint(ep: TunnelVpnService.Endpoint, suspect: Boolean) { endpointsSet += ep; suspects += suspect }
     override fun networkChanged() { events += "networkChanged" }
     override fun networkLost() { events += "networkLost" }
+    override fun dnsChanged() { events += "dnsChanged" }
     override fun probe(url: String) { if (blockProbe) probeGate.await() }
 
     override fun integrityToken(ctx: Context, nonce: ByteArray) = token

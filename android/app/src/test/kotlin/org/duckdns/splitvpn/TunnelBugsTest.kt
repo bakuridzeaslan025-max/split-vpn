@@ -61,23 +61,37 @@ class TunnelBugsTest {
         ShadowLooper.idleMainLooper()
     }
 
+    // Only the default network's resolvers answer protect()ed sockets: a
+    // carrier's refuses them while Wi-Fi is the default (MIUI keeps both up).
     @Test
-    fun networkDnsLoggedOnlyWhenChanged() {
+    fun dnsOfTheDefaultNetworkOnly() {
         start("telegram")
         awaitState(VpnState.CONNECTED)
-        val cm = app.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-        val cb = shadowOf(cm).networkCallbacks.single()
-        val net = ShadowNetwork.newInstance(7)
+        val cb = ReflectionHelpers.getField<android.net.ConnectivityManager.NetworkCallback>(svc, "defaultCallback")
+        val wifi = ShadowNetwork.newInstance(7)
+        val lte = ShadowNetwork.newInstance(8)
         fun lp(vararg dns: String) = android.net.LinkProperties().also { p ->
             ReflectionHelpers.callInstanceMethod<Unit>(
                 p, "setDnsServers", ClassParameter.from(Collection::class.java, dns.map { java.net.InetAddress.getByName(it) })
             )
         }
-        cb.onLinkPropertiesChanged(net, lp("10.0.0.1"))
-        cb.onLinkPropertiesChanged(net, lp("10.0.0.1"))
-        cb.onLinkPropertiesChanged(net, lp("10.0.0.2"))
-        assertEquals(2, logLines().count { it.contains("network $net dns:") })
-        assertEquals("the resolver must still see the current list", "10.0.0.2", be.startedHost!!.dnsServers())
+        be.events.clear()
+        cb.onAvailable(wifi)
+        cb.onLinkPropertiesChanged(wifi, lp("192.168.88.2"))
+        cb.onLinkPropertiesChanged(wifi, lp("192.168.88.2"))
+        assertEquals(1, logLines().count { it.contains("default network $wifi dns:") })
+        assertEquals("192.168.88.2", be.startedHost!!.dnsServers())
+        assertEquals("Go's cache must go with the resolvers", listOf("dnsChanged"), be.events)
+
+        cb.onAvailable(lte)
+        cb.onLinkPropertiesChanged(lte, lp("176.59.31.183", "176.59.31.182"))
+        // A request's callback hears only AVAILABLE of the new one; a lost
+        // of the old one, should it come, does not wipe the new one.
+        cb.onLost(wifi)
+        assertEquals("176.59.31.183\n176.59.31.182", be.startedHost!!.dnsServers())
+        assertEquals(listOf("dnsChanged", "dnsChanged"), be.events)
+        cb.onLost(lte)
+        assertEquals("", be.startedHost!!.dnsServers())
     }
 
     @Test
@@ -303,8 +317,7 @@ class TunnelBugsTest {
     fun networkLostCutsConnections() {
         start("telegram")
         awaitState(VpnState.CONNECTED)
-        val cm = app.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-        val cb = shadowOf(cm).networkCallbacks.single()
+        val cb = ReflectionHelpers.getField<android.net.ConnectivityManager.NetworkCallback>(svc, "netCallback")
         cb.onLost(ShadowNetwork.newInstance(7))
         assertEquals(listOf("start", "networkLost"), be.events)
         cb.onAvailable(ShadowNetwork.newInstance(8))

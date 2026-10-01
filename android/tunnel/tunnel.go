@@ -383,7 +383,13 @@ func NetworkChanged() {
 	if d != nil {
 		d.CloseIdleConnections()
 	}
-	// Answers of the old network's resolver may be local to it.
+	DnsChanged()
+}
+
+// DnsChanged drops the DNS cache: answers of the old network's resolver may
+// be local to it. The host calls it alone when only the default network or
+// its resolvers changed, which says nothing about the relay's health.
+func DnsChanged() {
 	dnsCache.Clear()
 	flushDirectFails()
 }

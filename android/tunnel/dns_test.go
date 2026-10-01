@@ -311,6 +311,62 @@ func TestResolveDNS_DeadResolverTriesNext(t *testing.T) {
 	}
 }
 
+// refusingResolver answers every query on addr:53 with a bare header
+// carrying rc, as a carrier's resolver does to a foreign address.
+func refusingResolver(t *testing.T, addr string, rc dnsmessage.RCode) *atomic.Int32 {
+	pc, err := net.ListenPacket("udp", net.JoinHostPort(addr, "53"))
+	if err != nil {
+		t.Skip("cannot bind: ", err)
+	}
+	t.Cleanup(func() { pc.Close() })
+	var calls atomic.Int32
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			_, from, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			calls.Add(1)
+			resp := make([]byte, 12)
+			copy(resp, buf[:2])
+			resp[2], resp[3] = 0x81, byte(rc)
+			pc.WriteTo(resp, from)
+		}
+	}()
+	return &calls
+}
+
+// A refusal or failure is the server's, not the name's: the next server is
+// asked, then DoH; the app never sees it and it is not cached.
+func TestResolveDNS_RefusedTriesNext(t *testing.T) {
+	for _, rc := range []dnsmessage.RCode{dnsmessage.RCodeRefused, dnsmessage.RCodeServerFailure, dnsmessage.RCodeNotImplemented} {
+		t.Run(rc.String(), func(t *testing.T) {
+			refusing := refusingResolver(t, "127.0.0.2", rc)
+			direct := fakeResolver(t, "127.0.0.1", nil)
+			dohCalls := splitDNS(t, "127.0.0.2\n127.0.0.1")
+			resp := resolveDNS(mustQuery(t, 1, "local.test.", dnsmessage.TypeA))
+			if refusing.Load() != 1 || direct.Load() != 1 || dohCalls.Load() != 0 || rcode(resp) != dnsmessage.RCodeSuccess {
+				t.Fatalf("refusing %d, direct %d, doh %d, rcode %v", refusing.Load(), direct.Load(), dohCalls.Load(), rcode(resp))
+			}
+
+			protector = &fakeProtector{ok: true, dns: "127.0.0.2"}
+			resp = resolveDNS(mustQuery(t, 2, "other.test.", dnsmessage.TypeA))
+			if refusing.Load() != 2 || dohCalls.Load() != 1 || rcode(resp) != dnsmessage.RCodeSuccess {
+				t.Fatalf("all refuse: refusing %d, doh %d, rcode %v", refusing.Load(), dohCalls.Load(), rcode(resp))
+			}
+
+			// DoH down too: nothing answered, so nothing may be cached.
+			doh = fakeDoH(t, dohCalls, func([]byte) ([]byte, error) { return nil, errors.New("relay down") })
+			resolveDNS(mustQuery(t, 3, "third.test.", dnsmessage.TypeA))
+			resolveDNS(mustQuery(t, 4, "third.test.", dnsmessage.TypeA))
+			if refusing.Load() != 4 {
+				t.Fatalf("refusal cached: refusing %d", refusing.Load())
+			}
+		})
+	}
+}
+
 func TestResolveDNS_NoResolversFallsBackToDoH(t *testing.T) {
 	dohCalls := splitDNS(t, "")
 	resp := resolveDNS(mustQuery(t, 1, "local.test.", dnsmessage.TypeA))
