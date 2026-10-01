@@ -48,6 +48,8 @@ internal interface Backend {
     fun setEndpoint(ep: TunnelVpnService.Endpoint, suspect: Boolean)
     fun networkChanged()
     fun networkLost()
+    /** Drops Go's DNS cache only; the relay's health is networkChanged's business. */
+    fun dnsChanged()
     fun probe(url: String)
     /** Play Integrity token for [nonce]; null when unavailable (no project number, no Google services). */
     fun integrityToken(ctx: Context, nonce: ByteArray): ByteArray?
@@ -136,6 +138,7 @@ internal object GoBackend : Backend {
     override fun setEndpoint(ep: TunnelVpnService.Endpoint, suspect: Boolean) = tunnel.Tunnel.setEndpoint(ep.addr, ep.host, ep.path, suspect)
     override fun networkChanged() = tunnel.Tunnel.networkChanged()
     override fun networkLost() = tunnel.Tunnel.networkLost()
+    override fun dnsChanged() = tunnel.Tunnel.dnsChanged()
     override fun probe(url: String) {
         val c = URL(url).openConnection() as HttpURLConnection
         c.requestMethod = "HEAD"
@@ -299,6 +302,7 @@ class TunnelVpnService : VpnService() {
     private val logListener: (List<String>) -> Unit = { pushAll() }
 
     private var netCallback: ConnectivityManager.NetworkCallback? = null
+    private var defaultCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile private var tunnelThread: Thread? = null
     @Volatile private var probeThread: Thread? = null
     // Guards the stopping flag against the CONNECTED transition, so a STOP
@@ -462,7 +466,7 @@ class TunnelVpnService : VpnService() {
     private val host = object : tunnel.Host {
         override fun protect(fd: Long) = this@TunnelVpnService.protect(fd.toInt())
         override fun routesStale() { mainHandler.post { rebuildTunnel("routes stale") } }
-        override fun dnsServers() = synchronized(netDns) { netDns.values.toList().asReversed().flatten().joinToString("\n") }
+        override fun dnsServers() = defaultDns?.second?.joinToString("\n") ?: ""
         override fun relayDown(down: Boolean) {
             relayDown = down
             mainHandler.post {
@@ -475,7 +479,7 @@ class TunnelVpnService : VpnService() {
     }
     @Volatile private var relayDown = false
     // Underlying networks with internet, to tell "no network" from "the
-    // network blocks the server"; guarded by netDns. Not VALIDATED: a
+    // network blocks the server"; guarded by itself. Not VALIDATED: a
     // network that blocks the VDS often fails Android's check too.
     private val networks = mutableSetOf<Network>()
     // elapsedRealtime of the last network to appear / of the set going
@@ -491,7 +495,7 @@ class TunnelVpnService : VpnService() {
     // then would be a wrong diagnosis for a moment, so the old one stays.
     private fun updateWaiting() {
         mainHandler.removeCallbacks(recheckWaiting)
-        val noNetwork = synchronized(netDns) { networks.isEmpty() }
+        val noNetwork = synchronized(networks) { networks.isEmpty() }
         val now = android.os.SystemClock.elapsedRealtime()
         val lostFor = now - netLostAt
         val appearedFor = now - netAppearedAt
@@ -821,9 +825,11 @@ class TunnelVpnService : VpnService() {
         }
     }
 
-    // Resolvers of the underlying networks, newest last. Never the VPN's own:
-    // that one is our fake DNS and would loop.
-    private val netDns = LinkedHashMap<Network, List<String>>()
+    // The system's default network and its resolvers. protect()ed sockets
+    // leave by it, and another network's resolver may refuse them (a
+    // carrier's does a Wi-Fi address). Never the VPN's own: that one is our
+    // fake DNS and would loop.
+    @Volatile private var defaultDns: Pair<Network, List<String>>? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private val disconnectFallback = Runnable {
         synchronized(lock) {
@@ -1054,7 +1060,7 @@ class TunnelVpnService : VpnService() {
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 AppLog.i("network available: $network")
-                synchronized(netDns) { networks += network }
+                synchronized(networks) { networks += network }
                 backend.networkChanged()
                 mainHandler.post {
                     netAppearedAt = android.os.SystemClock.elapsedRealtime()
@@ -1063,15 +1069,8 @@ class TunnelVpnService : VpnService() {
                 }
             }
 
-            override fun onLinkPropertiesChanged(network: Network, lp: LinkProperties) {
-                val dns = lp.dnsServers.mapNotNull { it.hostAddress }
-                // Fires on every link change (signal, addresses), mostly with the same DNS.
-                val old = synchronized(netDns) { netDns.remove(network).also { netDns[network] = dns } }
-                if (dns != old) AppLog.i("network $network dns: $dns")
-            }
-
             override fun onLost(network: Network) {
-                val none = synchronized(netDns) { netDns.remove(network); networks -= network; networks.isEmpty() }
+                val none = synchronized(networks) { networks -= network; networks.isEmpty() }
                 AppLog.i("network lost: $network, cutting relay connections")
                 backend.networkLost()
                 mainHandler.post {
@@ -1090,12 +1089,38 @@ class TunnelVpnService : VpnService() {
         // ones it never reports (restricted carrier networks), and those
         // would never be lost, so airplane mode would go unnoticed.
         netCallback = cb
+
+        val def = object : ConnectivityManager.NetworkCallback() {
+            override fun onLinkPropertiesChanged(network: Network, lp: LinkProperties) {
+                val dns = network to lp.dnsServers.mapNotNull { it.hostAddress }
+                // Fires on every link change (signal, addresses), mostly with the same DNS.
+                if (dns == defaultDns) return
+                defaultDns = dns
+                AppLog.i("default network $network dns: ${dns.second}")
+                // The old resolvers' answers may be local to their network.
+                backend.dnsChanged()
+            }
+
+            override fun onLost(network: Network) {
+                if (defaultDns?.first == network) defaultDns = null
+            }
+        }
+        // The same capabilities as the system's default request, so the best
+        // match is the default network. Only listening from S; below, a
+        // request that follows the default one keeps nothing else up.
+        val request = NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) cm.registerBestMatchingNetworkCallback(request, def, mainHandler)
+        else cm.requestNetwork(request, def, mainHandler)
+        defaultCallback = def
     }
 
     private fun unwatchNetwork() {
         netCallback?.let { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) }
         netCallback = null
-        synchronized(netDns) { netDns.clear(); networks.clear() }
+        defaultCallback?.let { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) }
+        defaultCallback = null
+        defaultDns = null
+        synchronized(networks) { networks.clear() }
     }
 
     private fun fail(msg: String) {

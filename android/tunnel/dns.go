@@ -263,7 +263,8 @@ func resolveDNS(q []byte) []byte {
 // Sites that are not ours are dialed directly, so they need the answer the
 // user's network would get (nearby CDN node, local-only names), not the one
 // the relay's country gets. Truncated answers count as failures: DoH has
-// no size limit.
+// no size limit. The servers are those of the network protect()ed sockets
+// leave by, the system's default one.
 func directQuery(q []byte) ([]byte, error) {
 	p := protector
 	if p == nil {
@@ -305,6 +306,13 @@ func directQueryTo(addr string, q []byte) ([]byte, error) {
 	}
 	if buf[2]&0x02 != 0 {
 		return nil, errors.New("truncated")
+	}
+	// As bionic's res_send: these say nothing about the name, so the next
+	// server is asked. A carrier's resolver refuses queries from outside
+	// its network.
+	switch rc := dnsmessage.RCode(buf[3] & 0x0f); rc {
+	case dnsmessage.RCodeServerFailure, dnsmessage.RCodeNotImplemented, dnsmessage.RCodeRefused:
+		return nil, fmt.Errorf("answer %v", rc)
 	}
 	return buf[:n], nil
 }

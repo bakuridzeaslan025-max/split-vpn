@@ -208,7 +208,7 @@ class CredentialTest {
         shadowOf(cm).networkCallbacks.toList().forEach { it.onAvailable(org.robolectric.shadows.ShadowNetwork.newInstance(7)) }
         awaitState(VpnState.CONNECTED)
         assertArrayEquals(cred, be.startedWith)
-        assertEquals("retry callback leaked; only the tunnel's own stays", 1, shadowOf(cm).networkCallbacks.size)
+        assertEquals("retry callback leaked; only the tunnel's own two stay", 2, shadowOf(cm).networkCallbacks.size)
         val note = shadowOf(app.getSystemService(android.app.NotificationManager::class.java)).getNotification(1)
         assertEquals("VPN включён", note?.extras?.getString(android.app.Notification.EXTRA_TEXT))
     }
