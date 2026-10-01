@@ -12,6 +12,7 @@
 - **Сервер.** nginx с обычным сайтом и relay (`relay/`) за ним, который пересылает байты к нужному адресу.
 - **Split DNS.** Имена выбранных сервисов резолвятся через DoH (Cloudflare) сквозь relay, остальные — обычным резолвером сети.
 - **Remote Config.** Список серверов и номер свежей версии приходят из Firebase Remote Config, поэтому серверы можно менять без выпуска новой версии.
+- **Блокировка рекламы.** Галочка в меню `⋮`, по умолчанию выключена. Резолвер туннеля отвечает «нет такого домена» на рекламные и трекерные домены из встроенного списка (`android/tunnel/adblock.txt`), во всех браузерах и приложениях. Список мягкий: домены, которые есть и в Hagezi Light, и в AdGuard DNS filter, минус исключения `android/adblock/allow.txt`. Рекламу YouTube не убирает.
 
 ## Установка
 
@@ -49,6 +50,7 @@ make tunnel                 # AAR с Go-туннелем → app/libs/tunnel.aar
 make test                   # Go (-race), rc/tool, Kotlin unit
 make -C ../relay test
 make itest                  # инструментальные, только на эмуляторе
+make adblock-list           # пересобрать список рекламных доменов, потом make tunnel
 ```
 
 `android/app/google-services.json` в репо нет: свой из Firebase (пакет `org.newvpn`) или заглушка `google-services.stub.json` — с ней Crashlytics и Remote Config просто не работают.
