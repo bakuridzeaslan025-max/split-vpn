@@ -1,0 +1,9 @@
+# Never blocked, subdomains included. One domain per line.
+# Remote Config, Installations and other Google APIs the app itself needs.
+googleapis.com
+gstatic.com
+crashlytics.com
+# Ad clicks in Google search results go through it.
+googleadservices.com
+# Yandex search ad clicks.
+yabs.yandex.ru

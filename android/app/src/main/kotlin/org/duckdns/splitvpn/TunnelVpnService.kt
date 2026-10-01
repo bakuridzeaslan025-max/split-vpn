@@ -63,6 +63,8 @@ internal interface Backend {
     /** Relay bytes used today and the limit (0: none); over it Go refuses the relay and tells the host. */
     fun setQuota(used: Long, limit: Long)
     fun usage(): Long
+    /** NXDOMAIN for ad domains; set before start. */
+    fun setAdBlock(on: Boolean)
 }
 
 internal object GoBackend : Backend {
@@ -111,6 +113,7 @@ internal object GoBackend : Backend {
     }
     override fun setQuota(used: Long, limit: Long) = tunnel.Tunnel.setQuota(used, limit)
     override fun usage() = tunnel.Tunnel.usage()
+    override fun setAdBlock(on: Boolean) = tunnel.Tunnel.setAdBlock(on)
     override fun integrityToken(ctx: Context, nonce: ByteArray): ByteArray? {
         val project = BuildConfig.INTEGRITY_PROJECT
         if (project == 0L) return null
@@ -155,6 +158,7 @@ class TunnelVpnService : VpnService() {
         const val ACTION_BIND = "org.duckdns.splitvpn.BIND"
         const val EXTRA_SERVICES = "services"
         const val EXTRA_INVITE = "invite"
+        const val EXTRA_ADBLOCK = "adblock"
         // Debug builds only, for the instrumented tests against a relay on
         // the host: "host|ip|port|path", the PEM CA its TLS chains to, and
         // whether to forget the test credential first (renewal cases).
@@ -188,6 +192,7 @@ class TunnelVpnService : VpnService() {
         const val PREFS = "vpn"
         const val KEY_WANTED = "wanted"
         const val KEY_SERVICES = "services"
+        const val KEY_ADBLOCK = "adblock"
         const val KEY_FAILED_AT = "failed_at"
         // A fresh process (bind, sticky restart) does not retry a failed
         // connect sooner than this; explicit START and boot always try.
@@ -342,11 +347,13 @@ class TunnelVpnService : VpnService() {
                 val services = intent?.getStringArrayListExtra(EXTRA_SERVICES)?.toSet()
                     ?: vpnPrefs.getStringSet(KEY_SERVICES, null)
                     ?: Services.ALL.filter { it.defaultEnabled }.map { it.id }.toSet()
+                val adBlock = if (intent?.hasExtra(EXTRA_ADBLOCK) == true) intent.getBooleanExtra(EXTRA_ADBLOCK, false)
+                    else vpnPrefs.getBoolean(KEY_ADBLOCK, false)
                 vpnPrefs.edit().putBoolean(KEY_WANTED, true).apply()
                 cancelRetry()
                 if (BuildConfig.DEBUG) testHooks(intent)
                 startForegroundCompat()
-                startTunnel(services, intent?.getStringExtra(EXTRA_INVITE))
+                startTunnel(services, adBlock, intent?.getStringExtra(EXTRA_INVITE))
             }
         }
         return START_STICKY
@@ -850,7 +857,7 @@ class TunnelVpnService : VpnService() {
         AppLog.i("Go tunnel started via ${it.host}")
     }
 
-    private fun startTunnel(serviceIds: Set<String>, invite: String? = null) {
+    private fun startTunnel(serviceIds: Set<String>, adBlock: Boolean, invite: String? = null) {
         synchronized(lock) {
             // While stopping, the stop thread still owns tunnelThread and Go;
             // wanted stays true, so the next bind/boot brings it back.
@@ -861,7 +868,7 @@ class TunnelVpnService : VpnService() {
             TunnelState.clearLog()
             TunnelState.set(VpnState.CONNECTING)
         }
-        AppLog.i("startTunnel services=$serviceIds")
+        AppLog.i("startTunnel services=$serviceIds adblock=$adBlock")
 
         val enabled = Services.ALL.filter { it.id in serviceIds }
         if (enabled.isEmpty()) {
@@ -882,7 +889,7 @@ class TunnelVpnService : VpnService() {
         getSystemService(NotificationManager::class.java).cancel(QUOTA_NOTIFICATION_ID)
         // Persisted only when these routes really go in, so a null-intent
         // restart reproduces what was running, not what was asked last.
-        vpnPrefs.edit().putStringSet(KEY_SERVICES, serviceIds).apply()
+        vpnPrefs.edit().putStringSet(KEY_SERVICES, serviceIds).putBoolean(KEY_ADBLOCK, adBlock).apply()
         current = null
         mainHandler.removeCallbacks(switchOnNewNetwork)
         networkRoundAt = -ROUND_PAUSE_MS
@@ -934,6 +941,7 @@ class TunnelVpnService : VpnService() {
                 backend.setQuota(used, limitNow)
                 if (Quota.limit(this) != limitNow) mainHandler.post { onNewLimit() }
                 Quota.save(this, used, day)
+                backend.setAdBlock(adBlock)
                 try {
                     startGo(fd, cred, enabled)
                 } catch (e: Exception) {
@@ -1005,7 +1013,7 @@ class TunnelVpnService : VpnService() {
                         if (!vpnPrefs.getBoolean(KEY_WANTED, false) || TunnelState.lastError != ERR_OFFLINE) return@Runnable
                         AppLog.i("network available: $network, renewing the credential")
                         startForegroundCompat()
-                        startTunnel(services, invite)
+                        startTunnel(services, vpnPrefs.getBoolean(KEY_ADBLOCK, false), invite)
                     }.also { mainHandler.postDelayed(it, wait) }
                 }
             }

@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.drawable.BitmapDrawable
 import android.view.View
+import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -221,6 +222,38 @@ class MainActivityTest {
         assertEquals(2, ShadowToast.shownToastCount())
     }
 
+    @Test
+    fun adBlockSwitchInTheMenuIsLockedWhileConnected() {
+        val a = launch()
+        a.findViewById<View>(R.id.menuButton).performClick()
+        val popup = shadowOf(app).latestPopupWindow
+        val item = (popup.contentView as LinearLayout).getChildAt(0)
+        item.performClick()
+        assertEquals(true, prefs.getBoolean("adblock", false))
+        assertTrue(popup.isShowing)
+        val info = AccessibilityNodeInfo.obtain()
+        item.onInitializeAccessibilityNodeInfo(info)
+        assertTrue(info.isCheckable && info.isChecked)
+        connect()
+        item.performClick()
+        assertEquals(true, prefs.getBoolean("adblock", false))
+        assertEquals(1, ShadowToast.shownToastCount())
+    }
+
+    @Test
+    fun adBlockItemSaysWhenItApplies() {
+        fun caption(): String {
+            val a = activity!!.get()
+            a.findViewById<View>(R.id.menuButton).performClick()
+            val texts = ((shadowOf(app).latestPopupWindow.contentView as LinearLayout).getChildAt(0) as LinearLayout).getChildAt(0) as LinearLayout
+            return (texts.getChildAt(1) as TextView).text.toString()
+        }
+        launch()
+        assertEquals("Сработает при следующем включении VPN", caption())
+        connect()
+        assertEquals("Выключите VPN, чтобы изменить", caption())
+    }
+
     // Expired credential, no network: the service waits by itself, so the
     // toggle reads Stop and the list is locked, as when connected.
     @Test
@@ -370,7 +403,7 @@ class MainActivityTest {
         rc(url = url)
         a.findViewById<View>(R.id.menuButton).performClick()
         val menu = shadowOf(app).latestPopupWindow.contentView as LinearLayout
-        (0 until menu.childCount).map { menu.getChildAt(it) as TextView }
+        (0 until menu.childCount).mapNotNull { menu.getChildAt(it) as? TextView }
             .first { it.text == "Поделиться приложением" }.performClick()
         val dialog = ShadowDialog.getLatestDialog()
         assertTrue(dialog.isShowing)

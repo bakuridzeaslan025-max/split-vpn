@@ -187,18 +187,28 @@ func resolveDNS(q []byte) []byte {
 	if len(q) < 12 {
 		return servfail(q)
 	}
+	key := questionKey(q)
+	// Ad domains get NXDOMAIN, any type. Never cached, here or (no SOA) by
+	// clients: with blocking turned off they resolve right after the restart.
+	if adBlock.Load() {
+		if name, _, _ := strings.Cut(key, "/"); blocked(name) {
+			if verbose.Load() {
+				log.Printf("dns %s: blocked", name)
+			}
+			return emptyAnswer(q, dnsmessage.RCodeNameError)
+		}
+	}
 	// HTTPS records carry the ECH config that lets Chrome hide the site
 	// name from the ClientHello, and routing by name needs that name. An
 	// empty answer makes clients fall back to plain SNI (and to TCP: the
 	// same record advertises h3, which the TUN refuses anyway).
 	if questionType(q) == dnsmessage.TypeHTTPS {
-		return emptyAnswer(q)
+		return emptyAnswer(q, dnsmessage.RCodeSuccess)
 	}
-	key := questionKey(q)
 	// The TUN carries no IPv6 routes, so a v6 address of our site would be
 	// dialed straight into the block and only then retried over v4.
 	if name, ok := strings.CutSuffix(key, "/"+dnsmessage.TypeAAAA.String()); ok && relayByName(name) {
-		return emptyAnswer(q)
+		return emptyAnswer(q, dnsmessage.RCodeSuccess)
 	}
 	if key != "" {
 		if v, ok := dnsCache.Load(key); ok {
@@ -410,8 +420,8 @@ func questionType(q []byte) dnsmessage.Type {
 	return qs.Type
 }
 
-// emptyAnswer is NOERROR with the question echoed and no records.
-func emptyAnswer(q []byte) []byte {
+// emptyAnswer is code with the question echoed and no records.
+func emptyAnswer(q []byte, code dnsmessage.RCode) []byte {
 	var p dnsmessage.Parser
 	h, err := p.Start(q)
 	if err != nil {
@@ -421,7 +431,7 @@ func emptyAnswer(q []byte) []byte {
 	if err != nil {
 		return servfail(q)
 	}
-	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: h.ID, Response: true, RecursionDesired: h.RecursionDesired, RecursionAvailable: true})
+	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: h.ID, Response: true, RCode: code, RecursionDesired: h.RecursionDesired, RecursionAvailable: true})
 	b.StartQuestions()
 	b.Question(qs)
 	out, err := b.Finish()

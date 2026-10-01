@@ -27,11 +27,13 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupWindow
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.FileProvider
@@ -57,6 +59,7 @@ class MainActivity : Activity() {
         private const val KEY_KEEPALIVE_SHOWN = "keepalive_shown"
         private const val KEY_TAB = "tab"
         private const val KEY_INVITE = "invite"
+        private const val KEY_ADBLOCK = "adblock"
         // latest_version whose banner was closed; a newer one shows again.
         private const val KEY_UPDATE_DISMISSED = "update_dismissed"
 
@@ -402,12 +405,15 @@ class MainActivity : Activity() {
             val note = row.findViewById<TextView>(R.id.note)
             name.text = labels[svc.id] ?: svc.title
             note.text = ping
-            val track = if (!en) 0xFFDADCE0.toInt() else if (editable) getColor(R.color.simple_blue) else 0xFFBFCBD6.toInt()
-            row.findViewById<View>(R.id.seg).background = box(track, radius = 16f)
-            val knob = row.findViewById<View>(R.id.knob)
-            knob.layoutParams = (knob.layoutParams as FrameLayout.LayoutParams).apply {
-                gravity = if (en) Gravity.END else Gravity.START
-            }
+            renderSwitch(row.findViewById(R.id.seg), row.findViewById(R.id.knob), en)
+        }
+    }
+
+    private fun renderSwitch(seg: View, knob: View, on: Boolean) {
+        val track = if (!on) 0xFFDADCE0.toInt() else if (editable) getColor(R.color.simple_blue) else 0xFFBFCBD6.toInt()
+        seg.background = box(track, radius = 16f)
+        knob.layoutParams = (knob.layoutParams as FrameLayout.LayoutParams).apply {
+            gravity = if (on) Gravity.END else Gravity.START
         }
     }
 
@@ -426,11 +432,7 @@ class MainActivity : Activity() {
         }
         row.setOnClickListener {
             if (!editable) {
-                val now = SystemClock.elapsedRealtime()
-                if (lockedToastAt.let { it == null || now - it > 2000 }) {
-                    lockedToastAt = now
-                    Toast.makeText(this, "Сначала выключите VPN", Toast.LENGTH_SHORT).show()
-                }
+                lockedToast()
                 return@setOnClickListener
             }
             prefs.edit().putBoolean(Services.prefKey(svc.id), !enabled(svc)).apply()
@@ -439,6 +441,14 @@ class MainActivity : Activity() {
         }
         list.addView(row)
         return row
+    }
+
+    private fun lockedToast() {
+        val now = SystemClock.elapsedRealtime()
+        if (lockedToastAt.let { it == null || now - it > 2000 }) {
+            lockedToastAt = now
+            Toast.makeText(this, "Сначала выключите VPN", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun renderStatus() {
@@ -660,6 +670,7 @@ class MainActivity : Activity() {
             elevation = dp(8f)
         }
         val popup = PopupWindow(menu, dp(264), ViewGroup.LayoutParams.WRAP_CONTENT, true)
+        menu.addView(adBlockItem(ink, dim, side))
         menu.addView(TextView(this).apply {
             text = "Поделиться приложением"
             textSize = 14f
@@ -691,6 +702,57 @@ class MainActivity : Activity() {
         menuPopup = popup
         popup.elevation = dp(8f)
         popup.showAsDropDown(anchor, -dp(264 - 44 + 6), 0)
+    }
+
+    // Go reads it at start only, so like the services it is locked while the VPN is on.
+    private fun adBlockItem(ink: Int, dim: Int, side: Int): View {
+        val knob = View(this).apply {
+            setBackgroundResource(R.drawable.simple_knob)
+            elevation = dp(2f)
+        }
+        val seg = FrameLayout(this).apply {
+            setPadding(dp(3), dp(3), dp(3), dp(3))
+            addView(knob, FrameLayout.LayoutParams(dp(26), dp(26)))
+        }
+        renderSwitch(seg, knob, prefs.getBoolean(KEY_ADBLOCK, false))
+        val texts = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(this@MainActivity).apply {
+                text = "Блокировать рекламу"
+                textSize = 14f
+                setTextColor(if (editable) ink else dim)
+            })
+            // 10sp: at 11 the second line is one word on 264dp.
+            addView(TextView(this@MainActivity).apply {
+                text = if (editable) "Сработает при следующем включении VPN" else "Выключите VPN, чтобы изменить"
+                textSize = 10f
+                setTextColor(dim)
+            })
+        }
+        return LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(side, dp(6), side, dp(6))
+            minimumHeight = dp(46)
+            addView(texts, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(12) })
+            addView(seg, LinearLayout.LayoutParams(dp(52), dp(32)))
+            accessibilityDelegate = object : View.AccessibilityDelegate() {
+                override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+                    super.onInitializeAccessibilityNodeInfo(host, info)
+                    info.className = Switch::class.java.name
+                    info.isCheckable = true
+                    info.isChecked = prefs.getBoolean(KEY_ADBLOCK, false)
+                }
+            }
+            setOnClickListener {
+                if (!editable) {
+                    lockedToast()
+                    return@setOnClickListener
+                }
+                val on = !prefs.getBoolean(KEY_ADBLOCK, false)
+                prefs.edit().putBoolean(KEY_ADBLOCK, on).apply()
+                renderSwitch(seg, knob, on)
+            }
+        }
     }
 
     // Vendor activities are undocumented and move between ROM versions;
@@ -765,6 +827,7 @@ class MainActivity : Activity() {
         val intent = Intent(this, TunnelVpnService::class.java).apply {
             action = TunnelVpnService.ACTION_START
             putStringArrayListExtra(TunnelVpnService.EXTRA_SERVICES, ArrayList(enabled))
+            putExtra(TunnelVpnService.EXTRA_ADBLOCK, prefs.getBoolean(KEY_ADBLOCK, false))
             invite?.let { putExtra(TunnelVpnService.EXTRA_INVITE, it) }
         }
         startForegroundService(intent)

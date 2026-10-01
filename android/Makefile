@@ -31,7 +31,7 @@ tunnel: docker-image
 			go mod verify && gomobile bind -target=android/arm64 -androidapi 26 -ldflags "-extldflags=-Wl,-z,max-page-size=16384" -o tunnel.aar .'
 	mv tunnel/tunnel.aar app/libs/tunnel.aar
 
-test: rc-test tunnel-test
+test: rc-test adblock-test tunnel-test
 	./gradlew testDebugUnitTest -q
 
 tunnel-test:
@@ -94,6 +94,19 @@ rc-check rc-promote:
 
 rc-test:
 	docker run --rm --platform linux/amd64 -v $(CURDIR)/../rc:/rc -w /rc/tool $(GO_ALPINE) \
+		sh -c 'go vet ./... && go test ./...'
+
+# tunnel/adblock.txt, the ad domains (tool in adblock/). By hand before a
+# release, like updateRoutes; only adblock/ goes into the container. A
+# temporary file, so a failed download leaves the old list alone.
+.PHONY: adblock-list adblock-test
+adblock-list:
+	docker run --rm --platform linux/amd64 -v $(CURDIR)/adblock:/adblock:ro -w /adblock $(GO_ALPINE) \
+		go run . > tunnel/adblock.txt.tmp && mv tunnel/adblock.txt.tmp tunnel/adblock.txt \
+		|| { rm -f tunnel/adblock.txt.tmp; exit 1; }
+
+adblock-test:
+	docker run --rm --platform linux/amd64 -v $(CURDIR)/adblock:/adblock:ro -w /adblock $(GO_ALPINE) \
 		sh -c 'go vet ./... && go test ./...'
 
 # GitHub releases, built and signed only here (gradle, upload key from

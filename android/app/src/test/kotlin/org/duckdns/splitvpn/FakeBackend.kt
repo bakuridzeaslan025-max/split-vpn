@@ -37,6 +37,7 @@ internal class FakeBackend : Backend {
 
     override fun start(fd: ParcelFileDescriptor, addr: String, sni: String, path: String, cred: ByteArray, domains: String, routes: String, cacheFile: String, host: tunnel.Host, logger: tunnel.Logger) {
         startedDomains = domains
+        startedAdBlock = adBlock
         startedSni = sni
         startedRoutes = routes
         startedHost = host
@@ -82,6 +83,10 @@ internal class FakeBackend : Backend {
     val quotasSet = CopyOnWriteArrayList<Pair<Long, Long>>()
     override fun setQuota(used: Long, limit: Long) { this.used = used; this.limit = limit; quotasSet += used to limit }
     override fun usage() = used
+    @Volatile var adBlock: Boolean? = null
+    /** What setAdBlock had set when start ran. */
+    var startedAdBlock: Boolean? = null
+    override fun setAdBlock(on: Boolean) { adBlock = on }
     override fun register(addr: String, sni: String, path: String, kind: Int, proof: ByteArray): ByteArray {
         registered += kind to proof
         registerError?.let { throw it }
