@@ -1781,7 +1781,6 @@ allfreecounter.com
 allmediadesk.com
 allo-media.net
 allodiapreburn.com
-alloha.tv
 allosponsor.com
 allotssamvat.cfd
 alloviewroll.com
@@ -2388,7 +2387,6 @@ api.kickoffo.site
 api.learnings.ai
 api.mediation.amberweather.com
 api.mintfunnel.co
-api.miui.security.xiaomi.com
 api.mixpanel.com
 api.mobula.ds.duapps.com
 api.mobula.sdk.duapps.com
@@ -2401,7 +2399,6 @@ api.publytics.net
 api.reo.dev
 api.sae.systems
 api.sail-personalize.com
-api.sec.miui.com
 api.service.belboon.com
 api.setting.intl.miui.com
 api.shanghailingye.cn
@@ -2803,8 +2800,6 @@ aurjtqfdvqdgh.site
 aurum.tirto.id
 auslanced.com
 autecyspatha.cyou
-auth.be.sec.miui.com
-authbe.sec.intl.miui.com
 authoritativepaulbasic.com
 auto-ping.com
 autoaudience.com
@@ -4098,7 +4093,6 @@ carsarace.com
 cartingculpaeslab.cyou
 carts.guru
 cartx.cloud
-cas.avalon.perfdrive.com
 cas.criteo.com
 casalemedia.com
 cascarapharynx.cyou
@@ -4260,7 +4254,6 @@ cdn.mgid.com
 cdn.myadmessenger.com
 cdn.optmn.cloud
 cdn.particularaudience.com
-cdn.perfdrive.com
 cdn.playwire.com
 cdn.polarbyte.com
 cdn.popcash.net
@@ -7975,8 +7968,6 @@ fossaneamputee.shop
 foudebfbfvsom.space
 foundationhorny.com
 foundtr.com
-fourier.alibaba.com
-fourier.aliexpress.com
 fourier.taobao.com
 fourlevelsgame.com
 fourragjejunal.shop
@@ -8798,7 +8789,6 @@ growth.nwea.org
 growthbuddy.app
 growthrx.in
 grrfeedqkfmbq.site
-grs.hicloud.com
 grtyv.com
 grubblepuffwig.com
 grubcolobus.cyou
@@ -12279,7 +12269,6 @@ modulartempletelve.cyou
 module.profitroom.com
 moduleanalysis.aliexpress.com
 moe.video
-moevideo.biz
 mogmsaastslor.site
 mogointeractive.com
 moguldom.com

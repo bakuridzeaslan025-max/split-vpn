@@ -7,3 +7,19 @@ crashlytics.com
 googleadservices.com
 # Yandex search ad clicks.
 yabs.yandex.ru
+# Xiaomi Security: the scan on APK install (our update path), MiPush.
+# adv.sec.miui.com and the telemetry stay blocked.
+api.sec.miui.com
+auth.be.sec.miui.com
+authbe.sec.intl.miui.com
+api.miui.security.xiaomi.com
+# Huawei/Honor HMS look up their regional endpoints here.
+grs.hicloud.com
+# Players of pirate movie sites: blocking them stops the movie, not the ads.
+alloha.tv
+moevideo.biz
+# AliExpress risk control: without it, "slide to verify" loops at login.
+fourier.aliexpress.com
+fourier.alibaba.com
+# Radware Bot Manager: guarded sites show a block page without it.
+perfdrive.com
