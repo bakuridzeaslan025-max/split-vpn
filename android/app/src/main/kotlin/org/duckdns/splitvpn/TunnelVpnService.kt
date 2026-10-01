@@ -197,6 +197,11 @@ class TunnelVpnService : VpnService() {
         // A fresh process (bind, sticky restart) does not retry a failed
         // connect sooner than this; explicit START and boot always try.
         const val RESUME_BACKOFF_MS = 60_000L
+        // After a registration refusal: retrying every resume only collects
+        // more refusals, yet a refusal can be the issuer's own outage or a
+        // late GMS after boot, so wanted stays and the retry is just rarer.
+        const val KEY_NEED_CODE = "need_code"
+        const val NEED_CODE_BACKOFF_MS = 3600_000L
         // A listed site resolved outside the routes: the TUN is rebuilt with
         // the cached subnets, at most this often (rebuilds cut sessions).
         const val REBUILD_MIN_GAP_MS = 10 * 60_000L
@@ -318,7 +323,7 @@ class TunnelVpnService : VpnService() {
         // still wants the tunnel — bring it up without a tap.
         val failedAgo = System.currentTimeMillis() - vpnPrefs.getLong(KEY_FAILED_AT, 0)
         if (vpnPrefs.getBoolean(KEY_WANTED, false) && TunnelState.state == VpnState.DISCONNECTED &&
-            failedAgo > RESUME_BACKOFF_MS
+            failedAgo > if (vpnPrefs.getBoolean(KEY_NEED_CODE, false)) NEED_CODE_BACKOFF_MS else RESUME_BACKOFF_MS
         ) {
             AppLog.i("wanted=true on create, resuming")
             startForegroundService(Intent(this, TunnelVpnService::class.java).setAction(ACTION_START))
@@ -889,7 +894,7 @@ class TunnelVpnService : VpnService() {
         getSystemService(NotificationManager::class.java).cancel(QUOTA_NOTIFICATION_ID)
         // Persisted only when these routes really go in, so a null-intent
         // restart reproduces what was running, not what was asked last.
-        vpnPrefs.edit().putStringSet(KEY_SERVICES, serviceIds).putBoolean(KEY_ADBLOCK, adBlock).apply()
+        vpnPrefs.edit().putStringSet(KEY_SERVICES, serviceIds).putBoolean(KEY_ADBLOCK, adBlock).remove(KEY_NEED_CODE).apply()
         current = null
         mainHandler.removeCallbacks(switchOnNewNetwork)
         networkRoundAt = -ROUND_PAUSE_MS
@@ -977,6 +982,7 @@ class TunnelVpnService : VpnService() {
             } catch (e: Throwable) {
                 AppLog.e("startTunnel failed", e, expected = expected(e))
                 fd?.close()
+                if (e is NeedCode) vpnPrefs.edit().putBoolean(KEY_NEED_CODE, true).apply()
                 // STOP already running: it will report DISCONNECTED itself.
                 if (synchronized(lock) { stopping }) return@Thread
                 if (e is NoServer && e.offline) retryWhenOnline(serviceIds, invite) else fail(e.message ?: e.javaClass.simpleName)

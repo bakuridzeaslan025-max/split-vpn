@@ -5,6 +5,7 @@ import android.content.Intent
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -254,5 +255,55 @@ class CredentialTest {
         start()
         awaitState(VpnState.ERROR)
         assertEquals(TunnelVpnService.ERR_NEED_CODE, TunnelState.lastError)
+    }
+
+    /** Whether a fresh process resumes the tunnel by itself, [failedAgoMs] after the failure. */
+    private fun resumes(failedAgoMs: Long): Boolean {
+        controller.destroy()
+        app.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).edit()
+            .putLong(TunnelVpnService.KEY_FAILED_AT, System.currentTimeMillis() - failedAgoMs).commit()
+        TunnelState.set(VpnState.DISCONNECTED)
+        ShadowLooper.idleMainLooper()
+        while (shadowOf(app).nextStartedService != null) Unit
+        controller = Robolectric.buildService(TunnelVpnService::class.java).create()
+        svc.backend = be
+        return shadowOf(app).nextStartedService?.action == TunnelVpnService.ACTION_START
+    }
+
+    // A refusal keeps the tunnel wanted (it may be the issuer's outage or a
+    // late GMS after boot), but a fresh process retries it hourly, not every minute.
+    @Test
+    fun registrationRejectedResumesHourlyAndTheCodeStillStarts() {
+        online(true)
+        be.token = "tok".toByteArray()
+        be.registerError = Exception("registration rejected")
+        start()
+        awaitState(VpnState.ERROR)
+        assertEquals(TunnelVpnService.ERR_NEED_CODE, TunnelState.lastError)
+        val prefs = app.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE)
+        assertTrue(prefs.getBoolean(TunnelVpnService.KEY_WANTED, false))
+        assertFalse(resumes(2 * 60_000L))
+        assertTrue(resumes(61 * 60_000L))
+
+        val cred = fakeCred(now + 7 * 86400, kind = 2)
+        be.registerError = null
+        be.registerResult = cred
+        start(invite = "abc-123")
+        awaitState(VpnState.CONNECTED)
+        assertArrayEquals(cred, stored())
+        assertTrue(prefs.getBoolean(TunnelVpnService.KEY_WANTED, false))
+        assertFalse(prefs.contains(TunnelVpnService.KEY_NEED_CODE))
+    }
+
+    @Test
+    fun otherFailureResumesAfterAMinute() {
+        online(true)
+        be.token = "tok".toByteArray()
+        be.registerError = Exception("relay reply: EOF")
+        start()
+        awaitState(VpnState.ERROR)
+        assertEquals(TunnelVpnService.ERR_NO_SERVER, TunnelState.lastError)
+        assertFalse(resumes(30_000L))
+        assertTrue(resumes(2 * 60_000L))
     }
 }
