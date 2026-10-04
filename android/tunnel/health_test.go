@@ -34,6 +34,7 @@ func freshHealth(t *testing.T) {
 		health.kinds, health.open = nil, false
 		health.host, health.known, health.probeSoon = nil, false, false
 		health.mu.Unlock()
+		health.lastOK.Store(0)
 		health.wake = nil
 	}
 	reset()
@@ -399,6 +400,9 @@ func TestStart_UnreachableRelayIsNotAnError(t *testing.T) {
 	if d := host.relayDowns(); len(d) != 1 || !d[0] || !errors.Is(health.allow(), errRelayDown) {
 		t.Fatalf("RelayDown %v, breaker open=%v", d, health.allow() != nil)
 	}
+	if LastRelayOK() != 0 {
+		t.Fatal("a failed probe set LastRelayOK")
+	}
 }
 
 // The credential expired during the outage: the relay answering 404 is
@@ -420,6 +424,44 @@ func TestProber_CredRejectedEndsOutage(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("a 404 left the outage on")
+	}
+}
+
+// Only a 101 marks the relay as having carried traffic: a 404 ends the
+// outage all the same, but nothing goes through on a refused credential.
+func TestProber_LastRelayOKOnlyOn101(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		err  error
+	}{{"101", nil}, {"404", ErrCredRejected}, {"timeout", errTimeout}} {
+		h, _, _ := testHealth(t)
+		host := &chanHost{down: make(chan bool, 4)}
+		wake := h.setHost(host)
+		h.unreachableAtStart()
+		<-host.down
+		probed := make(chan struct{}, 4)
+		stop := make(chan struct{})
+		go h.prober(stop, wake, func() error { probed <- struct{}{}; return c.err })
+		awaitProbe := func() {
+			select {
+			case <-probed:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("%s: no probe", c.name)
+			}
+		}
+		h.newNetwork()
+		awaitProbe()
+		if c.err == errTimeout {
+			// The next probe begins only once this one's outcome is recorded.
+			h.newNetwork()
+			awaitProbe()
+		} else if verdict(t, host.down) {
+			t.Fatalf("%s: RelayDown(true)", c.name)
+		}
+		close(stop)
+		if set := h.lastOK.Load() != 0; set != (c.err == nil) {
+			t.Errorf("%s: LastRelayOK set=%v", c.name, set)
+		}
 	}
 }
 

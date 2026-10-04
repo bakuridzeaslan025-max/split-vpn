@@ -1,9 +1,11 @@
 package org.duckdns.splitvpn
 
+import android.provider.Settings
 import com.google.firebase.FirebaseApp
 import com.google.firebase.crashlytics.FirebaseCrashlytics
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -19,6 +21,16 @@ class CrashTest {
 
     @org.junit.Before
     fun setUp() = Endpoints.resetForTests()
+
+    // Pinned: another salt or length would make every device a new user.
+    @Test
+    fun userIdIsAHashOfAndroidId() {
+        val app = RuntimeEnvironment.getApplication()
+        Settings.Secure.putString(app.contentResolver, Settings.Secure.ANDROID_ID, "9774d56d682e549c")
+        assertEquals("817c9dcd0f2b991e", Crash.userId(app))
+        Settings.Secure.putString(app.contentResolver, Settings.Secure.ANDROID_ID, "")
+        assertNull(Crash.userId(app))
+    }
 
     /**
      * Unit tests must never reach the production dashboard. They did once: a

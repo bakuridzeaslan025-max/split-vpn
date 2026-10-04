@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -48,6 +49,10 @@ type relayHealth struct {
 	probeSoon bool
 	wake      chan struct{} // nudges this tunnel's prober: state changed or probeSoon
 	newFails  int           // probes failed while the host waits for a verdict (!known)
+	// Unix seconds of the last session the relay let in, 0 before any;
+	// Stop keeps it. Not under mu: tellLocked calls the host with mu held,
+	// and the host may read it from there.
+	lastOK atomic.Int64
 }
 
 var health = relayHealth{now: time.Now}
@@ -139,6 +144,14 @@ func (h *relayHealth) ok(gen uint64) {
 	h.fails, h.refused, h.pending = 0, 0, false
 	h.netFails, h.kinds, h.open = 0, nil, false
 }
+
+// accepted records a 101. Not part of ok: the prober calls that on a
+// refused credential too, and no traffic goes through then.
+func (h *relayHealth) accepted() { h.lastOK.Store(time.Now().Unix()) }
+
+// LastRelayOK is when the relay last let a session in (101), unix seconds;
+// 0 before any in this process.
+func LastRelayOK() int64 { return health.lastOK.Load() }
 
 // unreachableAtStart: the tunnel comes up anyway and heals itself, like
 // after any outage, instead of failing the start and waiting for a tap.
@@ -261,6 +274,9 @@ func (h *relayHealth) prober(stop, wake <-chan struct{}, probe func() error) {
 		// A 404 means the relay is back and only the credential is not:
 		// apps will see that 404 themselves, and the service re-registers.
 		if err := probe(); err == nil || errors.Is(err, ErrCredRejected) {
+			if err == nil {
+				h.accepted()
+			}
 			h.ok(gen)
 		} else {
 			h.unreachable(gen)

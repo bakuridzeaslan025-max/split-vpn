@@ -1,9 +1,14 @@
 package org.duckdns.splitvpn
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Build
+import android.provider.Settings
 import com.google.firebase.FirebaseApp
+import com.google.firebase.analytics.FirebaseAnalytics
 import com.google.firebase.crashlytics.FirebaseCrashlytics
+import java.math.BigInteger
+import java.security.MessageDigest
 
 /**
  * Crashlytics wiring: the log lines that led to a crash, as breadcrumbs.
@@ -59,6 +64,27 @@ object Crash {
             scrubbing = true
             scrubFatals()
         }
+        // After the scrubbing and on its own: Analytics throwing must not cost it.
+        runCatching {
+            val analytics = FirebaseAnalytics.getInstance(ctx)
+            userId(ctx)?.let(analytics::setUserId)
+            // Debug: the SDK's flag outlives the process and goes off seconds
+            // late, so a test run's last START may leave it on for the next
+            // launch. Only :vpn turns it on, by EXTRA_ANALYTICS.
+            if (BuildConfig.DEBUG && process == "ui") analytics.setAnalyticsCollectionEnabled(false)
+        }
+    }
+
+    /**
+     * Analytics' user_id: a hash, the raw ANDROID_ID never leaves. Unlike
+     * Firebase's installation ID it survives a reinstall (it is per device,
+     * signing key and Android user), so a reinstall is not a new user.
+     */
+    @SuppressLint("HardwareIds")
+    internal fun userId(ctx: Context): String? {
+        val id = Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ANDROID_ID)?.takeIf { it.isNotEmpty() } ?: return null
+        val hash = MessageDigest.getInstance("SHA-256").digest((id + "split-vpn").toByteArray())
+        return BigInteger(1, hash).toString(16).padStart(64, '0').take(16)
     }
 
     internal fun scrubFatals() {

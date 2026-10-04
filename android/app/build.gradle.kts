@@ -106,6 +106,7 @@ android {
 
     buildTypes {
         debug {
+            manifestPlaceholders["analyticsEnabled"] = "false"
             if (keystoreFile != null) signingConfig = signingConfigs.getByName("release")
         }
         release {
@@ -114,6 +115,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            manifestPlaceholders["analyticsEnabled"] = "true"
             if (keystoreFile != null) signingConfig = signingConfigs.getByName("release")
         }
     }
@@ -138,6 +140,7 @@ dependencies {
     implementation(platform("com.google.firebase:firebase-bom:33.8.0")) // config 22.1: custom signals
     implementation("com.google.firebase:firebase-crashlytics")
     implementation("com.google.firebase:firebase-config")
+    implementation("com.google.firebase:firebase-analytics")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
     androidTestImplementation("androidx.test:runner:1.6.2")

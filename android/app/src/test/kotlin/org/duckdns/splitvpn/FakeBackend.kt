@@ -88,6 +88,16 @@ internal class FakeBackend : Backend {
     /** What setAdBlock had set when start ran. */
     var startedAdBlock: Boolean? = null
     override fun setAdBlock(on: Boolean) { adBlock = on }
+    /** Go's LastRelayOK, unix seconds. */
+    @Volatile var lastRelayOk = 0L
+    override fun lastRelayOk() = lastRelayOk
+    /** What went to Analytics: event names with their params. */
+    val analytics = CopyOnWriteArrayList<Pair<String, Map<String, String>>>()
+    val userProperties = java.util.concurrent.ConcurrentHashMap<String, String>()
+    @Volatile var analyticsOn: Boolean? = null
+    override fun event(ctx: Context, name: String, params: Map<String, String>) { analytics += name to params }
+    override fun userProperty(ctx: Context, name: String, value: String) { userProperties[name] = value }
+    override fun setAnalytics(ctx: Context, on: Boolean) { analyticsOn = on }
     override fun register(addr: String, sni: String, path: String, kind: Int, proof: ByteArray): ByteArray {
         registered += kind to proof
         registerError?.let { throw it }

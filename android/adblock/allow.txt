@@ -23,3 +23,6 @@ fourier.aliexpress.com
 fourier.alibaba.com
 # Radware Bot Manager: guarded sites show a block page without it.
 perfdrive.com
+# Firebase Analytics — ours and other apps'.
+app-measurement.com
+app-analytics-services.com

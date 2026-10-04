@@ -189,6 +189,41 @@ func TestStart_FailedInitLeavesNoTunFile(t *testing.T) {
 	}
 }
 
+func wantRelayOKSince(t *testing.T, t0 int64) {
+	t.Helper()
+	if got := LastRelayOK(); got < t0 || got > time.Now().Unix() {
+		t.Fatalf("LastRelayOK = %d, want since %d", got, t0)
+	}
+}
+
+// Start's probe getting a 101 is a session the relay let in.
+func TestStart_ProbeSetsLastRelayOK(t *testing.T) {
+	addr, _ := fakeRelay(t)
+	health.lastOK.Store(0)
+	t0 := time.Now().Unix()
+	Start(9999, addr, "relay.test", "/app/x", testCred, "", "", "", nil, nil) // fails later, on the fake fd
+	wantRelayOKSince(t, t0)
+}
+
+// An app's relay session sets it, and Stop does not take it back: the day
+// the relay carried traffic stays that day.
+func TestDialRelay_SetsLastRelayOKAndStopKeepsIt(t *testing.T) {
+	fakeRelay(t)
+	withConns(t)
+	health.lastOK.Store(0)
+	t0 := time.Now().Unix()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := dialRelay(ctx, testCred, net.IPv4(1, 1, 1, 1), 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	wantRelayOKSince(t, t0)
+	Stop()
+	wantRelayOKSince(t, t0)
+}
+
 // Wifi went away: every relay connection is bound to a dead path and would
 // hang for minutes. NetworkLost must cut them so apps reconnect at once,
 // while the tunnel itself keeps accepting new connections.

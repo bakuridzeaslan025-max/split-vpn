@@ -259,6 +259,7 @@ func Start(tunFd int, vpnAddr string, sni string, path string, cred []byte, doma
 	} else if err != nil {
 		health.unreachableAtStart()
 	} else {
+		health.accepted()
 		health.ok(gen)
 	}
 
@@ -637,6 +638,7 @@ func dialRelay(ctx context.Context, cred []byte, dstIP net.IP, dstPort uint16) (
 		}
 		return nil, err
 	}
+	health.accepted()
 	health.ok(gen)
 	rawConn.SetDeadline(time.Time{})
 	c := &trackedConn{Conn: &bufConn{rawConn, br}}

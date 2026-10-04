@@ -129,6 +129,9 @@ func TestDialRelay_V3Rejected(t *testing.T) {
 	if health.down() {
 		t.Fatal("a refused credential counted as the relay being down")
 	}
+	if LastRelayOK() != 0 {
+		t.Fatal("a refused credential set LastRelayOK")
+	}
 }
 
 // nginx answers for a dead relay with 502: an outage, not a credential.
@@ -180,6 +183,9 @@ func TestStart_V3ProbeRejectedBeforeTUN(t *testing.T) {
 	}
 	if s != nil || tunFile != nil {
 		t.Fatal("stack started after rejected probe")
+	}
+	if LastRelayOK() != 0 {
+		t.Fatal("a refused credential set LastRelayOK")
 	}
 }
 

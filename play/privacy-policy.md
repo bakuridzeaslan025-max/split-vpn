@@ -13,7 +13,7 @@
 
 #### 1. Аккаунты и персональные данные
 
-В приложении нет аккаунтов и регистрации. Мы не запрашиваем имя, адрес электронной почты, номер телефона, платёжные данные или другие персональные данные и не собираем их. Используются только технические идентификаторы установки, не связанные с личностью (п. 3, 5 и 7).
+В приложении нет аккаунтов и регистрации. Мы не запрашиваем имя, адрес электронной почты, номер телефона, платёжные данные или другие персональные данные и не собираем их. Используются только технические идентификаторы, не связанные с личностью: идентификаторы установки (п. 3, 5 и 7) и, для статистики использования, хэш идентификатора устройства, который сохраняется при переустановке приложения (п. 7).
 
 #### 2. Что происходит с трафиком
 
@@ -43,11 +43,13 @@
 - **Запрос отключения оптимизации батареи** — по желанию пользователя, чтобы система не останавливала VPN в фоне.
 - **Автозапуск после перезагрузки** — восстановление VPN, если он был включён до перезагрузки.
 
-#### 7. Отчёты о сбоях, настройки и третьи стороны
+#### 7. Отчёты о сбоях, статистика, настройки и третьи стороны
 
 Для диагностики сбоев приложение использует Firebase Crashlytics (Google). При сбое или внутренней ошибке в Google автоматически отправляется отчёт: стек вызовов, модель устройства, версии Android и приложения, идентификатор установки Firebase, список включённых в приложении сервисов и последние технические строки журнала приложения. Перед отправкой из них удаляются сетевые адреса, а строки с именами сайтов, к которым подключался пользователь, в отчёт не попадают вовсе. Отчёты хранятся до 90 дней и используются только для исправления ошибок; Google обрабатывает их по нашему поручению в соответствии со своей политикой конфиденциальности. Отключить отправку отчётов в приложении нельзя.
 
-Настройки приложения (список серверов, номер последней версии, адрес страницы загрузки) приходят из Firebase Remote Config (Google): приложение запрашивает их при включении VPN и затем раз в несколько часов. В запросе передаются идентификатор установки Firebase, версии приложения и Android, язык, регион и часовой пояс устройства и тип сборки; сведения о трафике и о том, какие сайты открывал пользователь, не передаются. Кроме Firebase Crashlytics, Firebase Remote Config и Play Integrity API, в приложении нет сторонних SDK; рекламы, рекламных идентификаторов и трекеров нет. Мы не продаём данные и не передаём их третьим лицам для их собственных целей.
+Для статистики использования (сколько устройств пользуются VPN, почему не удаётся подключиться) приложение использует Google Analytics для Firebase (Google). Приложение отправляет события трёх видов, каждое не чаще раза в сутки (неудачное подключение — раз в сутки на каждую причину): VPN работал (через сервер прошло хотя бы одно соединение); VPN не удалось включить или сервер недоступен — с причиной из короткого фиксированного списка (например, «нет сети», «нужен код доступа»), без текста ошибки; исчерпан дневной лимит трафика. Кроме того, SDK сам отмечает первый запуск, обновление и удаление приложения и начало сеанса. С событиями передаются: включена ли блокировка рекламы, версии приложения и Android, модель устройства, язык, примерное местоположение (страна, город), которое Google определяет по IP-адресу, случайный идентификатор установки и идентификатор пользователя — усечённый хэш SHA-256 от Android ID. Сам Android ID не передаётся; хэш сохраняется при переустановке приложения и меняется при сбросе устройства к заводским настройкам. Рекламный идентификатор, сетевые адреса, имена сайтов и сервисов, которые открывал пользователь, не передаются; рекламные функции, Google Signals и передача данных Google для его собственных целей отключены. Данные хранятся до 14 месяцев. Отключить статистику в приложении нельзя.
+
+Настройки приложения (список серверов, номер последней версии, адрес страницы загрузки) приходят из Firebase Remote Config (Google): приложение запрашивает их при включении VPN и затем раз в несколько часов. В запросе передаются идентификатор установки Firebase, версии приложения и Android, язык, регион и часовой пояс устройства и тип сборки; сведения о трафике и о том, какие сайты открывал пользователь, не передаются. Кроме Firebase Crashlytics, Google Analytics для Firebase, Firebase Remote Config и Play Integrity API, в приложении нет сторонних SDK; рекламы, рекламных идентификаторов и рекламных трекеров нет. Мы не продаём данные и не передаём их третьим лицам для их собственных целей.
 
 #### 8. Дети
 
@@ -71,7 +73,7 @@ Split VPN (package `org.newvpn`) is an Android app that routes traffic of the se
 
 #### 1. Accounts and personal data
 
-The app has no accounts and no sign-up. We do not ask for or collect your name, e-mail address, phone number, payment details or any other personal data. Only technical installation identifiers that are not linked to your identity are used (sections 3, 5 and 7).
+The app has no accounts and no sign-up. We do not ask for or collect your name, e-mail address, phone number, payment details or any other personal data. Only technical identifiers that are not linked to your identity are used: installation identifiers (sections 3, 5 and 7) and, for usage statistics, a hash of the device identifier that persists if the app is reinstalled (section 7).
 
 #### 2. What happens to your traffic
 
@@ -101,11 +103,13 @@ To get server access without sign-up, on first launch and about once a week the 
 - **Request to ignore battery optimizations** — optional, at the user's request, so the system does not stop the VPN in the background.
 - **Start after reboot** — restores the VPN if it was on before the reboot.
 
-#### 7. Crash reports, settings and third parties
+#### 7. Crash reports, usage statistics, settings and third parties
 
 To diagnose crashes the app uses Firebase Crashlytics (Google). When the app crashes or hits an internal error, a report is sent to Google automatically: the stack trace, device model, Android and app versions, the Firebase installation ID, the list of services enabled in the app and the most recent technical lines of the app log. Network addresses are removed from them before sending, and lines naming the sites the user connected to are never included. Reports are kept for up to 90 days and are used only to fix bugs; Google processes them on our behalf under its own privacy policy. Crash reporting cannot be turned off in the app.
 
-The app's settings (the server list, the latest version number, the download page address) come from Firebase Remote Config (Google): the app requests them when the VPN is turned on and then every few hours. The request carries the Firebase installation ID, the app and Android versions, the device language, region and time zone, and the build type; nothing about the traffic or the sites the user visited is sent. Apart from Firebase Crashlytics, Firebase Remote Config and the Play Integrity API the app contains no third-party SDKs, and no ads, advertising identifiers or trackers. We do not sell data or share it with third parties for their own purposes.
+For usage statistics (how many devices use the VPN, why connecting fails) the app uses Google Analytics for Firebase (Google). The app sends three kinds of events, each at most once a day (a failed connection — once a day per reason): the VPN worked (at least one connection went through the server); the VPN could not be turned on or the server is unreachable — with a reason from a short fixed list (for example, “no network”, “access code needed”), without the error text; the daily traffic limit was used up. In addition, the SDK itself records the first launch, updates and removal of the app and the start of a session. The events carry: whether ad blocking is on, the app and Android versions, the device model, language, approximate location (country, city) that Google derives from the IP address, a random installation identifier and a user identifier — a truncated SHA-256 hash of the Android ID. The Android ID itself is not sent; the hash persists if the app is reinstalled and changes after a factory reset. The advertising identifier, network addresses and the names of sites and services the user opened are not sent; advertising features, Google signals and data sharing with Google for its own purposes are turned off. The data is kept for up to 14 months. Usage statistics cannot be turned off in the app.
+
+The app's settings (the server list, the latest version number, the download page address) come from Firebase Remote Config (Google): the app requests them when the VPN is turned on and then every few hours. The request carries the Firebase installation ID, the app and Android versions, the device language, region and time zone, and the build type; nothing about the traffic or the sites the user visited is sent. Apart from Firebase Crashlytics, Google Analytics for Firebase, Firebase Remote Config and the Play Integrity API the app contains no third-party SDKs, and no ads, advertising identifiers or ad trackers. We do not sell data or share it with third parties for their own purposes.
 
 #### 8. Children
 
