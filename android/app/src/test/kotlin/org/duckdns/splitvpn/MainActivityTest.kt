@@ -4,15 +4,18 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.drawable.BitmapDrawable
+import android.net.Uri
 import android.view.View
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import java.io.File
 import java.time.Duration
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -414,5 +417,40 @@ class MainActivityTest {
         @Suppress("DEPRECATION")
         val send = chooser.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)!!
         assertTrue(send.getStringExtra(Intent.EXTRA_TEXT)!!.endsWith(url))
+    }
+
+    @Test
+    fun shareLogSendsOneFile() {
+        AppLog.dir(app).mkdirs()
+        File(AppLog.dir(app), AppLog.ROTATED).writeText("old 1\n")
+        File(AppLog.dir(app), AppLog.FILE).writeText("new 1\n")
+        val a = launch()
+        a.findViewById<View>(R.id.shareLogButton).performClick()
+        val chooser = nextActivity()
+        assertEquals(Intent.ACTION_CHOOSER, chooser.action)
+        @Suppress("DEPRECATION")
+        val send = chooser.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)!!
+        assertEquals(Intent.ACTION_SEND, send.action)
+        assertTrue(send.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0)
+        @Suppress("DEPRECATION")
+        val uri = send.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)!!
+        assertEquals(1, send.clipData!!.itemCount)
+        assertEquals(uri, send.clipData!!.getItemAt(0).uri)
+        val file = File(File(app.cacheDir, AppLog.SHARE_DIR), uri.lastPathSegment!!)
+        assertTrue(file.readLines().first().startsWith("Split VPN ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) · "))
+    }
+
+    @Test
+    fun shareLogToastsWhenTheFileCannotBeSaved() {
+        AppLog.dir(app).mkdirs()
+        File(AppLog.dir(app), AppLog.FILE).writeText("new 1\n")
+        // A file in place of cacheDir breaks mkdirs even for root, unlike a read-only dir.
+        val cache = app.cacheDir
+        cache.deleteRecursively()
+        cache.writeText("")
+        val a = launch()
+        a.findViewById<View>(R.id.shareLogButton).performClick()
+        assertEquals("Не удалось сохранить лог", ShadowToast.getTextOfLatestToast())
+        assertNull(nextActivity())
     }
 }

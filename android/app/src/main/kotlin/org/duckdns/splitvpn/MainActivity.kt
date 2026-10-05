@@ -40,6 +40,7 @@ import androidx.core.content.FileProvider
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
+import java.io.IOException
 
 class MainActivity : Activity() {
 
@@ -766,19 +767,26 @@ class MainActivity : Activity() {
     }
 
     private fun shareLog() {
-        val files = AppLog.files(this)
-        if (files.isEmpty()) {
+        val header = "Split VPN ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) · " +
+            "${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"
+        val file = try {
+            AppLog.export(this, header)
+        } catch (_: IOException) {
+            Toast.makeText(this, "Не удалось сохранить лог", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (file == null) {
             Toast.makeText(this, "Лог пока пустой", Toast.LENGTH_SHORT).show()
             return
         }
-        val uris = ArrayList(files.map { FileProvider.getUriForFile(this, "$packageName.logs", it) })
-        val send = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+        val uri = FileProvider.getUriForFile(this, "$packageName.logs", file)
+        val send = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
-            putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            putExtra(Intent.EXTRA_STREAM, uri)
             putExtra(Intent.EXTRA_SUBJECT, "Лог Split VPN")
             // createChooser only forwards the URI grant to the chooser (which
-            // previews the files) when it is expressed as ClipData.
-            clipData = ClipData.newRawUri("log", uris[0]).also { c -> uris.drop(1).forEach { c.addItem(ClipData.Item(it)) } }
+            // previews the file) when it is expressed as ClipData.
+            clipData = ClipData.newRawUri("log", uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         startActivity(Intent.createChooser(send, "Поделиться логом"))

@@ -3,6 +3,7 @@ package org.duckdns.splitvpn
 import android.content.Context
 import android.util.Log
 import java.io.File
+import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import java.io.IOException
 import java.text.SimpleDateFormat
@@ -20,6 +21,7 @@ object AppLog {
     const val FILE = "vpn.log"
     const val ROTATED = "vpn.log.1"
     const val MAX_BYTES = 1L shl 20
+    const val SHARE_DIR = "share"
 
     /** Held for the lifetime of the process: Go keeps calling it from its own
      * goroutines, long after whoever passed it in has returned. */
@@ -35,6 +37,32 @@ object AppLog {
     /** Existing log files, newest first. */
     fun files(ctx: Context): List<File> =
         listOf(FILE, ROTATED).map { File(dir(ctx), it) }.filter { it.exists() }
+
+    /**
+     * Both files as one, oldest line first, under [header]. Sent as two, they
+     * reach a messenger as "vpn.log (1)" and "vpn.log.1 (2)" with no hint
+     * which is older. Null when nothing has been logged yet.
+     */
+    fun export(ctx: Context, header: String, now: Date = Date()): File? {
+        val parts = files(ctx).reversed()
+        if (parts.isEmpty()) return null
+        val out = File(ctx.cacheDir, SHARE_DIR)
+        out.deleteRecursively()
+        out.mkdirs()
+        val name = SimpleDateFormat("yyyy-MM-dd-HHmm", Locale.US).format(now)
+        return File(out, "split-vpn-$name.log").also { f ->
+            f.outputStream().use { o ->
+                o.write("$header\n".toByteArray())
+                for (p in parts) {
+                    // :vpn may be renaming vpn.log to vpn.log.1 right now.
+                    try {
+                        p.inputStream().use { it.copyTo(o) }
+                    } catch (_: FileNotFoundException) {
+                    }
+                }
+            }
+        }
+    }
 
     @Synchronized
     fun init(ctx: Context) {
