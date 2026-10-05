@@ -106,6 +106,7 @@ android {
 
     buildTypes {
         debug {
+            versionNameSuffix = "-debug"
             manifestPlaceholders["analyticsEnabled"] = "false"
             if (keystoreFile != null) signingConfig = signingConfigs.getByName("release")
         }
