@@ -55,7 +55,9 @@ func relayByName(name string) bool {
 
 // dialDirect opens a plain socket past the TUN for a site that is not ours.
 func dialDirect(ctx context.Context, network, dst string) (net.Conn, error) {
-	d := &net.Dialer{Timeout: handshakeTimeout}
+	// No probes: on the hours-long mtalk socket they cost battery, and GMS
+	// has its own heartbeat.
+	d := &net.Dialer{Timeout: handshakeTimeout, KeepAlive: -1}
 	if p := protector; p != nil {
 		d.Control = func(_, _ string, c syscall.RawConn) error {
 			var ok bool

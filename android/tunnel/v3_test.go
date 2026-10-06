@@ -13,8 +13,11 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 )
 
 // fakeHTTPRelay parses one request and records it. With accept it answers
@@ -217,6 +220,10 @@ func TestDialTLS_ChromeHello(t *testing.T) {
 	c, err := dialTLS(context.Background(), health.generation(), ln.Addr().String(), "relay.test")
 	if err != nil {
 		t.Fatal(err)
+	}
+	raw := c.(*utls.UConn).NetConn()
+	if ka, idle := sockopt(t, raw, syscall.SOL_SOCKET, syscall.SO_KEEPALIVE), sockopt(t, raw, syscall.IPPROTO_TCP, syscall.TCP_KEEPIDLE); ka != 1 || idle != 150 {
+		t.Fatalf("SO_KEEPALIVE %d TCP_KEEPIDLE %d, want 1 and 150", ka, idle)
 	}
 	c.Close()
 	h := <-lastHello
