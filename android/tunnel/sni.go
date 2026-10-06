@@ -20,7 +20,15 @@ var (
 // a new relay list exactly when the relay is down, and googleapis.com is a
 // listed domain: through the relay the fetch would die in DoH. Exact names,
 // resolved by the network and dialed direct like any site not on the list.
-var alwaysDirect = []string{"firebaseremoteconfig.googleapis.com", "firebaseinstallations.googleapis.com"}
+var alwaysDirect = []string{
+	"firebaseremoteconfig.googleapis.com", "firebaseinstallations.googleapis.com",
+	// FCM's persistent connection (google.com is listed too): the relay drops
+	// a session after 2 min idle, FCM heartbeats every 170 s to 29 min, so
+	// through the relay push would reconnect every 2 min.
+	"mtalk.google.com", "mtalk4.google.com", "mtalk-staging.google.com", "mtalk-dev.google.com",
+	"alt1-mtalk.google.com", "alt2-mtalk.google.com", "alt3-mtalk.google.com", "alt4-mtalk.google.com",
+	"alt5-mtalk.google.com", "alt6-mtalk.google.com", "alt7-mtalk.google.com", "alt8-mtalk.google.com",
+}
 
 func setDomains(list string) {
 	relayDomains = relayDomains[:0]

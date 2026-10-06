@@ -75,11 +75,12 @@ func TestPeekClientHello_JoinsSplitRecordAndGivesUpQuietly(t *testing.T) {
 }
 
 func TestRelayByName(t *testing.T) {
-	setDomains("Telegram.org\n.x.com\n\ngooglevideo.com\n")
+	setDomains("Telegram.org\n.x.com\n\ngooglevideo.com\ngoogle.com\n")
 	t.Cleanup(func() { setDomains("") })
 	for name, want := range map[string]bool{
 		"x.com": true, "api.x.com": true, "X.COM.": true, "notx.com": false, "x.com.evil.io": false,
 		"web.telegram.org": true, "rr1---sn-5hnednsz.googlevideo.com": true, "youtube.com": false,
+		"mtalk.google.com": false, "alt3-mtalk.google.com": false, "www.google.com": true,
 	} {
 		if got := relayByName(name); got != want {
 			t.Fatalf("%s: got %v want %v", name, got, want)

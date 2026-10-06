@@ -363,9 +363,19 @@ func TestNetstack_FakeDNSOtherPortsRefusedLocally(t *testing.T) {
 // (here: a local echo), the relay never hears about it, and the hello
 // bytes that were peeked arrive at the destination intact.
 func TestNetstack_UnlistedNameGoesDirect(t *testing.T) {
+	goesDirect(t, "telegram.org", "example.com")
+}
+
+// FCM's host is under a listed domain but on alwaysDirect.
+func TestNetstack_FCMGoesDirect(t *testing.T) {
+	goesDirect(t, "google.com", "mtalk.google.com")
+}
+
+func goesDirect(t *testing.T, domains, name string) {
+	t.Helper()
 	addr, got := fakeRelay(t)
 	withConns(t)
-	setDomains("telegram.org")
+	setDomains(domains)
 	t.Cleanup(func() { setDomains("") })
 	fp := &fakeProtector{ok: true}
 	protector = fp
@@ -399,7 +409,7 @@ func TestNetstack_UnlistedNameGoesDirect(t *testing.T) {
 		c.Close()
 	}()
 	ea := echo.Addr().(*net.TCPAddr)
-	hello := clientHello(t, "example.com")
+	hello := clientHello(t, name)
 
 	p := handshake(t, ep, tcpip.AddrFrom4([4]byte(ea.IP.To4())), uint16(ea.Port))
 	p.send(header.TCPFlagAck|header.TCPFlagPsh, hello)
