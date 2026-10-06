@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -142,6 +143,21 @@ func (f *fakeProtector) relayDowns() []bool {
 	return append([]bool(nil), f.down...)
 }
 
+// sockopt reads an int socket option of c, which must still be open.
+func sockopt(t *testing.T, c net.Conn, level, name int) int {
+	t.Helper()
+	rc, err := c.(*net.TCPConn).SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v int
+	var serr error
+	if err := rc.Control(func(fd uintptr) { v, serr = syscall.GetsockoptInt(int(fd), level, name) }); err != nil || serr != nil {
+		t.Fatal(err, serr)
+	}
+	return v
+}
+
 func TestDialDirect_ProtectsSocket(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -163,6 +179,9 @@ func TestDialDirect_ProtectsSocket(t *testing.T) {
 	c, err := dialDirect(context.Background(), "tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if v := sockopt(t, c, syscall.SOL_SOCKET, syscall.SO_KEEPALIVE); v != 0 {
+		t.Fatalf("SO_KEEPALIVE %d on a direct socket", v)
 	}
 	c.Close()
 	if fds := fp.protected(); len(fds) != 1 || fds[0] <= 0 {

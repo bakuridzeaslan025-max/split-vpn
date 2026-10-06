@@ -704,7 +704,11 @@ var (
 // count against the new one.
 func dialTLS(ctx context.Context, gen uint64, addr, sni string) (net.Conn, error) {
 	t0 := time.Now()
-	raw, err := (&net.Dialer{Timeout: handshakeTimeout}).DialContext(ctx, "tcp", addr)
+	// Idle above the relay's 2 min idle close: a live session ends before
+	// the first probe, a dead path (no onLost) still breaks after ~195 s.
+	raw, err := (&net.Dialer{Timeout: handshakeTimeout, KeepAliveConfig: net.KeepAliveConfig{
+		Enable: true, Idle: 150 * time.Second, Interval: 15 * time.Second, Count: 3,
+	}}).DialContext(ctx, "tcp", addr)
 	if err != nil {
 		health.failed(gen, "connect", fmt.Sprintf("tls: connect %s failed after %s: %v", addr, time.Since(t0).Round(time.Millisecond), err), err)
 		return nil, err
