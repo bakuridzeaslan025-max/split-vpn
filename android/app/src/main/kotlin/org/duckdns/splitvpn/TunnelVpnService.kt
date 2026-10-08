@@ -280,8 +280,15 @@ class TunnelVpnService : VpnService() {
         internal const val NEW_NETWORK_SWITCH_MS = NEW_NETWORK_GRACE_MS + 20_000L
         private const val REPROBE_DELAY_MS = 5_000L
         private const val WHY_NEW_LIST = "new list"
-        private const val CHANNEL_ID = "vpn_channel"
+        internal const val CHANNEL_ID = "vpn_channel"
         private const val NOTIFICATION_ID = 1
+
+        // The UI opens this channel's system page: it must exist before the
+        // service ever posted on it.
+        internal fun createChannel(ctx: Context) {
+            ctx.getSystemService(NotificationManager::class.java)
+                .createNotificationChannel(NotificationChannel(CHANNEL_ID, "Состояние VPN", NotificationManager.IMPORTANCE_LOW))
+        }
         private const val QUOTA_NOTIFICATION_ID = 2
         private const val QUOTA_CHANNEL_ID = "quota_channel"
     }
@@ -368,6 +375,13 @@ class TunnelVpnService : VpnService() {
         Crash.init(this, "vpn")
         TunnelState.subscribe(stateListener)
         TunnelState.subscribeLog(logListener)
+        // The user hid the notification by blocking its channel (the menu
+        // sends them there); unblocking does not bring the posted one back.
+        ContextCompat.registerReceiver(
+            this, channelReceiver,
+            IntentFilter(NotificationManager.ACTION_NOTIFICATION_CHANNEL_BLOCK_STATE_CHANGED),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
         // Process came back (UI bind, boot, sticky restart) while the user
         // still wants the tunnel — bring it up without a tap.
         val failedAgo = System.currentTimeMillis() - vpnPrefs.getLong(KEY_FAILED_AT, 0)
@@ -1216,6 +1230,16 @@ class TunnelVpnService : VpnService() {
         synchronized(networks) { networks.clear() }
     }
 
+    private val channelReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+            if (intent.getStringExtra(NotificationManager.EXTRA_NOTIFICATION_CHANNEL_ID) != CHANNEL_ID) return
+            if (intent.getBooleanExtra(NotificationManager.EXTRA_BLOCKED_STATE, true)) return
+            if (TunnelState.state == VpnState.CONNECTING || TunnelState.state == VpnState.CONNECTED || retryOnNetwork != null) {
+                getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, createNotification())
+            }
+        }
+    }
+
     // Screen on and off: the day's first relay session usually comes in
     // between (unlocked, opened Telegram). The screen woke the phone anyway.
     private var screenReceiver: BroadcastReceiver? = null
@@ -1458,6 +1482,7 @@ class TunnelVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        unregisterReceiver(channelReceiver)
         mainHandler.removeCallbacks(disconnectFallback)
         stopFetching()
         cancelRetry()
@@ -1479,8 +1504,7 @@ class TunnelVpnService : VpnService() {
     }
 
     private fun createNotification(): Notification {
-        val channel = NotificationChannel(CHANNEL_ID, "VPN Service", NotificationManager.IMPORTANCE_LOW)
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        createChannel(this)
         val stopIntent = android.app.PendingIntent.getService(
             this, 0,
             Intent(this, TunnelVpnService::class.java).setAction(ACTION_STOP),

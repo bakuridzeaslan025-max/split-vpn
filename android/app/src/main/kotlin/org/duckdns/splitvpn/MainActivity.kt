@@ -3,6 +3,7 @@ package org.duckdns.splitvpn
 import android.Manifest
 import android.app.Activity
 import android.app.Dialog
+import android.app.NotificationManager
 import android.content.ClipData
 import android.content.ComponentName
 import android.content.Intent
@@ -672,6 +673,7 @@ class MainActivity : Activity() {
         }
         val popup = PopupWindow(menu, dp(264), ViewGroup.LayoutParams.WRAP_CONTENT, true)
         menu.addView(adBlockItem(ink, dim, side))
+        menu.addView(notificationItem(ink, dim, side, popup))
         menu.addView(TextView(this).apply {
             text = "Поделиться приложением"
             textSize = 14f
@@ -752,6 +754,39 @@ class MainActivity : Activity() {
                 val on = !prefs.getBoolean(KEY_ADBLOCK, false)
                 prefs.edit().putBoolean(KEY_ADBLOCK, on).apply()
                 renderSwitch(seg, knob, on)
+            }
+        }
+    }
+
+    // The service stays in the foreground either way; only the system can
+    // hide its notification (the channel, or on 13+ the app's permission).
+    private fun notificationItem(ink: Int, dim: Int, side: Int, popup: PopupWindow): View {
+        val nm = getSystemService(NotificationManager::class.java)
+        TunnelVpnService.createChannel(this)
+        val shown = nm.areNotificationsEnabled() &&
+            nm.getNotificationChannel(TunnelVpnService.CHANNEL_ID).importance != NotificationManager.IMPORTANCE_NONE
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(side, dp(6), side, dp(6))
+            minimumHeight = dp(46)
+            addView(TextView(this@MainActivity).apply {
+                text = "Уведомление в шторке ↗"
+                textSize = 14f
+                setTextColor(ink)
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = if (shown) "Показывается · настроить в системе" else "Скрыто · настроить в системе"
+                textSize = 10f
+                setTextColor(dim)
+            })
+            setOnClickListener {
+                popup.dismiss()
+                startActivity(
+                    Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                        .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                        .putExtra(Settings.EXTRA_CHANNEL_ID, TunnelVpnService.CHANNEL_ID)
+                )
             }
         }
     }
