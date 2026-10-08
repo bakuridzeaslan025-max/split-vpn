@@ -127,7 +127,7 @@ VERIFY_APK = set -o pipefail; certs=$$($(APKSIGNER) verify --print-certs $(1)) &
 	|| { echo "$(1): not signed with the upload key alone"; exit 1; }
 need_tag = $(if $(shell echo '$(TAG)' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$'),,$(error usage: make $@ TAG=vX.Y.Z))
 
-.PHONY: release-local publish-local clean-tree
+.PHONY: release-local publish-local release-notes clean-tree
 # A release is built from a commit: no local edits, no untracked files.
 clean-tree:
 	@test -z "$$(git status --porcelain)" || { git status --short; echo "commit or stash first"; exit 1; }
@@ -146,7 +146,17 @@ release-local: clean-tree tunnel
 publish-local: clean-tree
 	$(need_tag)$(if $(filter v$(VERSION_NAME),$(TAG)),,$(error TAG=$(TAG), but versionName is $(VERSION_NAME)))
 	@test "$$(git rev-parse '$(TAG)^{commit}')" = "$$(git rev-parse HEAD)" || { echo "$(TAG) is not HEAD"; exit 1; }
+	@test -s release-notes/$(TAG).md || { echo "no release-notes/$(TAG).md: write what changed, in Russian"; exit 1; }
 	@$(call VERIFY_APK,$(REL_APK))
 	cd build && shasum -a 256 -c $(notdir $(REL_APK)).sha256
 	cp $(REL_APK) build/split-vpn.apk
-	gh release create $(TAG) --repo $(REPO) --verify-tag --title $(TAG) --notes "SHA-256 сертификата: $(CERT_SHA256)" $(REL_APK) $(REL_APK).sha256 build/split-vpn.apk
+	$(call release_notes,$(TAG))
+	gh release create $(TAG) --repo $(REPO) --verify-tag --title $(TAG) --notes-file build/notes.md $(REL_APK) $(REL_APK).sha256 build/split-vpn.apk
+
+# Rewrites the text of an already published release from release-notes/.
+release-notes:
+	$(need_tag)@test -s release-notes/$(TAG).md || { echo "no release-notes/$(TAG).md"; exit 1; }
+	$(call release_notes,$(TAG))
+	gh release edit $(TAG) --repo $(REPO) --notes-file build/notes.md
+
+release_notes = mkdir -p build && { cat release-notes/$(1).md; printf '\nSHA-256 сертификата: %s\n' '$(CERT_SHA256)'; } > build/notes.md
