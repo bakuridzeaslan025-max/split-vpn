@@ -344,7 +344,10 @@ class TunnelVpnService : VpnService() {
     private val clients = mutableSetOf<Messenger>()
     private val messenger = Messenger(Handler(Looper.getMainLooper()) { msg ->
         when (msg.what) {
-            VpnClient.MSG_REGISTER -> msg.replyTo?.let { clients += it; push(it); resetBackoff() }
+            VpnClient.MSG_REGISTER -> msg.replyTo?.let {
+                clients += it; push(it); resetBackoff()
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) repostNotification()
+            }
             VpnClient.MSG_UNREGISTER -> msg.replyTo?.let { clients -= it }
         }
         true
@@ -375,11 +378,14 @@ class TunnelVpnService : VpnService() {
         Crash.init(this, "vpn")
         TunnelState.subscribe(stateListener)
         TunnelState.subscribeLog(logListener)
-        // The user hid the notification by blocking its channel (the menu
-        // sends them there); unblocking does not bring the posted one back.
+        // The user hid the notification by blocking its channel or the app
+        // (the menu sends them there); unblocking does not bring the posted
+        // one back. API 28+: before that, repostNotification on UI bind.
         ContextCompat.registerReceiver(
             this, channelReceiver,
-            IntentFilter(NotificationManager.ACTION_NOTIFICATION_CHANNEL_BLOCK_STATE_CHANGED),
+            IntentFilter(NotificationManager.ACTION_NOTIFICATION_CHANNEL_BLOCK_STATE_CHANGED).apply {
+                addAction(NotificationManager.ACTION_APP_BLOCK_STATE_CHANGED)
+            },
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
         // Process came back (UI bind, boot, sticky restart) while the user
@@ -1232,11 +1238,17 @@ class TunnelVpnService : VpnService() {
 
     private val channelReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
-            if (intent.getStringExtra(NotificationManager.EXTRA_NOTIFICATION_CHANNEL_ID) != CHANNEL_ID) return
             if (intent.getBooleanExtra(NotificationManager.EXTRA_BLOCKED_STATE, true)) return
-            if (TunnelState.state == VpnState.CONNECTING || TunnelState.state == VpnState.CONNECTED || retryOnNetwork != null) {
-                getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, createNotification())
-            }
+            val id = intent.getStringExtra(NotificationManager.EXTRA_NOTIFICATION_CHANNEL_ID)
+            if (id != null && id != CHANNEL_ID) return
+            repostNotification()
+        }
+    }
+
+    // Main thread. Same states as updateWaiting: outside them a notify() leaves an orphan.
+    private fun repostNotification() {
+        if (TunnelState.state == VpnState.CONNECTING || TunnelState.state == VpnState.CONNECTED || retryOnNetwork != null) {
+            getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, createNotification())
         }
     }
 

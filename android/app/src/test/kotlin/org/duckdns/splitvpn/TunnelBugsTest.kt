@@ -367,4 +367,34 @@ class TunnelBugsTest {
         ShadowLooper.idleMainLooper(4, java.util.concurrent.TimeUnit.SECONDS)
         assertEquals(VpnState.DISCONNECTED, TunnelState.state)
     }
+
+    // The user unblocked the channel or the app: the dropped notification
+    // comes back while the service is in the foreground, never after STOP.
+    @Test
+    fun unblockedChannelRepostsOnlyWhileRunning() {
+        val nm = app.getSystemService(android.app.NotificationManager::class.java)
+        fun unblock(action: String, channel: String? = null) {
+            val i = Intent(action).putExtra(android.app.NotificationManager.EXTRA_BLOCKED_STATE, false)
+            channel?.let { i.putExtra(android.app.NotificationManager.EXTRA_NOTIFICATION_CHANNEL_ID, it) }
+            app.sendBroadcast(i)
+            ShadowLooper.idleMainLooper()
+        }
+        val channelChanged = android.app.NotificationManager.ACTION_NOTIFICATION_CHANNEL_BLOCK_STATE_CHANGED
+        start("telegram")
+        awaitState(VpnState.CONNECTED)
+        nm.cancel(1)
+        unblock(channelChanged, "quota_channel")
+        assertNull(note())
+        unblock(channelChanged, "vpn_channel")
+        assertEquals("VPN включён", note())
+        nm.cancel(1)
+        unblock(android.app.NotificationManager.ACTION_APP_BLOCK_STATE_CHANGED)
+        assertEquals("VPN включён", note())
+
+        stop()
+        awaitState(VpnState.DISCONNECTED)
+        nm.cancel(1)
+        unblock(channelChanged, "vpn_channel")
+        assertNull("orphan after stop", note())
+    }
 }

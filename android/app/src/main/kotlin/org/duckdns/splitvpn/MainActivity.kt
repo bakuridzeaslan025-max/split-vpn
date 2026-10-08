@@ -763,8 +763,8 @@ class MainActivity : Activity() {
     private fun notificationItem(ink: Int, dim: Int, side: Int, popup: PopupWindow): View {
         val nm = getSystemService(NotificationManager::class.java)
         TunnelVpnService.createChannel(this)
-        val shown = nm.areNotificationsEnabled() &&
-            nm.getNotificationChannel(TunnelVpnService.CHANNEL_ID).importance != NotificationManager.IMPORTANCE_NONE
+        val appOn = nm.areNotificationsEnabled()
+        val on = appOn && nm.getNotificationChannel(TunnelVpnService.CHANNEL_ID)?.importance != NotificationManager.IMPORTANCE_NONE
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
@@ -776,17 +776,22 @@ class MainActivity : Activity() {
                 setTextColor(ink)
             })
             addView(TextView(this@MainActivity).apply {
-                text = if (shown) "Показывается · настроить в системе" else "Скрыто · настроить в системе"
+                text = if (on) "Включено · настроить в системе" else "Выключено · настроить в системе"
                 textSize = 10f
                 setTextColor(dim)
             })
             setOnClickListener {
                 popup.dismiss()
-                startActivity(
-                    Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
-                        .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
-                        .putExtra(Settings.EXTRA_CHANNEL_ID, TunnelVpnService.CHANNEL_ID)
-                )
+                // With the app's notifications off the channel page is inert.
+                // Trimmed ROMs may lack either page: fall through like openVendorSettings.
+                val channel = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                    .putExtra(Settings.EXTRA_CHANNEL_ID, TunnelVpnService.CHANNEL_ID)
+                val app = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                val details = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+                for (i in if (appOn) listOf(channel, app, details) else listOf(app, details)) {
+                    runCatching { startActivity(i) }.onSuccess { return@setOnClickListener }
+                }
             }
         }
     }

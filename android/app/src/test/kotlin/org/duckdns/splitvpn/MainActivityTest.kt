@@ -14,6 +14,7 @@ import java.io.File
 import java.time.Duration
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -241,6 +242,32 @@ class MainActivityTest {
         item.performClick()
         assertEquals(true, prefs.getBoolean("adblock", false))
         assertEquals(1, ShadowToast.shownToastCount())
+    }
+
+    @Test
+    fun notificationItemOpensTheSystemPage() {
+        fun item(): LinearLayout {
+            activity!!.get().findViewById<View>(R.id.menuButton).performClick()
+            return (shadowOf(app).latestPopupWindow.contentView as LinearLayout).getChildAt(1) as LinearLayout
+        }
+        fun caption(i: LinearLayout) = (i.getChildAt(1) as TextView).text.toString()
+        launch()
+        var i = item()
+        assertEquals("Включено · настроить в системе", caption(i))
+        i.performClick()
+        var started = nextActivity()
+        assertEquals(android.provider.Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS, started.action)
+        assertEquals("vpn_channel", started.getStringExtra(android.provider.Settings.EXTRA_CHANNEL_ID))
+        assertEquals(app.packageName, started.getStringExtra(android.provider.Settings.EXTRA_APP_PACKAGE))
+        assertFalse(shadowOf(app).latestPopupWindow.isShowing)
+
+        // The app's notifications off: the channel page is inert, go a level up.
+        shadowOf(app.getSystemService(android.app.NotificationManager::class.java)).setNotificationsEnabled(false)
+        i = item()
+        assertEquals("Выключено · настроить в системе", caption(i))
+        i.performClick()
+        started = nextActivity()
+        assertEquals(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS, started.action)
     }
 
     @Test
