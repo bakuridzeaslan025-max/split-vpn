@@ -34,6 +34,15 @@ val noEndpoints = endpointsBlob.isEmpty()
 tasks.matching { it.name == "preReleaseBuild" }.configureEach {
     doFirst { if (noEndpoints) throw GradleException("release without endpoints: set rc.key and vds.endpoints in local.properties") }
 }
+// Direct YouTube's strategies for an app that has never fetched Remote
+// Config (offline fresh install, RC blocked): yt_strategies from
+// rc/config.json, the value rc-push publishes. Only this key: the other
+// defaults would change what the app does offline.
+val ytStrategies: String = rootProject.file("../rc/config.json").let { f ->
+    val v = (groovy.json.JsonSlurper().parse(f) as Map<*, *>)["yt_strategies"] as? List<*>
+        ?: throw GradleException("rc/config.json: yt_strategies must be a JSON array")
+    groovy.json.JsonOutput.toJson(v)
+}
 // Upload key for Play (gitignored): keystore.file, keystore.pass, key.alias, key.pass
 val keystoreFile = localProps.getProperty("keystore.file")?.takeIf { it.isNotEmpty() }
 
@@ -84,11 +93,12 @@ android {
         applicationId = "org.newvpn" // Play Console package; Kotlin namespace stays
         minSdk = 26
         targetSdk = 36
-        versionCode = 122 // an earlier internal release in Play took 68
-        versionName = "0.9.3"
+        versionCode = 123 // an earlier internal release in Play took 68
+        versionName = "0.10.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("long", "INTEGRITY_PROJECT", "${integrityProject}L")
         buildConfigField("String", "ENDPOINTS", "\"$endpointsBlob\"")
+        buildConfigField("String", "YT_STRATEGIES", "\"${ytStrategies.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
     }
 
     buildFeatures.buildConfig = true

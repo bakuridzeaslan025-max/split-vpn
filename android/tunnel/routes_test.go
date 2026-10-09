@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -69,6 +70,38 @@ func TestRouteCache_ObserveStaleCapAndPersist(t *testing.T) {
 	c3.load()
 	if len(c3.sites) != 0 {
 		t.Fatalf("expired entries loaded: %v", c3.sites)
+	}
+}
+
+// googlevideo.com's nodes share one entry with a cap of its own. One that
+// fell out of the cache is not in the next TUN: when it comes back, the
+// host must hear again.
+func TestRouteCache_EvictedSubnetIsStaleAgain(t *testing.T) {
+	setDomains("googlevideo.com")
+	t.Cleanup(func() { setDomains("") })
+	host := &fakeProtector{}
+	c := newRouteCache("", "10.0.0.0/8", host)
+	base := time.Now()
+	observe := func(i int, ip net.IP) {
+		c.now = func() time.Time { return base.Add(time.Duration(i) * time.Minute) }
+		c.observe(fmt.Sprintf("rr%d---sn-x.googlevideo.com", i), []net.IP{ip})
+	}
+	observe(0, net.IPv4(100, 2, 0, 1))
+	for i := 1; i <= routesPerYouTube; i++ {
+		observe(i, net.IPv4(100, 3, byte(i), 1))
+	}
+	if n := len(c.sites["googlevideo.com"]); n != routesPerYouTube {
+		t.Fatalf("%d subnets cached, cap %d", n, routesPerYouTube)
+	}
+	if _, ok := c.sites["googlevideo.com"]["100.2.0.0"]; ok {
+		t.Fatal("the oldest survived")
+	}
+	time.Sleep(50 * time.Millisecond)
+	before := host.stale.Load()
+	observe(routesPerYouTube+1, net.IPv4(100, 2, 0, 1))
+	time.Sleep(50 * time.Millisecond)
+	if host.stale.Load() != before+1 {
+		t.Fatal("an evicted subnet came back unreported")
 	}
 }
 

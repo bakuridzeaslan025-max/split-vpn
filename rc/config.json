@@ -2,5 +2,13 @@
   "min_version": 114,
   "latest_version": 122,
   "update_url": "https://bakuridzeaslan025-max.github.io/split-vpn/",
-  "daily_quota_mb": 2048
+  "daily_quota_mb": 2048,
+  "yt_strategies": [
+    {"id": "rec2", "spec": "rec=host+1,midsld;cut=host+1,midsld"},
+    {"id": "rec-mid-dis", "spec": "rec=midsld;cut=1;ttl1=1"},
+    {"id": "dis-mid", "spec": "cut=host+1,midsld;ttl1=2"},
+    {"id": "oob-mid", "spec": "cut=host+1,midsld;ttl1=2;oob"},
+    {"id": "tiny", "spec": "tiny=1;ttl1=mid"},
+    {"id": "none", "spec": ""}
+  ]
 }

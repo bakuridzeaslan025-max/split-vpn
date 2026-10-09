@@ -208,7 +208,7 @@ class QuotaTest {
         shadowOf(app).setComponentNameAndServiceForBindService(
             ComponentName(app, TunnelVpnService::class.java), svc.onBind(Intent(TunnelVpnService.ACTION_BIND))!!,
         )
-        VpnClient(app) { _, _, _, _, _, _, u -> got += u }.bind()
+        VpnClient(app) { _, _, _, _, _, _, u, _ -> got += u }.bind()
         ShadowLooper.idleMainLooper()
         val before = got.size
         be.used = 64 * mb
@@ -259,7 +259,7 @@ class QuotaTest {
         shadowOf(app).setComponentNameAndServiceForBindService(
             ComponentName(app, TunnelVpnService::class.java), svc.onBind(Intent(TunnelVpnService.ACTION_BIND))!!,
         )
-        VpnClient(app) { _, _, _, _, _, _, u -> got += u }.bind()
+        VpnClient(app) { _, _, _, _, _, _, u, _ -> got += u }.bind()
         ShadowLooper.idleMainLooper()
         assertEquals(Usage(300 * mb, 2048 * mb, day), got.last())
     }

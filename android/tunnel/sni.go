@@ -111,9 +111,16 @@ func peekClientHello(c net.Conn) []byte {
 // parseSNI returns the server_name from a TLS ClientHello, "" if b is not
 // one or carries none.
 func parseSNI(b []byte) string {
+	name, _ := sniAt(b)
+	return name
+}
+
+// sniAt also says where the name starts in b. Every slice below is a
+// reslice of b, so the offset falls out of the capacities.
+func sniAt(b []byte) (string, int) {
 	// Record header: type 0x16, version, length. Handshake: type 1, len24.
 	if len(b) < 5+4 || b[0] != 0x16 || b[5] != 0x01 {
-		return ""
+		return "", -1
 	}
 	hs := b[5:]
 	hl := int(hs[1])<<16 | int(hs[2])<<8 | int(hs[3])
@@ -123,24 +130,24 @@ func parseSNI(b []byte) string {
 	p := hs[4 : 4+hl]
 	// version(2) random(32) session_id
 	if len(p) < 35 {
-		return ""
+		return "", -1
 	}
 	p = p[34:]
 	n := int(p[0])
 	if len(p) < 1+n+2 {
-		return ""
+		return "", -1
 	}
 	p = p[1+n:]
 	// cipher suites
 	n = int(binary.BigEndian.Uint16(p))
 	if len(p) < 2+n+1 {
-		return ""
+		return "", -1
 	}
 	p = p[2+n:]
 	// compression methods
 	n = int(p[0])
 	if len(p) < 1+n+2 {
-		return ""
+		return "", -1
 	}
 	p = p[1+n:]
 	// extensions
@@ -154,7 +161,7 @@ func parseSNI(b []byte) string {
 		typ := binary.BigEndian.Uint16(p)
 		l := int(binary.BigEndian.Uint16(p[2:]))
 		if len(p) < 4+l {
-			return ""
+			return "", -1
 		}
 		ext := p[4 : 4+l]
 		p = p[4+l:]
@@ -163,21 +170,21 @@ func parseSNI(b []byte) string {
 		}
 		// list length(2), then entries: type(1) len(2) name
 		if len(ext) < 2 {
-			return ""
+			return "", -1
 		}
 		ext = ext[2:]
 		for len(ext) >= 3 {
 			nt := ext[0]
 			nl := int(binary.BigEndian.Uint16(ext[1:]))
 			if len(ext) < 3+nl {
-				return ""
+				return "", -1
 			}
 			if nt == 0 {
-				return string(ext[3 : 3+nl])
+				return string(ext[3 : 3+nl]), cap(b) - cap(ext[3:])
 			}
 			ext = ext[3+nl:]
 		}
-		return ""
+		return "", -1
 	}
-	return ""
+	return "", -1
 }

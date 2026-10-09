@@ -393,7 +393,7 @@ func TestStart_UnreachableRelayIsNotAnError(t *testing.T) {
 	closed := ln.Addr().String()
 	ln.Close()
 	host := &fakeProtector{}
-	err := Start(9999, closed, "relay.test", "/app/x", testCred, "", "", "", host, nil)
+	err := Start(9999, closed, "relay.test", "/app/x", testCred, "", "", "", "", host, nil)
 	if err == nil || !strings.Contains(err.Error(), "fdbased") {
 		t.Fatalf("err = %v, want the fd failure after the probe", err)
 	}

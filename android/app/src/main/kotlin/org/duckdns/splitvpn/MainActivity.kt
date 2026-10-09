@@ -62,6 +62,7 @@ class MainActivity : Activity() {
         private const val KEY_TAB = "tab"
         private const val KEY_INVITE = "invite"
         private const val KEY_ADBLOCK = "adblock"
+        private const val KEY_DIRECT = "yt_direct"
         // latest_version whose banner was closed; a newer one shows again.
         private const val KEY_UPDATE_DISMISSED = "update_dismissed"
 
@@ -145,6 +146,8 @@ class MainActivity : Activity() {
     // Null until the first snapshot.
     private var versions: Versions? = null
     private var usage: Usage? = null
+    // Go's verdict on direct YouTube, see VpnClient.
+    private var direct: String? = null
     private var started = false
     private var updateWhenKnown = false
 
@@ -157,7 +160,7 @@ class MainActivity : Activity() {
     }
     private val midnight = Runnable { render() }
 
-    private val vpn = VpnClient(this) { st, err, lines, since, w, v, u ->
+    private val vpn = VpnClient(this) { st, err, lines, since, w, v, u, d ->
         if (st == VpnState.CONNECTED && state != VpnState.CONNECTED) {
             // The code is one-shot on the issuer: once we are in, forget it.
             invite = null
@@ -170,6 +173,7 @@ class MainActivity : Activity() {
         waiting = w
         versions = v ?: versions
         usage = u ?: usage
+        direct = d
         render()
         if (updateWhenKnown && v != null) {
             updateWhenKnown = false
@@ -406,7 +410,14 @@ class MainActivity : Activity() {
             val name = row.findViewById<TextView>(R.id.name)
             val note = row.findViewById<TextView>(R.id.note)
             name.text = labels[svc.id] ?: svc.title
-            note.text = ping
+            // Also while the server is down: direct YouTube does not need it.
+            val status = if (svc.id == "youtube" && en && state == VpnState.CONNECTED) when (direct) {
+                "works" -> "YouTube напрямую"
+                "testing" -> "подбираю…"
+                else -> null
+            } else null
+            note.text = status ?: ping
+            note.setTextColor(getColor(if (status != null && direct == "works") R.color.simple_blue else R.color.simple_dim))
             renderSwitch(row.findViewById(R.id.seg), row.findViewById(R.id.knob), en)
         }
     }
@@ -672,7 +683,8 @@ class MainActivity : Activity() {
             elevation = dp(8f)
         }
         val popup = PopupWindow(menu, dp(264), ViewGroup.LayoutParams.WRAP_CONTENT, true)
-        menu.addView(adBlockItem(ink, dim, side))
+        menu.addView(switchItem("Блокировать рекламу", null, KEY_ADBLOCK, false, ink, dim, side))
+        menu.addView(switchItem("YouTube напрямую", "Напрямую, с обходом замедления у провайдера. Не тратит лимит", KEY_DIRECT, true, ink, dim, side))
         menu.addView(notificationItem(ink, dim, side, popup))
         menu.addView(TextView(this).apply {
             text = "Поделиться приложением"
@@ -707,8 +719,9 @@ class MainActivity : Activity() {
         popup.showAsDropDown(anchor, -dp(264 - 44 + 6), 0)
     }
 
-    // Go reads it at start only, so like the services it is locked while the VPN is on.
-    private fun adBlockItem(ink: Int, dim: Int, side: Int): View {
+    // Go reads these at start only, so like the services they are locked
+    // while the VPN is on: the grey switch says so.
+    private fun switchItem(title: String, caption: String?, key: String, default: Boolean, ink: Int, dim: Int, side: Int): View {
         val knob = View(this).apply {
             setBackgroundResource(R.drawable.simple_knob)
             elevation = dp(2f)
@@ -717,17 +730,17 @@ class MainActivity : Activity() {
             setPadding(dp(3), dp(3), dp(3), dp(3))
             addView(knob, FrameLayout.LayoutParams(dp(26), dp(26)))
         }
-        renderSwitch(seg, knob, prefs.getBoolean(KEY_ADBLOCK, false))
+        renderSwitch(seg, knob, prefs.getBoolean(key, default))
         val texts = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(TextView(this@MainActivity).apply {
-                text = "Блокировать рекламу"
+                text = title
                 textSize = 14f
                 setTextColor(if (editable) ink else dim)
             })
-            // 10sp: at 11 the second line is one word on 264dp.
-            addView(TextView(this@MainActivity).apply {
-                text = if (editable) "Сработает при следующем включении VPN" else "Выключите VPN, чтобы изменить"
+            // 10sp: at 11 a line holds a word or two less on 264dp.
+            if (caption != null) addView(TextView(this@MainActivity).apply {
+                text = caption
                 textSize = 10f
                 setTextColor(dim)
             })
@@ -743,7 +756,7 @@ class MainActivity : Activity() {
                     super.onInitializeAccessibilityNodeInfo(host, info)
                     info.className = Switch::class.java.name
                     info.isCheckable = true
-                    info.isChecked = prefs.getBoolean(KEY_ADBLOCK, false)
+                    info.isChecked = prefs.getBoolean(key, default)
                 }
             }
             setOnClickListener {
@@ -751,8 +764,8 @@ class MainActivity : Activity() {
                     lockedToast()
                     return@setOnClickListener
                 }
-                val on = !prefs.getBoolean(KEY_ADBLOCK, false)
-                prefs.edit().putBoolean(KEY_ADBLOCK, on).apply()
+                val on = !prefs.getBoolean(key, default)
+                prefs.edit().putBoolean(key, on).apply()
                 renderSwitch(seg, knob, on)
             }
         }
@@ -876,6 +889,7 @@ class MainActivity : Activity() {
             action = TunnelVpnService.ACTION_START
             putStringArrayListExtra(TunnelVpnService.EXTRA_SERVICES, ArrayList(enabled))
             putExtra(TunnelVpnService.EXTRA_ADBLOCK, prefs.getBoolean(KEY_ADBLOCK, false))
+            putExtra(TunnelVpnService.EXTRA_DIRECT, prefs.getBoolean(KEY_DIRECT, true))
             invite?.let { putExtra(TunnelVpnService.EXTRA_INVITE, it) }
         }
         startForegroundService(intent)

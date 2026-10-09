@@ -136,6 +136,9 @@ func (h *relayHealth) ok(gen uint64) {
 	if gen != h.gen {
 		return
 	}
+	// Not only after this tracker's outage: Stop forgets one, and the
+	// network's answers may predate it.
+	dropDirectDNS()
 	// open with no failure: a suspect endpoint that answered at once, nothing came back.
 	if h.fails > 1 || h.open && h.fails > 0 {
 		log.Printf("relay: back after %s, %d dials failed, %d app conns refused", h.now().Sub(h.since).Round(time.Second), h.fails, h.refused)

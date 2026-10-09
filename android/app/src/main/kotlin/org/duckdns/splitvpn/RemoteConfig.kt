@@ -3,8 +3,8 @@ package org.duckdns.splitvpn
 import android.content.Context
 
 /** Remote Config keys as fetched. */
-/** [dailyQuotaMb]: null when RC has no such key. */
-internal data class RcValues(val endpoints: String, val minVersion: Long, val latestVersion: Long, val updateUrl: String, val dailyQuotaMb: Long? = null)
+/** [dailyQuotaMb], [ytStrategies]: null when RC has no such key. */
+internal data class RcValues(val endpoints: String, val minVersion: Long, val latestVersion: Long, val updateUrl: String, val dailyQuotaMb: Long? = null, val ytStrategies: String? = null)
 
 /** The versions part of Remote Config; the UI gets it in VpnClient's snapshot. */
 data class Versions(val min: Long = 0, val latest: Long = 0, val url: String = "") {
@@ -30,21 +30,32 @@ internal object RemoteConfig {
     const val KEY_MIN_VERSION = "rc.min_version"
     const val KEY_LATEST_VERSION = "rc.latest_version"
     const val KEY_UPDATE_URL = "rc.update_url"
+    const val KEY_YT_STRATEGIES = "rc.yt_strategies"
     private const val KEY_DROPPED = "rc.dropped_endpoints"
+    const val KEY_DROPPED_YT = "rc.dropped_yt_strategies"
 
     fun versions(ctx: Context) = ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).let {
         Versions(it.getLong(KEY_MIN_VERSION, 0), it.getLong(KEY_LATEST_VERSION, 0), it.getString(KEY_UPDATE_URL, "").orEmpty())
     }
 
     /**
+     * Direct YouTube's strategies for Go: the last fetched, else the ones
+     * built in from rc/config.json (never fetched: fresh install offline,
+     * RC blocked). "[]" turns direct YouTube off.
+     */
+    fun ytStrategies(ctx: Context): String =
+        ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).getString(KEY_YT_STRATEGIES, null)
+            ?: BuildConfig.YT_STRATEGIES
+
+    /**
      * RC serves a broken blob on every fetch until someone publishes a fixed
      * one: a report for the first time this blob is seen, a breadcrumb after.
      */
-    internal fun firstDrop(ctx: Context, blob: String): Boolean {
+    internal fun firstDrop(ctx: Context, blob: String, key: String = KEY_DROPPED): Boolean {
         val prefs = ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE)
         val hash = java.security.MessageDigest.getInstance("SHA-256").digest(blob.toByteArray()).joinToString("") { "%02x".format(it) }
-        if (prefs.getString(KEY_DROPPED, null) == hash) return false
-        prefs.edit().putString(KEY_DROPPED, hash).apply()
+        if (prefs.getString(key, null) == hash) return false
+        prefs.edit().putString(key, hash).apply()
         return true
     }
 
@@ -57,6 +68,15 @@ internal object RemoteConfig {
                 .putString(KEY_UPDATE_URL, v.updateUrl)
                 .apply()
             Quota.setLimitMb(ctx, v.dailyQuotaMb)
+            // Each entry is Go's to judge (it drops the broken ones); a value
+            // that is no list at all keeps what was there.
+            v.ytStrategies?.let { yt ->
+                if (runCatching { org.json.JSONArray(yt.trim()) }.isSuccess) {
+                    ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).edit().putString(KEY_YT_STRATEGIES, yt).apply()
+                } else {
+                    AppLog.e("remote config: yt_strategies is not a JSON array, kept the last one", expected = !firstDrop(ctx, yt, KEY_DROPPED_YT))
+                }
+            }
         }
         // Not published for this build's condition: nothing to replace the cache with.
         if (v.endpoints.isEmpty()) return

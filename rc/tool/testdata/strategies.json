@@ -1,0 +1,81 @@
+[
+  {
+    "name": "the plan's list",
+    "in": [
+      {"id": "rec2", "spec": "rec=host+1,midsld;cut=host+1,midsld"},
+      {"id": "rec-mid-dis", "spec": "rec=midsld;cut=1;ttl1=1"},
+      {"id": "dis-mid", "spec": "cut=host+1,midsld;ttl1=2"},
+      {"id": "oob-mid", "spec": "cut=host+1,midsld;ttl1=2;oob"},
+      {"id": "tiny", "spec": "tiny=1;ttl1=mid"},
+      {"id": "none", "spec": ""}
+    ],
+    "keep": [
+      ["rec2", "rec=host+1,midsld;cut=host+1,midsld"],
+      ["rec-mid-dis", "rec=midsld;cut=1;ttl1=1"],
+      ["dis-mid", "cut=host+1,midsld;ttl1=2"],
+      ["oob-mid", "cut=host+1,midsld;ttl1=2;oob"],
+      ["tiny", "ttl1=mid;tiny=1"],
+      ["none", ""]
+    ],
+    "dropped": 0
+  },
+  {
+    "name": "normalized",
+    "in": [
+      {"id": "a", "spec": " oob ; cut = host+01 , midsld,midsld ; rec=hostend;ttl1=mid,2,mid "},
+      {"id": "b", "spec": "tiny=2;ttl1=1;oob", "comment": "unknown fields are ignored"},
+      {"id": "c", "spec": "cut=16384,7"},
+      {"id": "d", "spec": "   "}
+    ],
+    "keep": [
+      ["a", "rec=hostend;cut=host+1,midsld;ttl1=mid,2;oob"],
+      ["b", "ttl1=1;oob;tiny=2"],
+      ["c", "cut=16384,7"],
+      ["d", ""]
+    ],
+    "dropped": 0
+  },
+  {
+    "name": "broken entries go, the rest stay",
+    "in": [
+      {"id": "ok", "spec": ""},
+      {"id": "ok", "spec": "cut=1"},
+      {"id": "Upper", "spec": ""},
+      {"id": "", "spec": ""},
+      {"id": "seventeen-chars-x", "spec": ""},
+      {"id": 5, "spec": ""},
+      {"id": "nospec"},
+      {"spec": "cut=1"},
+      "rec2",
+      {"id": "bad-pos", "spec": "cut=foo"},
+      {"id": "zero", "spec": "cut=0"},
+      {"id": "too-far", "spec": "cut=16385"},
+      {"id": "minus", "spec": "rec=host-1"},
+      {"id": "sign", "spec": "cut=+5"},
+      {"id": "host-far", "spec": "cut=host+256"},
+      {"id": "empty-item", "spec": "cut=1,,2"},
+      {"id": "empty-part", "spec": "cut=1;"},
+      {"id": "twice", "spec": "cut=1;cut=2"},
+      {"id": "no-value", "spec": "cut"},
+      {"id": "empty-value", "spec": "rec="},
+      {"id": "unknown", "spec": "split=1"},
+      {"id": "oob-value", "spec": "oob=1;cut=1"},
+      {"id": "oob-alone", "spec": "oob"},
+      {"id": "ttl1-alone", "spec": "ttl1=1"},
+      {"id": "ttl1-zero", "spec": "ttl1=0;cut=1"},
+      {"id": "ttl1-far", "spec": "ttl1=65;cut=1"},
+      {"id": "tiny-3", "spec": "tiny=3"},
+      {"id": "cut-and-tiny", "spec": "cut=1;tiny=1"},
+      {"id": "last", "spec": "rec=host+0"}
+    ],
+    "keep": [
+      ["ok", ""],
+      ["last", "rec=host+0"]
+    ],
+    "dropped": 27
+  },
+  {"name": "empty: off for everyone", "in": [], "keep": [], "dropped": 0},
+  {"name": "an object", "in": {"id": "rec2", "spec": ""}, "error": true},
+  {"name": "null", "in": null, "error": true},
+  {"name": "a string", "in": "[{\"id\":\"a\",\"spec\":\"\"}]", "error": true}
+]

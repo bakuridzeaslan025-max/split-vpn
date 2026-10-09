@@ -224,8 +224,9 @@ func Register(vpnAddr, sni, path string, kind int, proof []byte) ([]byte, error)
 // host. Sessions without a name (MTProto, plain TCP) go through the relay.
 // routes are the TUN's subnets ("a.b.c.d/n" per line) and cacheFile the
 // route cache (see routes.go); host hears when a listed site resolves
-// outside routes.
-func Start(tunFd int, vpnAddr string, sni string, path string, cred []byte, domains string, routes string, cacheFile string, host Host, logger Logger) error {
+// outside routes. desyncFile keeps what works for direct YouTube on which
+// network (desyncpick.go).
+func Start(tunFd int, vpnAddr string, sni string, path string, cred []byte, domains string, routes string, cacheFile string, desyncFile string, host Host, logger Logger) error {
 	setLogger(logger)
 	setDomains(domains)
 	protector = host
@@ -299,6 +300,7 @@ func Start(tunFd int, vpnAddr string, sni string, path string, cred []byte, doma
 	proberStop = make(chan struct{})
 	go health.prober(proberStop, wake, func() error { return probeRelay(cred) })
 	mu.Unlock()
+	picker.started(desyncFile)
 	return nil
 }
 
@@ -557,11 +559,19 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 	// Routing by name: the site from the ClientHello decides. Ours (or no
 	// name at all) → relay; anyone else on a shared CDN address → direct.
 	// The peeked bytes are forwarded as they were.
+	t0 := time.Now()
 	first := peekClientHello(conn)
 	name := parseSNI(first)
 	direct := name != "" && !relayByName(name)
 	if name == "" {
 		name = "-"
+	}
+	// YouTube may get through without the relay, see desync.go.
+	if !direct && desyncByName(name) {
+		var done bool
+		if first, done = tryDesync(conn, first, name, dstIP, dstPort, t0); done {
+			return
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

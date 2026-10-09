@@ -248,7 +248,7 @@ class MainActivityTest {
     fun notificationItemOpensTheSystemPage() {
         fun item(): LinearLayout {
             activity!!.get().findViewById<View>(R.id.menuButton).performClick()
-            return (shadowOf(app).latestPopupWindow.contentView as LinearLayout).getChildAt(1) as LinearLayout
+            return (shadowOf(app).latestPopupWindow.contentView as LinearLayout).getChildAt(2) as LinearLayout
         }
         fun caption(i: LinearLayout) = (i.getChildAt(1) as TextView).text.toString()
         launch()
@@ -270,18 +270,67 @@ class MainActivityTest {
         assertEquals(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS, started.action)
     }
 
+    private fun menuItem(i: Int): LinearLayout {
+        activity!!.get().findViewById<View>(R.id.menuButton).performClick()
+        return (shadowOf(app).latestPopupWindow.contentView as LinearLayout).getChildAt(i) as LinearLayout
+    }
+
+    private fun LinearLayout.texts() = (getChildAt(0) as LinearLayout).let { t -> (0 until t.childCount).map { (t.getChildAt(it) as TextView).text.toString() } }
+
+    // The grey switch says it is locked: no line to explain it.
     @Test
-    fun adBlockItemSaysWhenItApplies() {
-        fun caption(): String {
-            val a = activity!!.get()
-            a.findViewById<View>(R.id.menuButton).performClick()
-            val texts = ((shadowOf(app).latestPopupWindow.contentView as LinearLayout).getChildAt(0) as LinearLayout).getChildAt(0) as LinearLayout
-            return (texts.getChildAt(1) as TextView).text.toString()
-        }
+    fun adBlockItemIsOneLine() {
         launch()
-        assertEquals("Сработает при следующем включении VPN", caption())
+        assertEquals(listOf("Блокировать рекламу"), menuItem(0).texts())
         connect()
-        assertEquals("Выключите VPN, чтобы изменить", caption())
+        assertEquals(listOf("Блокировать рекламу"), menuItem(0).texts())
+    }
+
+    @Test
+    fun youTubeDirectIsSecondOnByDefaultAndLockedWhileConnected() {
+        launch()
+        val item = menuItem(1)
+        assertEquals(listOf("YouTube напрямую", "Напрямую, с обходом замедления у провайдера. Не тратит лимит"), item.texts())
+        val info = AccessibilityNodeInfo.obtain()
+        item.onInitializeAccessibilityNodeInfo(info)
+        assertTrue(info.isChecked)
+        item.performClick()
+        assertEquals(false, prefs.getBoolean("yt_direct", true))
+        connect()
+        menuItem(1).performClick()
+        assertEquals(false, prefs.getBoolean("yt_direct", true))
+        assertEquals(1, ShadowToast.shownToastCount())
+    }
+
+    /** Go's verdict as the :vpn host hears it; the service pushes a snapshot. */
+    private fun verdict(v: String) {
+        org.robolectric.util.ReflectionHelpers.getField<tunnel.Host>(service.get(), "host").directVerdict(v)
+        ShadowLooper.idleMainLooper()
+    }
+
+    @Test
+    fun youTubeCardSaysDirect() {
+        prefs.edit().putBoolean(Services.prefKey("youtube"), true).commit()
+        val a = launch()
+        connect("YouTube: 120 мс")
+        assertEquals("120 мс", a.note("youtube"))
+        verdict("testing")
+        assertEquals("подбираю…", a.note("youtube"))
+        verdict("works")
+        assertEquals("YouTube напрямую", a.note("youtube"))
+        assertEquals(app.getColor(R.color.simple_blue), a.row("youtube").findViewById<TextView>(R.id.note).currentTextColor)
+        // The server down: YouTube still goes direct, the card says so.
+        TunnelState.setWaiting(Waiting.NO_SERVER)
+        ShadowLooper.idleMainLooper()
+        assertEquals("YouTube напрямую", a.note("youtube"))
+        TunnelState.setWaiting(null)
+        verdict("fails")
+        assertEquals("120 мс", a.note("youtube"))
+        assertEquals(app.getColor(R.color.simple_dim), a.row("youtube").findViewById<TextView>(R.id.note).currentTextColor)
+        verdict("works")
+        TunnelState.set(VpnState.DISCONNECTED)
+        ShadowLooper.idleMainLooper()
+        assertEquals("", a.note("youtube"))
     }
 
     // Expired credential, no network: the service waits by itself, so the

@@ -94,7 +94,7 @@ func TestQuota_OverBeforeStartIsToldByStart(t *testing.T) {
 	SetQuota(500, 400)
 	t.Cleanup(func() { SetQuota(0, 0); protector = nil })
 	fp := &fakeProtector{ok: true}
-	Start(9999, "127.0.0.1:1", "relay.test", "/app/x", nil, "", "", "", fp, nil)
+	Start(9999, "127.0.0.1:1", "relay.test", "/app/x", nil, "", "", "", "", fp, nil)
 	deadline := time.Now().Add(2 * time.Second)
 	for fp.quota.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)

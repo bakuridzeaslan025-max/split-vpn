@@ -34,7 +34,9 @@ tunnel: docker-image
 test: rc-test adblock-test tunnel-test
 	./gradlew testDebugUnitTest -q
 
+# The strategy vector is shared by the tunnel and rc/tool (see desync.go).
 tunnel-test:
+	cmp tunnel/testdata/strategies.json ../rc/tool/testdata/strategies.json
 	docker run --rm --platform linux/amd64 -v $(CURDIR)/tunnel:/src -w /src -v tunnel-gomod:/go/pkg/mod $(GO_IMAGE) \
 		sh -c 'go mod verify && go mod tidy -diff && go vet ./... && go test -race ./...'
 

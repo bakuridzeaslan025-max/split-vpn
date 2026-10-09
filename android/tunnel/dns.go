@@ -227,6 +227,13 @@ func resolveDNS(q []byte) []byte {
 		} else if more, ok := directFailLog.allow(errKind(err), time.Now()); ok {
 			log.Printf("dns %s: direct failed, falling back to doh: %v%s", key, err, more)
 		}
+	} else if key != "" && directDNSWanted(name) {
+		if resp, err := directQuery(q); err == nil {
+			directDNSUsed.Store(true)
+			observeRoutes(resp)
+			dnsCache.Store(key, dnsCacheEntry{msg: resp, exp: time.Now().Add(responseTTL(resp))})
+			return withID(resp, q[:2])
+		}
 	}
 
 	mu.Lock()
@@ -245,6 +252,15 @@ func resolveDNS(q []byte) []byte {
 		return servfail(q)
 	}
 	log.Printf("dns %s: %d bytes in %s", key, len(resp), time.Since(t0).Round(time.Millisecond))
+	observeRoutes(resp)
+	if key != "" {
+		dnsCache.Store(key, dnsCacheEntry{msg: resp, exp: time.Now().Add(responseTTL(resp))})
+	}
+	return withID(resp, q[:2])
+}
+
+// observeRoutes feeds the route cache with an answer for one of our sites.
+func observeRoutes(resp []byte) {
 	mu.Lock()
 	c := rc
 	mu.Unlock()
@@ -253,10 +269,6 @@ func resolveDNS(q []byte) []byte {
 			c.observe(site, ips)
 		}
 	}
-	if key != "" {
-		dnsCache.Store(key, dnsCacheEntry{msg: resp, exp: time.Now().Add(responseTTL(resp))})
-	}
-	return withID(resp, q[:2])
 }
 
 // directQuery asks the underlying network's own resolver, past the TUN.

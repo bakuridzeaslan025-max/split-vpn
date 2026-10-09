@@ -195,11 +195,12 @@ type tcpPeer struct {
 	ep       *channel.Endpoint
 	dst      tcpip.Address
 	dport    uint16
+	sport    uint16
 	seq, ack uint32
 }
 
 func (p *tcpPeer) send(flags header.TCPFlags, payload []byte) {
-	inject(p.ep, tcpPkt(tunIP, p.dst, 50000, p.dport, p.seq, p.ack, flags, payload))
+	inject(p.ep, tcpPkt(tunIP, p.dst, p.sport, p.dport, p.seq, p.ack, flags, payload))
 	p.seq += uint32(len(payload))
 }
 
@@ -208,7 +209,7 @@ func (p *tcpPeer) recv(t *testing.T) header.TCP {
 	for {
 		ip, tr := readProto(t, p.ep, tcp.ProtocolNumber)
 		tc := header.TCP(tr)
-		if ip.SourceAddress() != p.dst || tc.SourcePort() != p.dport || tc.DestinationPort() != 50000 {
+		if ip.SourceAddress() != p.dst || tc.SourcePort() != p.dport || tc.DestinationPort() != p.sport {
 			t.Fatalf("stray segment %s:%d -> :%d", ip.SourceAddress(), tc.SourcePort(), tc.DestinationPort())
 		}
 		return tc
@@ -217,7 +218,12 @@ func (p *tcpPeer) recv(t *testing.T) header.TCP {
 
 func handshake(t *testing.T, ep *channel.Endpoint, dst tcpip.Address, dport uint16) *tcpPeer {
 	t.Helper()
-	p := &tcpPeer{ep: ep, dst: dst, dport: dport, seq: 1000}
+	return handshakeFrom(t, ep, dst, dport, 50000)
+}
+
+func handshakeFrom(t *testing.T, ep *channel.Endpoint, dst tcpip.Address, dport, sport uint16) *tcpPeer {
+	t.Helper()
+	p := &tcpPeer{ep: ep, dst: dst, dport: dport, sport: sport, seq: 1000}
 	p.send(header.TCPFlagSyn, nil)
 	p.seq++
 	sa := p.recv(t)
@@ -346,7 +352,7 @@ func TestNetstack_FakeDNSOtherPortsRefusedLocally(t *testing.T) {
 	withConns(t)
 	_, ep := testStack(t, addr)
 
-	p := &tcpPeer{ep: ep, dst: fakeDNSA, dport: 853, seq: 1000}
+	p := &tcpPeer{ep: ep, dst: fakeDNSA, dport: 853, sport: 50000, seq: 1000}
 	p.send(header.TCPFlagSyn, nil)
 	tc := p.recv(t)
 	if tc.Flags()&header.TCPFlagRst == 0 {
@@ -371,6 +377,20 @@ func TestNetstack_FCMGoesDirect(t *testing.T) {
 	goesDirect(t, "google.com", "mtalk.google.com")
 }
 
+// hostIPv4 is a local address the stack under test can dial: gVisor drops
+// packets to loopback ("martian").
+func hostIPv4(t *testing.T) net.IP {
+	t.Helper()
+	addrs, _ := net.InterfaceAddrs()
+	for _, a := range addrs {
+		if ipn, ok := a.(*net.IPNet); ok && !ipn.IP.IsLoopback() && ipn.IP.To4() != nil {
+			return ipn.IP.To4()
+		}
+	}
+	t.Skip("no non-loopback IPv4 interface")
+	return nil
+}
+
 func goesDirect(t *testing.T, domains, name string) {
 	t.Helper()
 	addr, got := fakeRelay(t)
@@ -382,19 +402,7 @@ func goesDirect(t *testing.T, domains, name string) {
 	t.Cleanup(func() { protector = nil })
 	_, ep := testStack(t, addr)
 
-	// gVisor drops packets to loopback ("martian"): use a real interface.
-	var hostIP net.IP
-	if addrs, _ := net.InterfaceAddrs(); true {
-		for _, a := range addrs {
-			if ipn, ok := a.(*net.IPNet); ok && !ipn.IP.IsLoopback() && ipn.IP.To4() != nil {
-				hostIP = ipn.IP.To4()
-				break
-			}
-		}
-	}
-	if hostIP == nil {
-		t.Skip("no non-loopback IPv4 interface")
-	}
+	hostIP := hostIPv4(t)
 	echo, err := net.Listen("tcp", hostIP.String()+":0")
 	if err != nil {
 		t.Fatal(err)

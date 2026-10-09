@@ -180,7 +180,7 @@ func TestRegister_V3Post(t *testing.T) {
 
 func TestStart_V3ProbeRejectedBeforeTUN(t *testing.T) {
 	addr, _ := fakeHTTPRelay(t, false)
-	err := Start(9999, addr, "relay.test", "/app/x", bytes.Repeat([]byte{5}, credSize), "", "", "", nil, nil)
+	err := Start(9999, addr, "relay.test", "/app/x", bytes.Repeat([]byte{5}, credSize), "", "", "", "", nil, nil)
 	if !errors.Is(err, ErrCredRejected) {
 		t.Fatalf("err=%v", err)
 	}
@@ -193,10 +193,10 @@ func TestStart_V3ProbeRejectedBeforeTUN(t *testing.T) {
 }
 
 func TestStart_RefusesMissingCredOrPath(t *testing.T) {
-	if err := Start(9999, "127.0.0.1:1", "relay.test", "/app/x", nil, "", "", "", nil, nil); err == nil {
+	if err := Start(9999, "127.0.0.1:1", "relay.test", "/app/x", nil, "", "", "", "", nil, nil); err == nil {
 		t.Fatal("started without a credential")
 	}
-	if err := Start(9999, "127.0.0.1:1", "relay.test", "", testCred, "", "", "", nil, nil); err == nil {
+	if err := Start(9999, "127.0.0.1:1", "relay.test", "", testCred, "", "", "", "", nil, nil); err == nil {
 		t.Fatal("started without a path")
 	}
 }

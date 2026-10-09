@@ -20,9 +20,11 @@ import (
 //
 // File: one "site subnet unixSeconds" per line, plain text.
 const (
-	routeTTL       = 30 * 24 * time.Hour
-	routesPerSite  = 16
-	cacheSaveDelay = 2 * time.Second
+	routeTTL      = 30 * 24 * time.Hour
+	routesPerSite = 16
+	// googlevideo.com and the like, one entry for all their nodes.
+	routesPerYouTube = 64
+	cacheSaveDelay   = 2 * time.Second
 )
 
 // Host is what Kotlin gives Go at Start: protect sockets from the TUN and
@@ -42,6 +44,10 @@ type Host interface {
 	// QuotaProgress: the relay traffic crossed another step (64 MB) since
 	// SetQuota; Usage has the count. Off Go's locks, once per step.
 	QuotaProgress()
+	// DirectVerdict: how direct YouTube does on the current network,
+	// "unknown", "testing", "works" or "fails"; on a change, and afresh
+	// after each Start. Off Go's locks, in order.
+	DirectVerdict(state string)
 }
 
 type routeCache struct {
@@ -87,6 +93,11 @@ func (c *routeCache) observe(site string, ips []net.IP) {
 	if !relayByName(site) {
 		return
 	}
+	// googlevideo.com alone has hundreds of rr*---sn-* names: one entry
+	// each would grow the file and the TUN's routes without end.
+	if d := desyncDomain(site); d != "" {
+		site = d
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now().Unix()
@@ -108,14 +119,23 @@ func (c *routeCache) observe(site string, ips []net.IP) {
 			log.Printf("routes: %s → %s outside routes", site, ip)
 		}
 	}
-	if len(m) > routesPerSite {
+	limit := routesPerSite
+	if desyncByName(site) {
+		limit = routesPerYouTube
+	}
+	if len(m) > limit {
 		keys := make([]string, 0, len(m))
 		for k := range m {
 			keys = append(keys, k)
 		}
 		sort.Slice(keys, func(i, j int) bool { return m[keys[i]] < m[keys[j]] })
-		for _, k := range keys[:len(keys)-routesPerSite] {
+		for _, k := range keys[:len(keys)-limit] {
 			delete(m, k)
+			// Gone from the cache, it is gone from the next TUN too: when
+			// it comes back, that is news again.
+			if !c.cachedLocked(k) {
+				delete(c.stale, k)
+			}
 		}
 	}
 	if !stale {
@@ -131,6 +151,16 @@ func (c *routeCache) observe(site string, ips []net.IP) {
 	if c.host != nil {
 		go c.host.RoutesStale()
 	}
+}
+
+// cachedLocked: some site still keeps the subnet.
+func (c *routeCache) cachedLocked(subnet string) bool {
+	for _, m := range c.sites {
+		if _, ok := m[subnet]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *routeCache) write(data string) {

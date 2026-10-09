@@ -99,7 +99,9 @@ func newFake(t *testing.T, tmpl string) (*fakeRC, *rcClient) {
 	return f, &rcClient{base: srv.URL + "/rc", http: srv.Client(), token: "tok"}
 }
 
-var testConfig = config{MinVersion: 110, LatestVersion: 114, UpdateURL: "https://o.github.io/r/", DailyQuotaMB: 1024}
+var testConfig = config{MinVersion: 110, LatestVersion: 114, UpdateURL: "https://o.github.io/r/", DailyQuotaMB: 1024,
+	YTStrategies: json.RawMessage(`[ {"id": "rec2", "spec": "rec=host+1,midsld"},
+	{"id": "none", "spec": ""} ]`)}
 
 // A console-made template: endpoints with its own default and another
 // condition, min_version inside a group, fields the tool does not know.
@@ -158,6 +160,7 @@ func TestPush(t *testing.T) {
 	check("latest_version", debugCondition, "114")
 	check("update_url", debugCondition, testConfig.UpdateURL)
 	check("daily_quota_mb", debugCondition, "1024")
+	check("yt_strategies", debugCondition, `[{"id":"rec2","spec":"rec=host+1,midsld"},{"id":"none","spec":""}]`)
 	check("unrelated", "", "x")
 	if _, dup := got["parameters"].(map[string]any)["min_version"]; dup {
 		t.Error("min_version duplicated at the top level")
@@ -237,6 +240,7 @@ func TestPull(t *testing.T) {
 		"min_version\n  default: 100\n  build_debug: -\n",
 		"update_url\n  default: -\n",
 		"daily_quota_mb\n  default: -\n",
+		"yt_strategies\n  default: -\n",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("no %q in\n%s", want, out.String())
@@ -291,11 +295,28 @@ func TestAccessToken(t *testing.T) {
 
 func TestConfig(t *testing.T) {
 	dir := t.TempDir()
-	load := func(s string) error {
+	loadRaw := func(s string) error {
 		p := filepath.Join(dir, "c.json")
 		os.WriteFile(p, []byte(s), 0o600)
 		_, err := loadConfig(p)
 		return err
+	}
+	// The cases below are about the other keys.
+	load := func(s string) error {
+		if !strings.Contains(s, "yt_strategies") {
+			s = strings.TrimSuffix(s, "}") + `,"yt_strategies":[]}`
+		}
+		return loadRaw(s)
+	}
+	const base = `{"min_version":114,"latest_version":115,"update_url":"https://o.github.io/r/","daily_quota_mb":2048`
+	if err := loadRaw(base + `,"yt_strategies":[{"id":"rec2","spec":"rec=host+1,midsld;cut=host+1,midsld"}]}`); err != nil {
+		t.Fatal(err)
+	}
+	for _, y := range []string{"", `,"yt_strategies":null`, `,"yt_strategies":"[]"`, `,"yt_strategies":{}`,
+		`,"yt_strategies":[{"id":"a","spec":""},{"id":"b","spec":"cut=x"}]`} {
+		if loadRaw(base+y+"}") == nil {
+			t.Errorf("yt_strategies %q: accepted", y)
+		}
 	}
 	const good = "https://o.github.io/r/"
 	for _, q := range []string{"2048", "0"} {

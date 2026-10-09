@@ -32,6 +32,18 @@ type config struct {
 	LatestVersion int    `json:"latest_version"`
 	UpdateURL     string `json:"update_url"`
 	DailyQuotaMB  int    `json:"daily_quota_mb"`
+	// Direct YouTube's strategies, in the order to try them; [] turns it
+	// off for everyone. The app bakes this file's value in as its default.
+	YTStrategies json.RawMessage `json:"yt_strategies"`
+}
+
+// ytValue is yt_strategies as RC carries it: a compact JSON string.
+func (c config) ytValue() string {
+	var b bytes.Buffer
+	if json.Compact(&b, c.YTStrategies) != nil {
+		return ""
+	}
+	return b.String()
 }
 
 func (c config) validate() error {
@@ -46,6 +58,16 @@ func (c config) validate() error {
 	// The download page the app opens in the browser.
 	if u, err := url.Parse(c.UpdateURL); err != nil || u.Scheme != "https" || u.Host == "" {
 		return errors.New("config: update_url must be an https:// page")
+	}
+	if c.YTStrategies == nil {
+		return errors.New("config: yt_strategies is required, a JSON array ([] turns direct YouTube off)")
+	}
+	_, problems, err := parseStrategies(string(c.YTStrategies))
+	if err != nil {
+		return fmt.Errorf("config: yt_strategies: %v", err)
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("config: yt_strategies: %s", strings.Join(problems, "; "))
 	}
 	return nil
 }
@@ -134,7 +156,7 @@ func debugExpression(appID string) string {
 	return fmt.Sprintf(`app.id == '%s' && app.customSignal['build'].exactlyMatches(['debug'])`, appID)
 }
 
-// values are the five RC keys.
+// values are the RC keys.
 func values(c config, blob string) [][3]string {
 	return [][3]string{
 		{"endpoints", "STRING", blob},
@@ -142,6 +164,7 @@ func values(c config, blob string) [][3]string {
 		{"latest_version", "NUMBER", strconv.Itoa(c.LatestVersion)},
 		{"update_url", "STRING", c.UpdateURL},
 		{"daily_quota_mb", "NUMBER", strconv.Itoa(c.DailyQuotaMB)},
+		{"yt_strategies", "STRING", c.ytValue()},
 	}
 }
 
@@ -166,12 +189,12 @@ func push(rc *rcClient, t template, etag string, appID string, c config, blob st
 	if err != nil {
 		return fmt.Errorf("publish: %w", err)
 	}
-	fmt.Fprintf(out, "published version %s: min_version %d, latest_version %d, update_url %s, daily_quota_mb %d, endpoints set (%s)\n",
-		ver, c.MinVersion, c.LatestVersion, c.UpdateURL, c.DailyQuotaMB, debugCondition)
+	fmt.Fprintf(out, "published version %s: min_version %d, latest_version %d, update_url %s, daily_quota_mb %d, yt_strategies %s, endpoints set (%s)\n",
+		ver, c.MinVersion, c.LatestVersion, c.UpdateURL, c.DailyQuotaMB, c.ytValue(), debugCondition)
 	return nil
 }
 
-// promote copies the build_debug values of the five keys into their
+// promote copies the build_debug values of the keys into their
 // defaults: release builds get exactly what was checked. The condition
 // stays as it is.
 func promote(rc *rcClient, t template, etag string, out io.Writer) error {
@@ -198,8 +221,8 @@ func promote(rc *rcClient, t template, etag string, out io.Writer) error {
 		return fmt.Errorf("publish: %w", err)
 	}
 	get := func(k string) string { s, _ := t.value(k, ""); return s }
-	fmt.Fprintf(out, "published version %s: defaults = %s: min_version %s, latest_version %s, update_url %s, daily_quota_mb %s, endpoints as checked\n",
-		ver, debugCondition, get("min_version"), get("latest_version"), get("update_url"), get("daily_quota_mb"))
+	fmt.Fprintf(out, "published version %s: defaults = %s: min_version %s, latest_version %s, update_url %s, daily_quota_mb %s, yt_strategies %s, endpoints as checked\n",
+		ver, debugCondition, get("min_version"), get("latest_version"), get("update_url"), get("daily_quota_mb"), get("yt_strategies"))
 	return nil
 }
 

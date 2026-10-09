@@ -34,7 +34,7 @@ class VpnHarness {
 
     @Volatile private var synced = false
 
-    private val client = VpnClient(ctx) { s, e, l, _, w, _, _ ->
+    private val client = VpnClient(ctx) { s, e, l, _, w, _, _, _ ->
         state = s; error = e; waiting = w; synced = true
         log.clear(); log.addAll(l)
     }

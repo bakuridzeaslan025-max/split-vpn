@@ -113,6 +113,7 @@ type fakeProtector struct {
 	down  []bool
 	quota atomic.Int32
 	steps atomic.Int32
+	told  []string
 }
 
 func (f *fakeProtector) Protect(fd int) bool {
@@ -130,6 +131,17 @@ func (f *fakeProtector) RelayDown(down bool) {
 }
 func (f *fakeProtector) QuotaExceeded() { f.quota.Add(1) }
 func (f *fakeProtector) QuotaProgress() { f.steps.Add(1) }
+func (f *fakeProtector) DirectVerdict(v string) {
+	f.mu.Lock()
+	f.told = append(f.told, v)
+	f.mu.Unlock()
+}
+
+func (f *fakeProtector) verdicts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.told...)
+}
 
 func (f *fakeProtector) protected() []int {
 	f.mu.Lock()

@@ -35,9 +35,12 @@ internal class FakeBackend : Backend {
         return pfd ?: ParcelFileDescriptor.open(File.createTempFile("tun", null), ParcelFileDescriptor.MODE_READ_ONLY)
     }
 
-    override fun start(fd: ParcelFileDescriptor, addr: String, sni: String, path: String, cred: ByteArray, domains: String, routes: String, cacheFile: String, host: tunnel.Host, logger: tunnel.Logger) {
+    override fun start(fd: ParcelFileDescriptor, addr: String, sni: String, path: String, cred: ByteArray, domains: String, routes: String, cacheFile: String, desyncFile: String, host: tunnel.Host, logger: tunnel.Logger) {
         startedDomains = domains
         startedAdBlock = adBlock
+        startedDirect = direct
+        startedStrategies = strategies
+        startedDesyncFile = desyncFile
         startedSni = sni
         startedRoutes = routes
         startedHost = host
@@ -88,6 +91,18 @@ internal class FakeBackend : Backend {
     /** What setAdBlock had set when start ran. */
     var startedAdBlock: Boolean? = null
     override fun setAdBlock(on: Boolean) { adBlock = on }
+    @Volatile var direct: Boolean? = null
+    /** What setDirect, setStrategies had set when start ran. */
+    var startedDirect: Boolean? = null
+    var startedStrategies: String? = null
+    var startedDesyncFile: String? = null
+    @Volatile var strategies: String? = null
+    /** What Go answers setStrategies: the entries it dropped. */
+    var dropped = ""
+    override fun setDirect(on: Boolean) { direct = on }
+    override fun setStrategies(json: String): String { strategies = json; return dropped }
+    val netKeys = CopyOnWriteArrayList<String>()
+    override fun setNetKey(key: String) { netKeys += key }
     /** Go's LastRelayOK, unix seconds. */
     @Volatile var lastRelayOk = 0L
     override fun lastRelayOk() = lastRelayOk

@@ -178,7 +178,7 @@ func TestDialRelay_BadSNI(t *testing.T) {
 func TestStart_FailedInitLeavesNoTunFile(t *testing.T) {
 	addr, _ := fakeRelay(t)
 
-	err := Start(9999, addr, "relay.test", "/app/x", testCred, "", "", "", nil, nil) // not an open fd: fdbased.New fails
+	err := Start(9999, addr, "relay.test", "/app/x", testCred, "", "", "", "", nil, nil) // not an open fd: fdbased.New fails
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -201,7 +201,7 @@ func TestStart_ProbeSetsLastRelayOK(t *testing.T) {
 	addr, _ := fakeRelay(t)
 	health.lastOK.Store(0)
 	t0 := time.Now().Unix()
-	Start(9999, addr, "relay.test", "/app/x", testCred, "", "", "", nil, nil) // fails later, on the fake fd
+	Start(9999, addr, "relay.test", "/app/x", testCred, "", "", "", "", nil, nil) // fails later, on the fake fd
 	wantRelayOKSince(t, t0)
 }
 
@@ -463,7 +463,7 @@ func TestStart_WhileOldConnsUntrack(t *testing.T) {
 	}()
 	for i := 0; i < 5; i++ {
 		Stop()
-		Start(9999, closed, "relay.test", "/app/x", testCred, "", "", "", nil, nil) // fails on the fake fd, after the tracker
+		Start(9999, closed, "relay.test", "/app/x", testCred, "", "", "", "", nil, nil) // fails on the fake fd, after the tracker
 	}
 	<-done
 }
