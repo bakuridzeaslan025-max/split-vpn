@@ -319,6 +319,17 @@ class TunnelVpnService : VpnService() {
             wifi && wifiId != null -> "wifi@$wifiId"
             else -> ""
         }
+
+        // What Go's picker last heard, and on which network. Per process,
+        // as the picker: a stop, a rebuild or a new service instance must
+        // not make it start over on the same network.
+        @Volatile private var sentNetKey: String? = null
+        @Volatile private var sentNet: Long? = null
+
+        internal fun forgetNetKeyForTests() {
+            sentNetKey = null
+            sentNet = null
+        }
     }
 
     // host is for SNI/cert only; the client never resolves it (would loop
@@ -1283,13 +1294,11 @@ class TunnelVpnService : VpnService() {
         defaultDns = null
         defaultValidated = null
         defaultCaps = null
-        sentNetKey = null
         synchronized(networks) { networks.clear() }
     }
 
-    // The default network's transports, and the key Go last heard. Main thread.
+    // The default network's transports.
     @Volatile private var defaultCaps: Pair<Network, NetworkCapabilities>? = null
-    @Volatile private var sentNetKey: String? = null
 
     private fun updateNetKey() {
         val (net, caps) = defaultCaps ?: return
@@ -1300,7 +1309,10 @@ class TunnelVpnService : VpnService() {
             operator = if (cell) carrier() else null,
             wifiId = net.networkHandle.toString().takeIf { defaultDns?.first == net },
         )
-        if (key == sentNetKey) return
+        // Not known yet on this network (its resolvers after a restart, the
+        // carrier's code): Go keeps what it has for it.
+        if (net.networkHandle == sentNet && (key == sentNetKey || key == "" || key == "cell:")) return
+        sentNet = net.networkHandle
         sentNetKey = key
         backend.setNetKey(key)
     }

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -120,40 +121,109 @@ func TestAsnLookup(t *testing.T) {
 	}
 }
 
-// A Wi-Fi gets its name from the lookup, and the map's entry for it.
-func TestSetNetKey_WifiAsksForTheProvider(t *testing.T) {
-	p, _, _ := picking(t)
+// asnServer answers every lookup with AS8359 and counts them; the
+// services, resolver and roots point at it until the test ends.
+func asnServer(t *testing.T) *atomic.Int32 {
+	t.Helper()
 	var asked atomic.Int32
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		asked.Add(1)
 		fmt.Fprint(w, `{"asn":"AS8359"}`)
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
-	oldS, oldR, oldP, oldRoots := asnServices, asnResolve, asnPort, asnRoots
-	t.Cleanup(func() { asnServices, asnResolve, asnPort, asnRoots = oldS, oldR, oldP, oldRoots })
+	oldS, oldR, oldP, oldRoots, oldW := asnServices, asnResolve, asnPort, asnRoots, asnDNSWait
+	t.Cleanup(func() { asnServices, asnResolve, asnPort, asnRoots, asnDNSWait = oldS, oldR, oldP, oldRoots, oldW })
 	asnRoots, asnPort = x509Pool(srv), port
 	asnResolve = func(context.Context, string) (net.IP, error) { return net.IPv4(127, 0, 0, 1), nil }
 	asnServices = []asnService{{"example.com", "/json", func(m map[string]any) string { return asnOf(m["asn"]) }}}
+	return &asked
+}
+
+func (p *pickState) awaitKey(t *testing.T, key string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		p.mu.Lock()
+		k := p.key
+		p.mu.Unlock()
+		if k == key {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("key never became %s", key)
+}
+
+// A Wi-Fi gets its name from the lookup, and the map's entry for it. The
+// same Wi-Fi again, or a Stop and Start on it, asks no more and keeps
+// what was learned.
+func TestSetNetKey_WifiAsksForTheProvider(t *testing.T) {
+	p, fp, _ := picking(t)
+	fp.dns = "127.0.0.1"
+	asked := asnServer(t)
 	p.mu.Lock()
 	p.nets["wifi:AS8359"] = netEntry{Win: "oob-mid", At: p.now().Unix()}
 	p.mu.Unlock()
 
 	p.setNetKey("wifi@100")
-	deadline := time.Now().Add(5 * time.Second)
-	for p.curID() != "oob-mid" && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	p.awaitKey(t, "wifi:AS8359")
+	if p.curID() != "oob-mid" || !p.won {
+		t.Fatalf("from the map: %s", p.curID())
 	}
-	p.mu.Lock()
-	key, won := p.key, p.won
-	p.mu.Unlock()
-	if key != "wifi:AS8359" || !won {
-		t.Fatalf("key %q, won %v", key, won)
-	}
-	// Once per network: a rebuild's Start does not ask again.
+	try(p, "1.1.1.1", true)
+
 	p.started(p.file)
 	time.Sleep(100 * time.Millisecond)
-	if asked.Load() != 1 {
-		t.Fatalf("asked %d times", asked.Load())
+	p.mu.Lock()
+	kept := p.ok.has("1.1.1.1")
+	p.mu.Unlock()
+	if !kept || asked.Load() != 1 {
+		t.Fatalf("after a restart: kept %v, asked %d times", kept, asked.Load())
+	}
+
+	p.setNetKey("cell:25001")
+	p.setNetKey("wifi@100")
+	time.Sleep(100 * time.Millisecond)
+	p.mu.Lock()
+	key := p.key
+	p.mu.Unlock()
+	if key != "wifi:AS8359" || asked.Load() != 1 {
+		t.Fatalf("back on it: %s, asked %d times", key, asked.Load())
+	}
+}
+
+// No resolvers yet: no lookup that could only fail, no line per service;
+// the next Start asks once they are there. Nameless after nameless says
+// nothing.
+func TestSetNetKey_WifiWaitsForItsResolvers(t *testing.T) {
+	p, fp, _ := picking(t)
+	asked := asnServer(t)
+	asnDNSWait = 200 * time.Millisecond
+	out := captureLog(t)
+	SetVerbose(true)
+	t.Cleanup(func() { SetVerbose(false) })
+	p.setNetKey("")
+	p.setNetKey("wifi@7")
+	time.Sleep(400 * time.Millisecond)
+	if asked.Load() != 0 {
+		t.Fatal("asked without resolvers")
+	}
+	fp.mu.Lock()
+	fp.dns = "127.0.0.1"
+	fp.mu.Unlock()
+	p.started(p.file)
+	p.awaitKey(t, "wifi:AS8359")
+	nameless := 0
+	for _, l := range out.lines {
+		if strings.Contains(l, "without a name") {
+			nameless++
+		}
+		if strings.Contains(l, "asn from") {
+			t.Errorf("line %q", l)
+		}
+	}
+	if nameless != 1 {
+		t.Fatalf("%d nameless lines: %v", nameless, out.lines)
 	}
 }

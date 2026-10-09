@@ -42,6 +42,7 @@ class DirectTest {
         TunnelState.clearLog()
         ShadowLooper.idleMainLooper()
         AppLog.dir(app).deleteRecursively()
+        TunnelVpnService.forgetNetKeyForTests()
         controller = Robolectric.buildService(TunnelVpnService::class.java).create()
         svc.backend = be
         Credentials.save(app, fakeCred(System.currentTimeMillis() / 1000 + 5 * 86400))
@@ -183,6 +184,31 @@ class DirectTest {
         cb.onCapabilitiesChanged(lte, caps(NetworkCapabilities.TRANSPORT_CELLULAR))
         cb.onLinkPropertiesChanged(lte, lp("10.0.0.1"))
         assertEquals(listOf("cell:", "cell:25001"), be.netKeys)
+    }
+
+    // Go keeps what it learned about a network through a stop and a start
+    // (a rebuild every 10 min at most): the same network again is no news,
+    // nor are its resolvers still on their way.
+    @Test
+    fun stopAndStartOnTheSameNetworkIsNoNews() {
+        start()
+        val wifi = ShadowNetwork.newInstance(7)
+        defaultCallback().apply {
+            onAvailable(wifi)
+            onCapabilitiesChanged(wifi, caps(NetworkCapabilities.TRANSPORT_WIFI))
+            onLinkPropertiesChanged(wifi, lp("192.168.1.1"))
+        }
+        svc.onStartCommand(Intent(TunnelVpnService.ACTION_STOP), 0, 2)
+        awaitServiceThreads()
+        ShadowLooper.idleMainLooper(4, TimeUnit.SECONDS)
+        be.netKeys.clear()
+        start()
+        defaultCallback().apply {
+            onAvailable(wifi)
+            onCapabilitiesChanged(wifi, caps(NetworkCapabilities.TRANSPORT_WIFI))
+            onLinkPropertiesChanged(wifi, lp("192.168.1.1"))
+        }
+        assertEquals(emptyList<String>(), be.netKeys)
     }
 
     // The YouTube card reads Go's verdict from the snapshot.

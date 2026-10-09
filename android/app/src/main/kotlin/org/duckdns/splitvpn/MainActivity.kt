@@ -413,7 +413,7 @@ class MainActivity : Activity() {
             // Also while the server is down: direct YouTube does not need it.
             val status = if (svc.id == "youtube" && en && state == VpnState.CONNECTED) when (direct) {
                 "works" -> "YouTube напрямую"
-                "testing" -> "подбираю…"
+                "testing" -> "ищу обход…"
                 else -> null
             } else null
             note.text = status ?: ping
@@ -684,7 +684,7 @@ class MainActivity : Activity() {
         }
         val popup = PopupWindow(menu, dp(264), ViewGroup.LayoutParams.WRAP_CONTENT, true)
         menu.addView(switchItem("Блокировать рекламу", null, KEY_ADBLOCK, false, ink, dim, side))
-        menu.addView(switchItem("YouTube напрямую", "Напрямую, с обходом замедления у провайдера. Не тратит лимит", KEY_DIRECT, true, ink, dim, side))
+        menu.addView(switchItem("YouTube напрямую", "С обходом замедления у провайдера. Не тратит лимит", KEY_DIRECT, true, ink, dim, side))
         menu.addView(notificationItem(ink, dim, side, popup))
         menu.addView(TextView(this).apply {
             text = "Поделиться приложением"

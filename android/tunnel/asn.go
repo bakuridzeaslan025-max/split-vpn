@@ -54,6 +54,7 @@ var asnServices = []asnService{
 var (
 	asnTimeout = 3 * time.Second // each service
 	asnBudget  = 8 * time.Second // all of them
+	asnDNSWait = 5 * time.Second // for the network's resolvers
 	// Tests point these elsewhere.
 	asnResolve = resolveDirect
 	asnPort    = "443"
@@ -135,6 +136,13 @@ func asnFrom(s asnService, timeout time.Duration) (string, error) {
 		return a, nil
 	}
 	return "", errors.New("no asn in the answer")
+}
+
+func dnsServers() string {
+	if p := protector; p != nil {
+		return strings.TrimSpace(p.DnsServers())
+	}
+	return ""
 }
 
 // resolveDirect asks the network's resolver: the system's one is our own

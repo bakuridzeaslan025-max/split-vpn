@@ -25,8 +25,8 @@ class DailyQuotaTest {
 
     @After
     fun tearDown() {
-        // Back to the default limit; the test's traffic is not the emulator's day.
-        vpn.start("telegram", quotaMb = Quota.DEFAULT_MB, quotaReset = true)
+        // Back to the default limit and direct YouTube; the test's traffic is not the emulator's day.
+        vpn.start("telegram", quotaMb = Quota.DEFAULT_MB, quotaReset = true, direct = true)
         vpn.awaitState(VpnState.CONNECTED)
         vpn.stop()
         vpn.awaitStopped()
@@ -42,7 +42,8 @@ class DailyQuotaTest {
 
     @Test
     fun usedUpLimitStopsTheVpn() {
-        vpn.start("youtube", quotaMb = 1, quotaReset = true)
+        // Direct YouTube costs no quota: its traffic must go through the relay here.
+        vpn.start("youtube", quotaMb = 1, quotaReset = true, direct = false)
         vpn.awaitState(VpnState.CONNECTED)
         val deadline = System.currentTimeMillis() + 60_000
         while (vpn.state == VpnState.CONNECTED && System.currentTimeMillis() < deadline) get("https://www.youtube.com/")

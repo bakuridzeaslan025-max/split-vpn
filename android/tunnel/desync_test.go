@@ -470,6 +470,39 @@ func TestCountConn_PeakOfThrottledAndOfFast(t *testing.T) {
 	}
 }
 
+// SIOCOUTQNSD is denied to apps: the send queue is read from tcp_info,
+// which an old kernel (before 4.6) fills too short to hold it.
+func TestWaitSent_TCPInfo(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			io.Copy(io.Discard, c)
+			c.Close()
+		}
+	}()
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.Write([]byte("hello"))
+	if w, why := waitSent(c.(*net.TCPConn)); w != sentDrained {
+		t.Fatalf("loopback: %v, %v", w, why)
+	}
+	var info [232]byte
+	info[144] = 7
+	if n, err := notSent(info[:]); n != 7 || err != nil {
+		t.Fatalf("%d, %v", n, err)
+	}
+	if _, err := notSent(info[:144]); err == nil {
+		t.Fatal("a 4.4 kernel's tcp_info read as having notsent")
+	}
+}
+
 func TestCountConn_Peak(t *testing.T) {
 	a, b := net.Pipe()
 	defer a.Close()

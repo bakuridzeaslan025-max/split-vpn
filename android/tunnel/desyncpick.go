@@ -118,6 +118,7 @@ type pickState struct {
 	key      string // in the map; "" for a network without a name
 	gen      uint64 // results from an earlier network do not count
 	asnTried bool
+	asns     map[string]string // "wifi@<id>" → its ASN, for the process: a restart does not ask again
 
 	cur       string // strategy id
 	won       bool   // cur is this network's winner, from the map or found now
@@ -173,14 +174,25 @@ func (p *pickState) setNetKey(raw string) {
 		p.mu.Unlock()
 		return
 	}
-	p.raw, p.asnTried = raw, false
-	p.key = ""
+	key := ""
 	if code, ok := strings.CutPrefix(raw, "cell:"); ok && code != "" {
-		p.key = raw
+		key = raw
 	}
+	if asn, ok := p.asns[raw]; ok {
+		key = "wifi:AS" + asn
+	}
+	p.raw, p.asnTried = raw, false
+	// The same network under another id (a Wi-Fi joined again): its memory stays.
+	if key != "" && key == p.key {
+		p.unlockAndTell()
+		return
+	}
+	was := p.key
+	p.key = key
 	p.resetLocked()
 	p.applyLocked()
-	if directOn.Load() && len(strategiesNow()) > 0 {
+	// A nameless one after a nameless one is no news for the log.
+	if directOn.Load() && len(strategiesNow()) > 0 && (key != "" || was != "") {
 		log.Printf("sni desync: network %s, starting from %s", p.nameLocked(), p.cur)
 	}
 	lookup, gen := p.wantASNLocked(), p.gen
@@ -243,8 +255,27 @@ func (p *pickState) wantASNLocked() bool {
 
 func (p *pickState) lookupASN(gen uint64, raw string) {
 	defer guard("asn")
+	// The services' names resolve through the network's resolvers, and
+	// those may come a moment after the network itself.
+	for deadline := time.Now().Add(asnDNSWait); dnsServers() == "" && time.Now().Before(deadline); {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if dnsServers() == "" {
+		p.mu.Lock()
+		if p.raw == raw {
+			p.asnTried = false // the next Start asks
+		}
+		p.mu.Unlock()
+		return
+	}
 	asn, from := asnLookup()
 	p.mu.Lock()
+	if asn != "" {
+		if p.asns == nil {
+			p.asns = map[string]string{}
+		}
+		p.asns[raw] = asn
+	}
 	if p.gen != gen || p.raw != raw {
 		p.mu.Unlock()
 		return

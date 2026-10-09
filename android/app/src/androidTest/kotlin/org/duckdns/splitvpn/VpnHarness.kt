@@ -99,9 +99,10 @@ class VpnHarness {
      * [quotaMb]: the daily limit, as if from Remote Config; it stays until the next one.
      * [quotaReset]: today's count starts from zero.
      */
-    fun start(vararg services: String, forgetCred: Boolean = false, rcList: String? = null, quotaMb: Long? = null, quotaReset: Boolean = false) {
+    fun start(vararg services: String, forgetCred: Boolean = false, rcList: String? = null, quotaMb: Long? = null, quotaReset: Boolean = false, direct: Boolean? = null) {
         val i = Intent(ctx, TunnelVpnService::class.java).setAction(TunnelVpnService.ACTION_START)
             .putStringArrayListExtra(TunnelVpnService.EXTRA_SERVICES, arrayListOf(*services))
+        direct?.let { i.putExtra(TunnelVpnService.EXTRA_DIRECT, it) }
         quotaMb?.let { i.putExtra(TunnelVpnService.EXTRA_QUOTA_MB, it) }
         if (quotaReset) i.putExtra(TunnelVpnService.EXTRA_QUOTA_RESET, true)
         if (endpoint != null) {

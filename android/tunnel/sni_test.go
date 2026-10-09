@@ -122,8 +122,12 @@ func (f *fakeProtector) Protect(fd int) bool {
 	f.fds = append(f.fds, fd)
 	return f.ok
 }
-func (f *fakeProtector) RoutesStale()       { f.stale.Add(1) }
-func (f *fakeProtector) DnsServers() string { return f.dns }
+func (f *fakeProtector) RoutesStale() { f.stale.Add(1) }
+func (f *fakeProtector) DnsServers() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.dns
+}
 func (f *fakeProtector) RelayDown(down bool) {
 	f.mu.Lock()
 	f.down = append(f.down, down)

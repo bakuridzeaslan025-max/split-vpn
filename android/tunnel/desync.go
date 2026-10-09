@@ -467,34 +467,73 @@ func sendOOB(c *net.TCPConn, b []byte) error {
 }
 
 const (
-	siocOutQNSD  = 0x894B // linux/sockios.h: bytes in the send queue not yet sent
 	sendQueueCap = 50 * time.Millisecond
+	// Without tcp_info's notsent count (an old kernel): a pause instead,
+	// usually long enough for a segment to leave.
+	sendPause = 5 * time.Millisecond
+	// tcp_info up to tcpi_notsent_bytes (Linux 4.6); minSdk 26 allows 4.4.
+	tcpInfoNotSentEnd = 148
+)
+
+// tcpInfo reads struct tcp_info; n is what the kernel filled. The ioctl
+// SIOCOUTQNSD would say the same, but SELinux denies it to apps.
+func tcpInfo(c *net.TCPConn) (info [232]byte, n int, err error) {
+	rc, err := c.SyscallConn()
+	if err != nil {
+		return info, 0, err
+	}
+	l := uint32(len(info))
+	var errno syscall.Errno
+	if err := rc.Control(func(fd uintptr) {
+		_, _, errno = syscall.Syscall6(syscall.SYS_GETSOCKOPT, fd, syscall.IPPROTO_TCP, syscall.TCP_INFO,
+			uintptr(unsafe.Pointer(&info[0])), uintptr(unsafe.Pointer(&l)), 0)
+	}); err != nil {
+		return info, 0, err
+	}
+	if errno != 0 {
+		return info, 0, errno
+	}
+	return info, int(l), nil
+}
+
+// notSent is tcpi_notsent_bytes: written, not yet on the wire.
+func notSent(info []byte) (uint32, error) {
+	if len(info) < tcpInfoNotSentEnd {
+		return 0, fmt.Errorf("tcp_info of %d bytes, no notsent", len(info))
+	}
+	return binary.NativeEndian.Uint32(info[144:]), nil
+}
+
+type sendWait int
+
+const (
+	sentDrained sendWait = iota
+	sentCapped           // still queued at the cap
+	sentPaused           // no notsent count: a fixed pause
 )
 
 // waitSent waits for the kernel to put everything written so far on the
 // wire, as ByeDPI's wait_send. TCP_NODELAY does not stop autocorking: a
 // write while the last one still sits in the queue joins it, and the
 // segments a strategy needs (and TTL 1 on one of them) melt into one.
-// Reports whether the queue drained before the cap.
-func waitSent(c *net.TCPConn) bool {
-	rc, err := c.SyscallConn()
-	if err != nil {
-		return false
-	}
+// why says what stood in the way of counting, for sentPaused.
+func waitSent(c *net.TCPConn) (w sendWait, why error) {
 	deadline := time.Now().Add(sendQueueCap)
 	for {
-		var n int32
-		var errno syscall.Errno
-		if rc.Control(func(fd uintptr) {
-			_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, fd, siocOutQNSD, uintptr(unsafe.Pointer(&n)))
-		}) != nil || errno != 0 {
-			return false
+		info, n, err := tcpInfo(c)
+		var left uint32
+		if err == nil {
+			left, err = notSent(info[:n])
 		}
-		if n == 0 {
-			return true
+		if err != nil {
+			time.Sleep(sendPause)
+			return sentPaused, err
+		}
+		if left == 0 {
+			return sentDrained, nil
 		}
 		if time.Now().After(deadline) {
-			return false
+			return sentCapped, nil
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -503,17 +542,8 @@ func waitSent(c *net.TCPConn) bool {
 // segsOut is tcp_info's tcpi_segs_out (Linux 4.2+): the segments the
 // socket really sent, for the debug log.
 func segsOut(c *net.TCPConn) (uint32, bool) {
-	rc, err := c.SyscallConn()
-	if err != nil {
-		return 0, false
-	}
-	var info [232]byte
-	n := uint32(len(info))
-	var errno syscall.Errno
-	if rc.Control(func(fd uintptr) {
-		_, _, errno = syscall.Syscall6(syscall.SYS_GETSOCKOPT, fd, syscall.IPPROTO_TCP, syscall.TCP_INFO,
-			uintptr(unsafe.Pointer(&info[0])), uintptr(unsafe.Pointer(&n)), 0)
-	}) != nil || errno != 0 || n < 140 {
+	info, n, err := tcpInfo(c)
+	if err != nil || n < 140 {
 		return 0, false
 	}
 	return binary.NativeEndian.Uint32(info[136:]), true
@@ -537,7 +567,8 @@ func sendDesync(c *net.TCPConn, st *strategy, h []byte) (string, error) {
 		segs0, counted = segsOut(c)
 	}
 	var desc []string
-	merged := 0
+	capped, paused := 0, 0
+	var pauseWhy error
 	for i, s := range segs {
 		low := ttl1[i]
 		if low {
@@ -552,8 +583,13 @@ func sendDesync(c *net.TCPConn, st *strategy, h []byte) (string, error) {
 			_, err = c.Write(part)
 		}
 		// TTL is taken when the segment leaves, not when it is written.
-		if err == nil && i < len(segs)-1 && !waitSent(c) {
-			merged++
+		if err == nil && i < len(segs)-1 {
+			switch w, why := waitSent(c); w {
+			case sentCapped:
+				capped++
+			case sentPaused:
+				paused, pauseWhy = paused+1, why
+			}
 		}
 		if low {
 			if e := setSockInt(c, syscall.IPPROTO_IP, syscall.IP_TTL, ttl); e != nil && err == nil {
@@ -582,8 +618,11 @@ func sendDesync(c *net.TCPConn, st *strategy, h []byte) (string, error) {
 	if n, ok := segsOut(c); counted && ok {
 		r += fmt.Sprintf(", %d sent", n-segs0)
 	}
-	if merged > 0 {
-		r += fmt.Sprintf(", queue not drained %d×", merged)
+	if capped > 0 {
+		r += fmt.Sprintf(", queue not drained in %s %d×", sendQueueCap, capped)
+	}
+	if paused > 0 {
+		r += fmt.Sprintf(", paused %s %d× (%v)", sendPause, paused, pauseWhy)
 	}
 	return r, nil
 }

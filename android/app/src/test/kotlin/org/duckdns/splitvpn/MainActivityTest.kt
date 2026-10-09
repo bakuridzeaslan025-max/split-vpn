@@ -290,7 +290,7 @@ class MainActivityTest {
     fun youTubeDirectIsSecondOnByDefaultAndLockedWhileConnected() {
         launch()
         val item = menuItem(1)
-        assertEquals(listOf("YouTube напрямую", "Напрямую, с обходом замедления у провайдера. Не тратит лимит"), item.texts())
+        assertEquals(listOf("YouTube напрямую", "С обходом замедления у провайдера. Не тратит лимит"), item.texts())
         val info = AccessibilityNodeInfo.obtain()
         item.onInitializeAccessibilityNodeInfo(info)
         assertTrue(info.isChecked)
@@ -315,7 +315,7 @@ class MainActivityTest {
         connect("YouTube: 120 мс")
         assertEquals("120 мс", a.note("youtube"))
         verdict("testing")
-        assertEquals("подбираю…", a.note("youtube"))
+        assertEquals("ищу обход…", a.note("youtube"))
         verdict("works")
         assertEquals("YouTube напрямую", a.note("youtube"))
         assertEquals(app.getColor(R.color.simple_blue), a.row("youtube").findViewById<TextView>(R.id.note).currentTextColor)
