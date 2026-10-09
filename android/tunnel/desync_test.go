@@ -527,14 +527,23 @@ func TestCountConn_PeakOfThrottledAndOfFast(t *testing.T) {
 	if slow.peak == 0 || slow.peak > slowPeak {
 		t.Fatalf("throttled at ~30 KB/s: peak %d KB/s", slow.peak>>10)
 	}
+	// A 1 MB chunk in ~0.4 s, then a pause: the burst's own rate, ~2.5 MB/s.
 	fast := read(func(a net.Conn) {
-		for range 3 {
-			a.Write(make([]byte, 1<<20))
+		for range 2 {
+			for range 16 {
+				a.Write(make([]byte, 64<<10))
+				time.Sleep(25 * time.Millisecond)
+			}
 			time.Sleep(600 * time.Millisecond)
 		}
 	})
-	if fast.peak != 0 {
-		t.Fatalf("fast chunks: peak %d KB/s", fast.peak>>10)
+	if fast.peak < 1<<20 || fast.peak > 4<<20 {
+		t.Fatalf("1 MB in 0.4 s: peak %d KB/s", fast.peak>>10)
+	}
+	// All at once: the socket buffer, not the network.
+	instant := read(func(a net.Conn) { a.Write(make([]byte, 1<<20)) })
+	if instant.peak != 0 {
+		t.Fatalf("one instant burst: peak %d KB/s", instant.peak>>10)
 	}
 }
 

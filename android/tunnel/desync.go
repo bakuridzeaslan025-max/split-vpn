@@ -688,18 +688,27 @@ func dialDesync(name, dst string, hello []byte, st *strategy) (net.Conn, []byte,
 // CloseWrite in the other; both are read only after relay returns.
 type countConn struct {
 	net.Conn
-	up, down int64
-	winStart time.Time
-	lastRead time.Time
-	winBytes int64
-	peak     int64 // bytes/s
-	readErr  error // how the server side ended
-	readEnd  time.Time
-	appEnd   time.Time // the app finished sending
+	up, down   int64
+	burstStart time.Time
+	lastRead   time.Time
+	burstBytes int64
+	peak       int64 // bytes/s
+	readErr    error // how the server side ended
+	readEnd    time.Time
+	appEnd     time.Time // the app finished sending
 }
 
-// Read measures the peak: the best ≥1 s window down, the rate DPI would
-// cap if it throttled after the handshake.
+// A burst: reads with no pause over burstGap between them. YouTube fetches
+// a chunk at full speed and then idles, so the rate of a burst, not of the
+// whole session, is what DPI throttling would cap.
+const (
+	burstGap      = 500 * time.Millisecond
+	burstMinTime  = 250 * time.Millisecond // shorter ones are mostly the socket buffer
+	burstMinBytes = 64 << 10               // so are small ones, unless they took a while
+	burstLong     = time.Second
+)
+
+// Read measures the peak: the fastest burst down.
 func (c *countConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	c.down += int64(n)
@@ -707,34 +716,29 @@ func (c *countConn) Read(p []byte) (int, error) {
 	if err != nil && c.readErr == nil {
 		c.readErr, c.readEnd = err, now
 	}
-	// A pause ends the window where the data stopped: YouTube fetches in
-	// bursts, an idle gap inside the window would hide the burst's rate.
-	if !c.lastRead.IsZero() && now.Sub(c.lastRead) > 500*time.Millisecond {
-		c.closeWindow(c.lastRead)
-		c.winStart = time.Time{}
+	if !c.lastRead.IsZero() && now.Sub(c.lastRead) > burstGap {
+		c.closeBurst()
 	}
-	// The read that opens a window arrived before it: not part of its rate.
-	if c.winStart.IsZero() {
-		c.winStart, c.winBytes = now, 0
+	// The read that opens a burst arrived before it: not part of its rate.
+	if c.burstStart.IsZero() {
+		c.burstStart, c.burstBytes = now, 0
 	} else {
-		c.winBytes += int64(n)
+		c.burstBytes += int64(n)
 	}
 	c.lastRead = now
-	if err != nil || now.Sub(c.winStart) >= time.Second {
-		c.closeWindow(now)
-		c.winStart = time.Time{}
+	if err != nil {
+		c.closeBurst()
 	}
 	return n, err
 }
 
-// closeWindow: only a window of a second or more counts, shorter bursts
-// say little about the rate.
-func (c *countConn) closeWindow(end time.Time) {
-	if d := end.Sub(c.winStart); d >= time.Second {
-		if r := int64(float64(c.winBytes) / d.Seconds()); r > c.peak {
+func (c *countConn) closeBurst() {
+	if d := c.lastRead.Sub(c.burstStart); d >= burstLong || d >= burstMinTime && c.burstBytes >= burstMinBytes {
+		if r := int64(float64(c.burstBytes) / d.Seconds()); r > c.peak {
 			c.peak = r
 		}
 	}
+	c.burstStart = time.Time{}
 }
 
 func (c *countConn) Write(p []byte) (int, error) {

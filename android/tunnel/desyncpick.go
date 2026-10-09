@@ -440,7 +440,7 @@ func (p *pickState) finished(gen uint64, id, ip, name string, f finish) {
 		}
 		return
 	}
-	// No whole second of steady data (fast chunks with pauses between):
+	// No burst long and big enough to measure (a few small requests):
 	// nothing to judge the rate by.
 	if f.peak == 0 {
 		return
