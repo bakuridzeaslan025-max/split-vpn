@@ -101,7 +101,12 @@ class DirectTest {
     fun strategiesBuiltInUntilAFetch() {
         start()
         assertEquals(BuildConfig.YT_STRATEGIES, be.startedStrategies)
-        assertTrue(BuildConfig.YT_STRATEGIES, BuildConfig.YT_STRATEGIES.startsWith("[{\"id\":\"rec2\""))
+        val list = org.json.JSONArray(BuildConfig.YT_STRATEGIES)
+        assertTrue(BuildConfig.YT_STRATEGIES, list.length() > 0)
+        for (i in 0 until list.length()) {
+            val s = list.getJSONObject(i)
+            assertTrue(BuildConfig.YT_STRATEGIES, s.getString("id").isNotEmpty() && s.has("spec"))
+        }
     }
 
     @Test

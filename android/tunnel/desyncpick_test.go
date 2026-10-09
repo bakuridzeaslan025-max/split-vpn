@@ -409,3 +409,32 @@ func TestPick_LinesStartWithSni(t *testing.T) {
 		t.Fatalf("lines %v", out.lines)
 	}
 }
+
+// Remote Config's list came back after an empty one: the map's winner on
+// this network counts again at the next Start, without a network change.
+func TestPick_ListBackAfterEmpty(t *testing.T) {
+	p, _, file := picking(t)
+	p.mu.Lock()
+	p.nets["cell:25009"] = netEntry{Win: "dis-mid", At: p.now().Unix()}
+	p.mu.Unlock()
+	SetStrategies("[]")
+	p.setNetKey("cell:25009")
+	SetStrategies(planStrategies)
+	p.started(file)
+	if p.curID() != "dis-mid" || !p.won {
+		t.Fatalf("on %s, won %v", p.curID(), p.won)
+	}
+}
+
+// The week of "nothing works" ends at a pick: the host hears it.
+func TestPick_WeekOverIsTold(t *testing.T) {
+	p, fp, _ := picking(t)
+	for range 2 * len(strategiesNow()) {
+		try(p, "1.1.1.1", false)
+	}
+	advance(p, noneFor)
+	p.pick("1.1.1.1")
+	if v := fp.verdicts(); v[len(v)-1] == verdictFails {
+		t.Fatalf("host still thinks %v", v)
+	}
+}

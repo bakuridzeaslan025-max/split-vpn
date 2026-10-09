@@ -69,6 +69,14 @@ func (h *relayHealth) down() bool {
 	return h.fails > 0
 }
 
+// refusing: down for sure, the breaker is open. Not down(): one failed
+// dial is no outage yet.
+func (h *relayHealth) refusing() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.open
+}
+
 func (h *relayHealth) allow() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()

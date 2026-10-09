@@ -160,6 +160,11 @@ func (p *pickState) started(file string) {
 		}
 		p.applyLocked()
 	}
+	// SetStrategies before this Start may have brought a list without the
+	// current one (or a list after an empty one: the map's winner waits).
+	if list := strategiesNow(); len(list) > 0 && !hasID(list, p.cur) {
+		p.restartLocked()
+	}
 	lookup, gen, raw := p.wantASNLocked(), p.gen, p.raw
 	p.told = ""
 	p.unlockAndTell()
@@ -300,7 +305,8 @@ func (p *pickState) pick(ip string) (*strategy, uint64) {
 		return nil, 0
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	// The week's end changes the verdict.
+	defer p.unlockAndTell()
 	now := p.now()
 	if !p.noneUntil.IsZero() {
 		if now.Before(p.noneUntil) {
@@ -317,12 +323,28 @@ func (p *pickState) pick(ip string) (*strategy, uint64) {
 	}
 	i := slices.IndexFunc(list, func(s strategy) bool { return s.id == p.cur })
 	if i < 0 {
-		// Gone from Remote Config's list.
-		p.cur, p.won, p.confirmed, p.passed = list[0].id, false, false, false
-		p.fails, p.tried, p.ok = 0, 0, addrs{}
-		i = 0
+		p.restartLocked()
+		i = slices.IndexFunc(list, func(s strategy) bool { return s.id == p.cur })
 	}
 	return &list[i], p.gen
+}
+
+// restartLocked: the current strategy is gone from Remote Config's list
+// (or the list was empty): start this network again where the map says.
+func (p *pickState) restartLocked() {
+	p.won, p.confirmed, p.passed = false, false, false
+	p.fails, p.tried, p.ok = 0, 0, addrs{}
+	p.applyLocked()
+}
+
+// unreachable: the direct socket did not even connect, the hello never
+// left. The strategy is not to blame; the address goes by relay a while.
+func (p *pickState) unreachable(gen uint64, ip string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if gen == p.gen {
+		p.silent.put(ip, p.now().Add(silentFor))
+	}
 }
 
 // result of a direct try: did the server answer the hello. start is when
@@ -539,13 +561,14 @@ func loadNetMap(file string) map[string]netEntry {
 
 // YouTube's own names resolve through DoH as everything of ours, so the
 // relay's view keeps them inside the TUN's routes. Only while the relay
-// is down and a strategy gets through here, the network's resolver: then
+// is down for sure (the breaker open: the network's answers bring
+// RoutesStale and a rebuild that cuts every relay session) and a strategy gets through here, the network's resolver: then
 // YouTube lives without the server. Its answers are dropped once the
 // relay is back.
 var directDNSUsed atomic.Bool
 
 func directDNSWanted(name string) bool {
-	return desyncByName(name) && health.down() && picker.hasWinner()
+	return desyncByName(name) && health.refusing() && picker.hasWinner()
 }
 
 func dropDirectDNS() {

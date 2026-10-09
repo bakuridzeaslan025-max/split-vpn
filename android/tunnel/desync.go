@@ -6,7 +6,7 @@ package tunnel
 // connection the server does not answer falls back to the relay with the
 // same hello: the app sees nothing but a delay. Which strategy works is
 // picked on live traffic per network, see desyncpick.go. Every line starts
-// with "sni ": Crashlytics never gets them. Plan: private/plans/youtube-direct.md.
+// with "sni ": Crashlytics never gets them.
 
 import (
 	"context"
@@ -627,7 +627,11 @@ func sendDesync(c *net.TCPConn, st *strategy, h []byte) (string, error) {
 	return r, nil
 }
 
-var errDesyncStopped = errors.New("stopped")
+var (
+	errDesyncStopped = errors.New("stopped")
+	// The hello never went out: nothing to say about the strategy.
+	errNoConnect = errors.New("connect")
+)
 
 // dialDesync: direct socket, desynced hello, first answer from the server,
 // all within desyncWait. Only the hello's own record is cut; bytes the app
@@ -641,7 +645,7 @@ func dialDesync(name, dst string, hello []byte, st *strategy) (net.Conn, []byte,
 	defer cancel()
 	c, err := dialDirect(ctx, "tcp", dst)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("connect: %w", err)
+		return nil, nil, "", fmt.Errorf("%w: %w", errNoConnect, err)
 	}
 	tr := &trackedConn{Conn: c}
 	if !trackConn(tr) {
@@ -803,7 +807,11 @@ func tryDesync(app net.Conn, first []byte, name string, dstIP net.IP, dstPort ui
 	if errors.Is(err, errDesyncStopped) || errors.Is(err, net.ErrClosed) {
 		return first, true
 	}
-	picker.result(gen, st.id, ip, start, err == nil, fmt.Sprint(err))
+	if errors.Is(err, errNoConnect) {
+		picker.unreachable(gen, ip)
+	} else {
+		picker.result(gen, st.id, ip, start, err == nil, fmt.Sprint(err))
+	}
 	if err != nil {
 		if verbose.Load() {
 			log.Printf("sni desync %s → %s %s FAIL: %v → relay", name, dst, st.id, err)
@@ -827,6 +835,10 @@ func tryDesync(app net.Conn, first []byte, name string, dstIP net.IP, dstPort ui
 		log.Printf("sni desync %s %s done: down %d KB, up %d KB in %s (avg %.0f KB/s, peak %d KB/s), server: %v",
 			name, st.id, down/1024, out.up/1024, d.Round(100*time.Millisecond),
 			float64(down)/1024/max(d.Seconds(), 0.001), out.peak/1024, out.readErr)
+	}
+	// The server's end, not the app's: an app may keep its side open long after.
+	if out.serverFirst() {
+		d = out.readEnd.Sub(start)
 	}
 	picker.finished(gen, st.id, ip, name, finish{
 		start: start, dur: d, down: down, up: out.up, peak: out.peak,

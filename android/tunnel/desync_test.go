@@ -343,6 +343,7 @@ func TestDialDesync_SilenceIsAFailure(t *testing.T) {
 func directWith(t *testing.T, js string) *pickState {
 	t.Helper()
 	p := freshPicker(t)
+	p.now = time.Now // tryDesync's start times are real ones
 	SetStrategies(js)
 	directOn.Store(true)
 	t.Cleanup(func() { strategies.Store(nil); directOn.Store(false) })
@@ -392,6 +393,74 @@ func TestTryDesync_WaitsForTheHello(t *testing.T) {
 	}
 }
 
+// No connection at all says nothing about the strategy: the hello never
+// went out. The address goes by relay for a while.
+func TestTryDesync_ConnectFailureIsNotTheStrategys(t *testing.T) {
+	withConns(t)
+	p := directWith(t, `[{"id":"rec2","spec":"rec=host+1,midsld;cut=host+1,midsld"}]`)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := uint16(ln.Addr().(*net.TCPAddr).Port)
+	ln.Close() // refused from now on
+	h := clientHello(t, "www.youtube.com")
+	for range 3 {
+		app, peer := net.Pipe()
+		if _, done := tryDesync(app, h, "www.youtube.com", net.IPv4(127, 0, 0, 1), port, time.Now()); done {
+			t.Fatal("no connection, yet served")
+		}
+		app.Close()
+		peer.Close()
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.fails != 0 || p.attempts != 0 || p.cur != "rec2" || !p.silent.has("127.0.0.1") {
+		t.Fatalf("fails %d, attempts %d, on %s, silent %v", p.fails, p.attempts, p.cur, p.silent.has("127.0.0.1"))
+	}
+}
+
+// Stop or a lost network while the hello waits for its answer: our own
+// Close, not the strategy's failure.
+func TestTryDesync_ClosedWhileWaitingIsNotCounted(t *testing.T) {
+	withConns(t)
+	p := directWith(t, `[{"id":"rec2","spec":"rec=host+1,midsld;cut=host+1,midsld"}]`)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			io.Copy(io.Discard, c) // never answers
+			c.Close()
+		}
+	}()
+	h := clientHello(t, "www.youtube.com")
+	app, peer := net.Pipe()
+	defer peer.Close()
+	done := make(chan bool, 1)
+	go func() {
+		_, d := tryDesync(app, h, "www.youtube.com", net.IPv4(127, 0, 0, 1), uint16(ln.Addr().(*net.TCPAddr).Port), time.Now())
+		done <- d
+	}()
+	time.Sleep(200 * time.Millisecond)
+	NetworkLost()
+	select {
+	case d := <-done:
+		if !d {
+			t.Fatal("went on to the relay after our own Close")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("still waiting")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.fails != 0 || p.attempts != 0 {
+		t.Fatalf("counted: fails %d, attempts %d", p.fails, p.attempts)
+	}
+}
+
 // Direct bytes cost the VDS nothing: the quota is the relay's.
 func TestTryDesync_NotCountedInQuota(t *testing.T) {
 	withConns(t)
@@ -426,8 +495,7 @@ func TestSetStrategies_SwapUnderAConnection(t *testing.T) {
 	if st.id != "rec2" || st.norm != "rec=host+1,midsld;cut=host+1,midsld" {
 		t.Fatal("the connection's strategy changed under it")
 	}
-	p.result(gen, st.id, "1.1.1.1", time.Now(), false, "x")
-	p.result(gen, st.id, "1.1.1.1", time.Now(), false, "x")
+	p.result(gen, st.id, "1.1.1.1", p.now(), false, "x")
 	if st2, _ := p.pick("1.1.1.1"); st2 == nil || st2.id != "new" {
 		t.Fatalf("after the swap: %v", st2)
 	}

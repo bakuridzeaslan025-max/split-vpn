@@ -32,7 +32,10 @@ internal object RemoteConfig {
     const val KEY_UPDATE_URL = "rc.update_url"
     const val KEY_YT_STRATEGIES = "rc.yt_strategies"
     private const val KEY_DROPPED = "rc.dropped_endpoints"
+    // Two checks of one value, each with its own memory: one key would
+    // make them report each other's value as new, by turns.
     const val KEY_DROPPED_YT = "rc.dropped_yt_strategies"
+    const val KEY_BAD_YT = "rc.bad_yt_strategies"
 
     fun versions(ctx: Context) = ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).let {
         Versions(it.getLong(KEY_MIN_VERSION, 0), it.getLong(KEY_LATEST_VERSION, 0), it.getString(KEY_UPDATE_URL, "").orEmpty())
@@ -74,7 +77,7 @@ internal object RemoteConfig {
                 if (runCatching { org.json.JSONArray(yt.trim()) }.isSuccess) {
                     ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).edit().putString(KEY_YT_STRATEGIES, yt).apply()
                 } else {
-                    AppLog.e("remote config: yt_strategies is not a JSON array, kept the last one", expected = !firstDrop(ctx, yt, KEY_DROPPED_YT))
+                    AppLog.e("remote config: yt_strategies is not a JSON array, kept the last one", expected = !firstDrop(ctx, yt, KEY_BAD_YT))
                 }
             }
         }

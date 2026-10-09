@@ -229,9 +229,10 @@ func resolveDNS(q []byte) []byte {
 		}
 	} else if key != "" && directDNSWanted(name) {
 		if resp, err := directQuery(q); err == nil {
-			directDNSUsed.Store(true)
 			observeRoutes(resp)
 			dnsCache.Store(key, dnsCacheEntry{msg: resp, exp: time.Now().Add(responseTTL(resp))})
+			// After the Store: a drop in between must find the flag still set.
+			directDNSUsed.Store(true)
 			return withID(resp, q[:2])
 		}
 	}

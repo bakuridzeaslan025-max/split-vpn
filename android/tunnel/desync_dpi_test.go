@@ -217,9 +217,18 @@ func TestResolveDNS_YouTubeByTheNetworkOnlyWhileTheRelayIsDown(t *testing.T) {
 	if a := answer(); a != [4]byte{9, 9, 9, 9} || dohCalls.Load() != 1 {
 		t.Fatalf("relay up: %v", a)
 	}
+	// One failed dial is no outage: the network's answers would bring a
+	// rebuild that cuts every relay session.
 	dnsCache.Clear()
 	health.mu.Lock()
 	health.fails = 1
+	health.mu.Unlock()
+	if a := answer(); a != [4]byte{9, 9, 9, 9} {
+		t.Fatalf("one failure, breaker closed: %v", a)
+	}
+	dnsCache.Clear()
+	health.mu.Lock()
+	health.open = true
 	health.mu.Unlock()
 	setWon(false)
 	if a := answer(); a != [4]byte{9, 9, 9, 9} {
@@ -239,7 +248,7 @@ func TestResolveDNS_YouTubeByTheNetworkOnlyWhileTheRelayIsDown(t *testing.T) {
 	// cache did not.
 	dnsCache.Clear()
 	health.mu.Lock()
-	health.fails = 1
+	health.fails, health.open = 1, true
 	health.mu.Unlock()
 	if a := answer(); a != [4]byte{5, 5, 5, 5} {
 		t.Fatalf("relay down again: %v", a)
