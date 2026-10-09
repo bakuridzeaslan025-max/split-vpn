@@ -38,6 +38,7 @@ func TestAsnServices_Extractors(t *testing.T) {
 			`{}`, `{"asn":null,"org":null,"connection":null}`,
 			`{"asn":[1],"org":5,"connection":"x"}`, `{"connection":{"asn":"x"}}`,
 			`{"ip":"10.0.0.1","bogon":true}`, `{"org":""}`, `{"org":"   "}`, `{"org":"Some ISP"}`,
+			`{"network":null}`, `{"network":{"autonomous_system":"x"}}`, `{"network":{"autonomous_system":{"asn":0}}}`,
 		} {
 			var m map[string]any
 			if err := json.Unmarshal([]byte(body), &m); err != nil {
@@ -49,19 +50,26 @@ func TestAsnServices_Extractors(t *testing.T) {
 		}
 	}
 	for host, body := range map[string]string{
-		"ifconfig.co": `{"asn":"AS8359","asn_org":"MTS PJSC"}`,
-		"ipinfo.io":   `{"org":"AS8359 MTS PJSC"}`,
-		"ipapi.co":    `{"asn":"AS8359"}`,
-		"ipwho.is":    `{"connection":{"asn":8359}}`,
+		"ifconfig.co":  `{"asn":"AS8359","asn_org":"MTS PJSC"}`,
+		"ipinfo.io":    `{"org":"AS8359 MTS PJSC"}`,
+		"ipapi.co":     `{"asn":"AS8359"}`,
+		"ipwho.is":     `{"connection":{"asn":8359}}`,
+		"get.geojs.io": `{"asn":8359,"organization_name":"MTS PJSC"}`,
+		"ip.guide":     `{"network":{"autonomous_system":{"asn":8359,"name":"MTS-AS"}}}`,
 	} {
 		var m map[string]any
 		json.Unmarshal([]byte(body), &m)
+		found := false
 		for _, s := range asnServices {
 			if s.host == host {
+				found = true
 				if got := s.asn(m); got != "8359" {
 					t.Errorf("%s: %q", host, got)
 				}
 			}
+		}
+		if !found {
+			t.Errorf("%s: not in asnServices", host)
 		}
 	}
 }

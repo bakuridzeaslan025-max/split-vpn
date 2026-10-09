@@ -43,6 +43,12 @@ var asnServices = []asnService{
 		c, _ := m["connection"].(map[string]any)
 		return asnOf(c["asn"])
 	}},
+	{"get.geojs.io", "/v1/ip/geo.json", func(m map[string]any) string { return asnOf(m["asn"]) }},
+	{"ip.guide", "/", func(m map[string]any) string {
+		n, _ := m["network"].(map[string]any)
+		a, _ := n["autonomous_system"].(map[string]any)
+		return asnOf(a["asn"])
+	}},
 }
 
 var (
