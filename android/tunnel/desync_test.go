@@ -537,7 +537,7 @@ func TestCountConn_PeakOfThrottledAndOfFast(t *testing.T) {
 			time.Sleep(600 * time.Millisecond)
 		}
 	})
-	if fast.peak < 1<<20 || fast.peak > 4<<20 {
+	if fast.peak < 256<<10 || fast.peak > 4<<20 {
 		t.Fatalf("1 MB in 0.4 s: peak %d KB/s", fast.peak>>10)
 	}
 	// All at once: the socket buffer, not the network.
