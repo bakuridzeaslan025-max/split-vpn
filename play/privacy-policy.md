@@ -1,7 +1,7 @@
 # Политика конфиденциальности Split VPN / Split VPN Privacy Policy
 
 Публичная версия: `privacy-site/index.html` (тот же текст, RU + EN на одной странице).
-Дата вступления в силу: 4 октября 2026 г.
+Дата вступления в силу: 9 октября 2026 г.
 
 ---
 
@@ -9,7 +9,7 @@
 
 ### Политика конфиденциальности приложения Split VPN
 
-Приложение Split VPN (пакет `org.newvpn`) для Android направляет через зашифрованный туннель к серверу разработчика трафик только тех сервисов, которые пользователь отметил в приложении. Весь остальной трафик устройства идёт напрямую и приложением не обрабатывается.
+Приложение Split VPN (пакет `org.newvpn`) для Android направляет через зашифрованный туннель к серверу разработчика трафик только тех сервисов, которые пользователь отметил в приложении. Трафик YouTube приложение может отправлять напрямую, без сервера (см. п. 2). Весь остальной трафик устройства идёт напрямую и приложением не обрабатывается.
 
 #### 1. Аккаунты и персональные данные
 
@@ -19,6 +19,8 @@
 
 Через туннель проходит трафик только к выбранным сервисам. Внутри туннеля он остаётся зашифрованным самими приложениями и сайтами (например, TLS). Мы не расшифровываем, не читаем, не изменяем и не сохраняем содержимое трафика. Мы не подменяем и не вставляем рекламу и не перенаправляем трафик других приложений в коммерческих целях.
 
+Если включён режим «YouTube напрямую», соединения с YouTube приложение отправляет не через сервер, а напрямую, разбивая начало соединения на части, чтобы обойти замедление у провайдера. Содержимое при этом так же остаётся зашифрованным и не читается; если напрямую не получается, соединение идёт через сервер. Провайдер в этом режиме видит, что устройство подключается к YouTube.
+
 #### 3. Технический журнал на сервере
 
 Сервер не записывает, кто к каким адресам и сервисам подключается. В техническом журнале остаются только служебные события и ошибки: время, случайный идентификатор установки из ключа доступа, а при отклонённых соединениях (превышен лимит, неверный ключ) — IP-адрес клиента. В запись о неудачном соединении может попасть адрес назначения, но без сведений о том, кто его запрашивал. Журнал хранится не дольше 90 дней, не передаётся третьим лицам и не используется для профилирования или рекламы.
@@ -27,6 +29,7 @@
 
 - **Журнал приложения** — технические события работы туннеля и имена сервисов, к которым устанавливались соединения. Хранится на устройстве; пользователь может сам отправить его разработчику кнопкой «Поделиться логом». Автоматически журнал не отправляется, кроме отрывка в отчёте о сбое (п. 7).
 - **Кеш адресов сервисов** — список сетевых адресов выбранных сервисов. Хранится только на устройстве.
+- **Сведения о сетях** — для каждой сети (код мобильного оператора или номер сети интернет-провайдера Wi‑Fi) — какой способ обхода для YouTube сработал. Хранится только на устройстве.
 - **Ключ доступа к серверу** — выдаётся сервером при первом запуске, хранится в закрытом хранилище приложения и обновляется примерно раз в неделю.
 
 При удалении приложения все эти данные удаляются вместе с ним.
@@ -49,7 +52,7 @@
 
 Для статистики использования (сколько устройств пользуются VPN, почему не удаётся подключиться) приложение использует Google Analytics для Firebase (Google). Приложение отправляет события трёх видов, каждое не чаще раза в сутки (неудачное подключение — раз в сутки на каждую причину): VPN работал (через сервер прошло хотя бы одно соединение); VPN не удалось включить или сервер недоступен — с причиной из короткого фиксированного списка (например, «нет сети», «нужен код доступа»), без текста ошибки; исчерпан дневной лимит трафика. Кроме того, SDK сам отмечает первый запуск, обновление и удаление приложения и начало сеанса. С событиями передаются: включена ли блокировка рекламы, версии приложения и Android, модель устройства, язык, примерное местоположение (страна, город), которое Google определяет по IP-адресу, случайный идентификатор установки и идентификатор пользователя — усечённый хэш SHA-256 от Android ID. Сам Android ID не передаётся; хэш сохраняется при переустановке приложения и меняется при сбросе устройства к заводским настройкам. Рекламный идентификатор, сетевые адреса, имена сайтов и сервисов, которые открывал пользователь, не передаются; рекламные функции, Google Signals и передача данных Google для его собственных целей отключены. Данные хранятся до 14 месяцев. Отключить статистику в приложении нельзя.
 
-Настройки приложения (список серверов, номер последней версии, адрес страницы загрузки) приходят из Firebase Remote Config (Google): приложение запрашивает их при включении VPN и затем раз в несколько часов. В запросе передаются идентификатор установки Firebase, версии приложения и Android, язык, регион и часовой пояс устройства и тип сборки; сведения о трафике и о том, какие сайты открывал пользователь, не передаются. Кроме Firebase Crashlytics, Google Analytics для Firebase, Firebase Remote Config и Play Integrity API, в приложении нет сторонних SDK; рекламы, рекламных идентификаторов и рекламных трекеров нет. Мы не продаём данные и не передаём их третьим лицам для их собственных целей.
+Настройки приложения (список серверов, номер последней версии, адрес страницы загрузки, способы обхода для YouTube) приходят из Firebase Remote Config (Google): приложение запрашивает их при включении VPN и затем раз в несколько часов. В запросе передаются идентификатор установки Firebase, версии приложения и Android, язык, регион и часовой пояс устройства и тип сборки; сведения о трафике и о том, какие сайты открывал пользователь, не передаются. При подключении к Wi‑Fi в режиме «YouTube напрямую» приложение один раз за сеть узнаёт у публичного сервиса (ifconfig.co, ipinfo.io, ipapi.co, ipwho.is, get.geojs.io или ip.guide), какому интернет-провайдеру принадлежит текущий IP-адрес, — чтобы запомнить способ обхода для этого провайдера. Сервис видит только IP-адрес устройства, как любой сайт; никаких идентификаторов в запросе нет. Кроме Firebase Crashlytics, Google Analytics для Firebase, Firebase Remote Config и Play Integrity API, в приложении нет сторонних SDK; рекламы, рекламных идентификаторов и рекламных трекеров нет. Мы не продаём данные и не передаём их третьим лицам для их собственных целей.
 
 #### 8. Дети
 
@@ -69,7 +72,7 @@
 
 ### Split VPN Privacy Policy
 
-Split VPN (package `org.newvpn`) is an Android app that routes traffic of the services the user selects in the app through an encrypted tunnel to the developer's server. All other traffic on the device goes directly and is not handled by the app.
+Split VPN (package `org.newvpn`) is an Android app that routes traffic of the services the user selects in the app through an encrypted tunnel to the developer's server. The app may send YouTube traffic directly, without the server (see section 2). All other traffic on the device goes directly and is not handled by the app.
 
 #### 1. Accounts and personal data
 
@@ -79,6 +82,8 @@ The app has no accounts and no sign-up. We do not ask for or collect your name, 
 
 Only traffic to the selected services goes through the tunnel. Inside the tunnel it stays encrypted by the apps and websites themselves (for example, TLS). We do not decrypt, read, modify or store the content of your traffic. We do not inject or replace ads and do not redirect traffic of other apps for commercial purposes.
 
+With “YouTube direct” on, the app sends YouTube connections directly instead of through the server, splitting the start of each connection into parts to get around throttling by the provider. The content stays encrypted and is not read; if the direct way fails, the connection goes through the server. In this mode the provider can see that the device connects to YouTube.
+
 #### 3. Technical log on the server
 
 The server does not record who connects to which addresses or services. Its technical log holds only service events and errors: the time, a random installation identifier from the access key and, for rejected connections (limit exceeded, invalid key), the client IP address. A failed connection may be logged with its destination address, but without any information about who requested it. The log is kept for no longer than 90 days, is not shared with third parties and is not used for profiling or advertising.
@@ -87,6 +92,7 @@ The server does not record who connects to which addresses or services. Its tech
 
 - **App log** — technical events of the tunnel and the names of services connections were made to. Stored on the device; the user can send it to the developer with the “Share log” button. It is not sent automatically, except for the excerpt included in a crash report (section 7).
 - **Service address cache** — a list of network addresses of the selected services. Stored only on the device.
+- **Network notes** — for each network (mobile operator code or the Wi‑Fi internet provider's network number), which workaround worked for YouTube. Stored only on the device.
 - **Server access key** — issued by the server on first launch, stored in the app's private storage and renewed about once a week.
 
 Uninstalling the app removes all of this data.
@@ -109,7 +115,7 @@ To diagnose crashes the app uses Firebase Crashlytics (Google). When the app cra
 
 For usage statistics (how many devices use the VPN, why connecting fails) the app uses Google Analytics for Firebase (Google). The app sends three kinds of events, each at most once a day (a failed connection — once a day per reason): the VPN worked (at least one connection went through the server); the VPN could not be turned on or the server is unreachable — with a reason from a short fixed list (for example, “no network”, “access code needed”), without the error text; the daily traffic limit was used up. In addition, the SDK itself records the first launch, updates and removal of the app and the start of a session. The events carry: whether ad blocking is on, the app and Android versions, the device model, language, approximate location (country, city) that Google derives from the IP address, a random installation identifier and a user identifier — a truncated SHA-256 hash of the Android ID. The Android ID itself is not sent; the hash persists if the app is reinstalled and changes after a factory reset. The advertising identifier, network addresses and the names of sites and services the user opened are not sent; advertising features, Google signals and data sharing with Google for its own purposes are turned off. The data is kept for up to 14 months. Usage statistics cannot be turned off in the app.
 
-The app's settings (the server list, the latest version number, the download page address) come from Firebase Remote Config (Google): the app requests them when the VPN is turned on and then every few hours. The request carries the Firebase installation ID, the app and Android versions, the device language, region and time zone, and the build type; nothing about the traffic or the sites the user visited is sent. Apart from Firebase Crashlytics, Google Analytics for Firebase, Firebase Remote Config and the Play Integrity API the app contains no third-party SDKs, and no ads, advertising identifiers or ad trackers. We do not sell data or share it with third parties for their own purposes.
+The app's settings (the server list, the latest version number, the download page address, the YouTube workarounds) come from Firebase Remote Config (Google): the app requests them when the VPN is turned on and then every few hours. The request carries the Firebase installation ID, the app and Android versions, the device language, region and time zone, and the build type; nothing about the traffic or the sites the user visited is sent. On Wi‑Fi with “YouTube direct” on, once per network the app asks a public service (ifconfig.co, ipinfo.io, ipapi.co, ipwho.is, get.geojs.io or ip.guide) which internet provider the current IP address belongs to, to remember the workaround for that provider. The service sees only the device's IP address, as any website would; the request carries no identifiers. Apart from Firebase Crashlytics, Google Analytics for Firebase, Firebase Remote Config and the Play Integrity API the app contains no third-party SDKs, and no ads, advertising identifiers or ad trackers. We do not sell data or share it with third parties for their own purposes.
 
 #### 8. Children
 
