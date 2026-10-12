@@ -449,6 +449,7 @@ func NetworkLost() {
 func Stop() {
 	health.stopped()
 	flushDirectFails()
+	picker.stopped()
 	mu.Lock()
 	if s == nil {
 		mu.Unlock()

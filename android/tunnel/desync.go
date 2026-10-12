@@ -811,13 +811,18 @@ func tryDesync(app net.Conn, first []byte, name string, dstIP net.IP, dstPort ui
 	if errors.Is(err, errDesyncStopped) || errors.Is(err, net.ErrClosed) {
 		return first, true
 	}
+	var since int
+	var logFail bool
 	if errors.Is(err, errNoConnect) {
-		picker.unreachable(gen, ip)
+		since, logFail = picker.unreachable(gen, ip)
 	} else {
-		picker.result(gen, st.id, ip, start, err == nil, fmt.Sprint(err))
+		since, logFail = picker.result(gen, st.id, ip, start, err == nil, fmt.Sprint(err))
 	}
 	if err != nil {
-		if verbose.Load() {
+		switch {
+		case logFail:
+			log.Printf("sni desync %s → %s %s FAIL: %v → relay (%d ok since the last FAIL line)", name, dst, st.id, err, since)
+		case verbose.Load():
 			log.Printf("sni desync %s → %s %s FAIL: %v → relay", name, dst, st.id, err)
 		}
 		return first, false

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -436,5 +437,121 @@ func TestPick_WeekOverIsTold(t *testing.T) {
 	p.pick("1.1.1.1")
 	if v := fp.verdicts(); v[len(v)-1] == verdictFails {
 		t.Fatalf("host still thinks %v", v)
+	}
+}
+
+// fail1 is one direct try to ip with its result at once; what the log hears.
+func fail1(p *pickState, ip string, ok bool) (int, bool) {
+	st, gen := p.pick(ip)
+	if st == nil {
+		return 0, false
+	}
+	return p.result(gen, st.id, ip, p.now(), ok, "x")
+}
+
+func (p *pickState) tallyNow() tally {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.tally
+}
+
+func TestPick_FailLinesThrottled(t *testing.T) {
+	p, _, _ := picking(t)
+	if since, log := fail1(p, "1.1.1.1", false); !log || since != 0 {
+		t.Fatalf("first: %d %v", since, log)
+	}
+	advance(p, time.Second)
+	if _, log := fail1(p, "1.1.1.1", false); log {
+		t.Fatal("a second line within the gap")
+	}
+	fail1(p, "2.2.2.2", true)
+	fail1(p, "3.3.3.3", true)
+	advance(p, failLogGap)
+	if since, log := fail1(p, "1.1.1.1", false); !log || since != 2 {
+		t.Fatalf("after the gap: %d %v", since, log)
+	}
+	advance(p, time.Second)
+	_, gen := p.pick("4.4.4.4")
+	if _, log := p.unreachable(gen, "4.4.4.4"); log {
+		t.Fatal("unreachable within the gap logged")
+	}
+	advance(p, failLogGap)
+	_, gen = p.pick("5.5.5.5")
+	if since, log := p.unreachable(gen, "5.5.5.5"); !log || since != 0 {
+		t.Fatalf("unreachable after the gap: %d %v", since, log)
+	}
+	if got := p.tallyNow(); got != (tally{ok: 2, failed: 5}) {
+		t.Fatalf("tally %+v", got)
+	}
+}
+
+// The summary names the network being left and comes once per change.
+func TestPick_Summary(t *testing.T) {
+	p, _, _ := picking(t)
+	out := captureLog(t)
+	try(p, "1.1.1.1", true)
+	try(p, "2.2.2.2", true)
+	try(p, "3.3.3.3", false)
+	try(p, "3.3.3.3", true) // silent: straight to relay
+	st, gen := p.pick("1.1.1.1")
+	p.finished(gen, st.id, "1.1.1.1", "rr1.googlevideo.com", finish{dur: 10 * time.Second, up: 900, down: 100, why: "rr1.googlevideo.com, EOF"})
+	p.finished(gen, st.id, "1.1.1.1", "rr1.googlevideo.com", finish{dur: 10 * time.Second, up: 0, down: 100, why: "preconnect"})
+	p.stopped()
+	p.stopped()
+	want := "sni desync: on cell:25001: 2 direct ok (1 empty, last: rr1.googlevideo.com, EOF), 1 failed, 1 straight to relay"
+	if n := slices.Index(out.lines, want); n < 0 || slices.Index(out.lines[n+1:], want) >= 0 {
+		t.Fatalf("lines %q", out.lines)
+	}
+	try(p, "1.1.1.1", true)
+	p.setNetKey("cell:25002")
+	want = "sni desync: on cell:25001: 3 direct ok (1 empty, last: rr1.googlevideo.com, EOF), 1 failed, 1 straight to relay"
+	if !slices.Contains(out.lines, want) {
+		t.Fatalf("lines %q", out.lines)
+	}
+	if got := p.tallyNow(); got != (tally{}) {
+		t.Fatalf("new network kept %+v", got)
+	}
+	n := len(out.lines)
+	p.setNetKey("cell:25003")
+	for _, l := range out.lines[n:] {
+		if strings.Contains(l, " on cell:25002") {
+			t.Fatalf("summary of nothing: %q", l)
+		}
+	}
+	for _, l := range out.lines {
+		if !strings.HasPrefix(l, "sni ") {
+			t.Errorf("line %q", l)
+		}
+	}
+}
+
+func TestPick_OldNetworkNotTallied(t *testing.T) {
+	p, _, _ := picking(t)
+	st, gen := p.pick("1.1.1.1")
+	p.setNetKey("cell:25002")
+	if _, log := p.result(gen, st.id, "1.1.1.1", p.now(), false, "x"); log {
+		t.Fatal("old network's failure logged")
+	}
+	if _, log := p.unreachable(gen, "1.1.1.1"); log {
+		t.Fatal("old network's unreachable logged")
+	}
+	if got := p.tallyNow(); got != (tally{}) {
+		t.Fatalf("tally %+v", got)
+	}
+}
+
+// A network under "nothing works" says so when it comes back.
+func TestPick_NoneShownOnNetwork(t *testing.T) {
+	p, _, file := picking(t)
+	for range 2 * len(strategiesNow()) {
+		try(p, "1.1.1.1", false)
+	}
+	out := captureLog(t)
+	p.setNetKey("cell:25002")
+	p.setNetKey("cell:25001")
+	until := time.Unix(readMap(t, file)["cell:25001"].At, 0).Add(noneFor).Format("2006-01-02")
+	want := "sni desync: network cell:25001, starting from rec2 (nothing works until " + until + ")"
+	if !slices.Contains(out.lines, want) {
+		t.Fatalf("lines %q", out.lines)
 	}
 }

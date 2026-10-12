@@ -39,6 +39,8 @@ const (
 	slowPeak = 40 << 10
 	slowMin  = 512 << 10
 	slowRun  = 3
+
+	failLogGap = 2 * time.Second // a dead direct path fails every connection: one line per gap, the rest in the tally
 )
 
 // Verdicts for the host, about the current network.
@@ -134,12 +136,25 @@ type pickState struct {
 	attempts  int
 	lastWin   string // any network's latest winner: where a nameless one starts
 
+	// What the release log says about this network's direct tries:
+	// counts, not a line per connection.
+	tally       tally
+	summarized  tally
+	okSinceFail int
+	lastFailLog time.Time
+
 	file   string
 	loaded bool
 	nets   map[string]netEntry
 
 	tellMu sync.Mutex // the host hears verdicts in order
 	told   string
+}
+
+type tally struct {
+	ok, failed, skipped int
+	empty               int    // got the ServerHello, asked, got next to nothing
+	lastEmpty           string // how the latest of those ended
 }
 
 var picker = &pickState{now: time.Now}
@@ -193,18 +208,66 @@ func (p *pickState) setNetKey(raw string) {
 		return
 	}
 	was := p.key
+	p.summaryLocked()
 	p.key = key
 	p.resetLocked()
 	p.applyLocked()
 	// A nameless one after a nameless one is no news for the log.
 	if directOn.Load() && len(strategiesNow()) > 0 && (key != "" || was != "") {
-		log.Printf("sni desync: network %s, starting from %s", p.nameLocked(), p.cur)
+		log.Printf("sni desync: network %s, starting from %s%s", p.nameLocked(), p.cur, p.noneNoteLocked())
 	}
 	lookup, gen := p.wantASNLocked(), p.gen
 	p.unlockAndTell()
 	if lookup {
 		go p.lookupASN(gen, raw)
 	}
+}
+
+func (p *pickState) noneNoteLocked() string {
+	if p.noneUntil.IsZero() {
+		return ""
+	}
+	return " (nothing works until " + p.noneUntil.Format("2006-01-02") + ")"
+}
+
+// summaryLocked logs the tally of the network being left (or of the
+// tunnel being stopped) if it changed since the last summary.
+func (p *pickState) summaryLocked() {
+	t := p.tally
+	if t == p.summarized {
+		return
+	}
+	p.summarized = t
+	empty := ""
+	if t.empty > 0 {
+		empty = fmt.Sprintf(" (%d empty, last: %s)", t.empty, t.lastEmpty)
+	}
+	log.Printf("sni desync: on %s: %d direct ok%s, %d failed, %d straight to relay",
+		p.nameLocked(), t.ok, empty, t.failed, t.skipped)
+}
+
+// stopped: Stop's turn. The tally goes on (Start keeps the memory), the
+// log hears it so far.
+func (p *pickState) stopped() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.summaryLocked()
+}
+
+// countLocked tallies a direct try. A failure says how many got through
+// since the last logged one and whether to log it: one in failLogGap.
+func (p *pickState) countLocked(ok bool) (since int, logFail bool) {
+	if ok {
+		p.tally.ok++
+		p.okSinceFail++
+		return 0, false
+	}
+	p.tally.failed++
+	if p.now().Sub(p.lastFailLog) < failLogGap {
+		return 0, false
+	}
+	since, p.okSinceFail, p.lastFailLog = p.okSinceFail, 0, p.now()
+	return since, true
 }
 
 func (p *pickState) nameLocked() string {
@@ -220,6 +283,7 @@ func (p *pickState) resetLocked() {
 	p.fails, p.tried, p.slow, p.attempts = 0, 0, 0, 0
 	p.lastFail, p.noneUntil = time.Time{}, time.Time{}
 	p.ok, p.silent, p.passed = addrs{}, addrs{}, false
+	p.tally, p.summarized, p.okSinceFail, p.lastFailLog = tally{}, tally{}, 0, time.Time{}
 }
 
 // applyLocked starts this network where the map says: its winner, or
@@ -290,10 +354,11 @@ func (p *pickState) lookupASN(gen uint64, raw string) {
 		p.mu.Unlock()
 		return
 	}
+	p.summaryLocked()
 	p.key = "wifi:AS" + asn
 	p.resetLocked()
 	p.applyLocked()
-	log.Printf("sni desync: network %s (%s), starting from %s", p.key, from, p.cur)
+	log.Printf("sni desync: network %s (%s), starting from %s%s", p.key, from, p.cur, p.noneNoteLocked())
 	p.unlockAndTell()
 }
 
@@ -317,6 +382,7 @@ func (p *pickState) pick(ip string) (*strategy, uint64) {
 	}
 	if until, ok := p.silent.get(ip); ok {
 		if now.Before(until) {
+			p.tally.skipped++
 			return nil, 0
 		}
 		p.silent.del(ip)
@@ -339,20 +405,27 @@ func (p *pickState) restartLocked() {
 
 // unreachable: the direct socket did not even connect, the hello never
 // left. The strategy is not to blame; the address goes by relay a while.
-func (p *pickState) unreachable(gen uint64, ip string) {
+func (p *pickState) unreachable(gen uint64, ip string) (since int, logFail bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if gen == p.gen {
-		p.silent.put(ip, p.now().Add(silentFor))
+	if gen != p.gen {
+		return 0, false
 	}
+	p.silent.put(ip, p.now().Add(silentFor))
+	return p.countLocked(false)
 }
 
 // result of a direct try: did the server answer the hello. start is when
 // the connection began: failures of one burst of parallel ones count once.
-func (p *pickState) result(gen uint64, id, ip string, start time.Time, ok bool, why string) {
+// since and logFail: see countLocked.
+func (p *pickState) result(gen uint64, id, ip string, start time.Time, ok bool, why string) (since int, logFail bool) {
 	p.mu.Lock()
 	defer p.unlockAndTell()
-	if gen != p.gen || id != p.cur || p.now().Before(p.noneUntil) {
+	if gen != p.gen {
+		return 0, false
+	}
+	since, logFail = p.countLocked(ok)
+	if id != p.cur || p.now().Before(p.noneUntil) {
 		return
 	}
 	p.attempts++
@@ -375,10 +448,10 @@ func (p *pickState) result(gen uint64, id, ip string, start time.Time, ok bool, 
 		p.silent.put(ip, p.now().Add(silentFor))
 		return
 	}
-	if start.Before(p.lastFail) {
-		return
+	if !start.Before(p.lastFail) {
+		p.failLocked(why)
 	}
-	p.failLocked(why)
+	return
 }
 
 func (p *pickState) failLocked(why string) {
@@ -430,6 +503,10 @@ func (p *pickState) finished(gen uint64, id, ip, name string, f finish) {
 	defer p.unlockAndTell()
 	if gen != p.gen || f.ours {
 		return
+	}
+	if f.up > earlyDeathUp && f.down < earlyDeathDown {
+		p.tally.empty++
+		p.tally.lastEmpty = f.why
 	}
 	if f.serverFirst && f.dur < earlyDeath && f.down < earlyDeathDown && f.up > earlyDeathUp {
 		p.ok.del(ip)
