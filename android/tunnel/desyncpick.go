@@ -441,6 +441,8 @@ func (p *pickState) markDead(gen uint64, ip string) bool {
 	log.Printf("sni desync: %s silent through the relay too → closing, refusing connections for %s", ip, deadFor)
 	until := now.Add(deadFor)
 	p.dead.put(ip, until)
+	// The check that found it dead is as fresh as a recheck.
+	p.checked.put(ip, now)
 	if n := p.failed[ip]; n > 0 {
 		delete(p.failed, ip)
 		p.fails = max(p.fails-n, 0)

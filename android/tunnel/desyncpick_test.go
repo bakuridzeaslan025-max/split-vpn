@@ -651,9 +651,13 @@ func TestFailed_ClearedBySuccess(t *testing.T) {
 func TestRecheck(t *testing.T) {
 	p, _, file := picking(t)
 	p.markDead(p.gen, "1.1.1.1")
+	if _, due := p.recheckDue("1.1.1.1"); due {
+		t.Fatal("due right after the mark")
+	}
+	advance(p, deadRecheck)
 	gen, due := p.recheckDue("1.1.1.1")
 	if !due {
-		t.Fatal("not due after the mark")
+		t.Fatalf("not due %s after the mark", deadRecheck)
 	}
 	if _, again := p.recheckDue("1.1.1.1"); again {
 		t.Fatal("due twice")
