@@ -134,14 +134,14 @@ type pickState struct {
 	passed    bool   // cur got through here at least once
 	confirmed bool   // found now: got through to two addresses
 	fails     int
-	lastFail  time.Time // connections started before it are the same burst
-	tried     int       // strategies failed in a row
-	ok        addrs     // where cur got through
-	silent    addrs     // relay until
-	dead      addrs     // silent through the relay too: connections refused until
-	failed    addrs     // addresses behind the failures counted against cur
-	noHello   addrs     // the direct try got no ServerHello: its relay session is watched
-	checked   addrs     // dead ones by when they were last probed, see recheckDue
+	lastFail  time.Time      // connections started before it are the same burst
+	tried     int            // strategies failed in a row
+	ok        addrs          // where cur got through
+	silent    addrs          // relay until
+	dead      addrs          // silent through the relay too: connections refused until
+	failed    map[string]int // ip → failures counted against cur, forgiven if it turns dead
+	noHello   addrs          // the direct try got no ServerHello: its relay session is watched
+	checked   addrs          // dead ones by when they were last probed, see recheckDue
 	noneUntil time.Time
 	slow      int
 	attempts  int
@@ -293,7 +293,7 @@ func (p *pickState) resetLocked() {
 	p.cur, p.won, p.confirmed = "", false, false
 	p.fails, p.tried, p.slow, p.attempts = 0, 0, 0, 0
 	p.lastFail, p.noneUntil = time.Time{}, time.Time{}
-	p.ok, p.silent, p.dead, p.failed, p.passed = addrs{}, addrs{}, addrs{}, addrs{}, false
+	p.ok, p.silent, p.dead, p.failed, p.passed = addrs{}, addrs{}, addrs{}, nil, false
 	p.noHello, p.checked = addrs{}, addrs{}
 	p.tally, p.summarized, p.okSinceFail, p.lastFailLog = tally{}, tally{}, 0, time.Time{}
 }
@@ -412,8 +412,6 @@ func (p *pickState) pick(ip string) (*strategy, uint64) {
 	return &list[i], p.gen
 }
 
-// silentNow: ip goes by relay because the winner never got through to it;
-// gen goes back with markDead.
 // silentNow: ip goes by relay because the direct path got no answer from
 // it: the winner never got through to it, or the try had no ServerHello
 // (also before the winner is confirmed). gen goes back with markDead.
@@ -443,9 +441,9 @@ func (p *pickState) markDead(gen uint64, ip string) bool {
 	log.Printf("sni desync: %s silent through the relay too → closing, refusing connections for %s", ip, deadFor)
 	until := now.Add(deadFor)
 	p.dead.put(ip, until)
-	if p.failed.has(ip) {
-		p.failed.del(ip)
-		p.fails = max(p.fails-1, 0)
+	if n := p.failed[ip]; n > 0 {
+		delete(p.failed, ip)
+		p.fails = max(p.fails-n, 0)
 	}
 	if p.key == "" {
 		return true
@@ -499,8 +497,9 @@ func (p *pickState) recheckDue(ip string) (uint64, bool) {
 	return p.gen, true
 }
 
-// recheckDone: alive, the address is no longer dead; silent, it stays dead
-// for deadFor from now. Both written to the map.
+// recheckDone: alive, the address is no longer dead; silent (with the VDS
+// answering others meanwhile), it stays dead for deadFor from now. Both
+// written to the map.
 func (p *pickState) recheckDone(gen uint64, ip string, alive bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -531,7 +530,7 @@ func (p *pickState) recheckDone(gen uint64, ip string, alive bool) {
 // (or the list was empty): start this network again where the map says.
 func (p *pickState) restartLocked() {
 	p.won, p.confirmed, p.passed = false, false, false
-	p.fails, p.tried, p.ok, p.failed = 0, 0, addrs{}, addrs{}
+	p.fails, p.tried, p.ok, p.failed = 0, 0, addrs{}, nil
 	p.applyLocked()
 }
 
@@ -571,7 +570,7 @@ func (p *pickState) result(gen uint64, id, ip string, start time.Time, ok bool, 
 	}
 	p.attempts++
 	if ok {
-		p.fails, p.tried, p.passed, p.failed = 0, 0, true, addrs{}
+		p.fails, p.tried, p.passed, p.failed = 0, 0, true, nil
 		p.ok.put(ip, time.Time{})
 		if p.ok.len() >= 2 && !p.confirmed {
 			p.confirmed, p.won, p.lastWin = true, true, id
@@ -590,7 +589,10 @@ func (p *pickState) result(gen uint64, id, ip string, start time.Time, ok bool, 
 		return
 	}
 	if !start.Before(p.lastFail) {
-		p.failed.put(ip, time.Time{})
+		if p.failed == nil {
+			p.failed = map[string]int{}
+		}
+		p.failed[ip]++
 		p.failLocked(why)
 	}
 	return
@@ -613,7 +615,7 @@ func (p *pickState) failLocked(why string) {
 	prev := p.cur
 	i := slices.IndexFunc(list, func(s strategy) bool { return s.id == prev })
 	p.cur = list[(i+1)%len(list)].id
-	p.won, p.confirmed, p.passed, p.fails, p.ok, p.failed = false, false, false, 0, addrs{}, addrs{}
+	p.won, p.confirmed, p.passed, p.fails, p.ok, p.failed = false, false, false, 0, addrs{}, nil
 	p.tried++
 	if p.tried >= len(list) {
 		p.noneLocked(fmt.Sprintf("all %d failed, last %s: %s", len(list), prev, why))

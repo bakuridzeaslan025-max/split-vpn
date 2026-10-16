@@ -548,7 +548,7 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 			}
 			// The player never waits on the check: it gets the refusal now.
 			if gen, ok := picker.recheckDue(ip); ok {
-				go recheckDead(gen, ip, cred)
+				go recheckDead(gen, health.generation(), ip, cred)
 			}
 			r.Complete(true)
 			return
@@ -605,6 +605,9 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	var out net.Conn
 	var err error
+	// The relay's network and endpoint as of this session: the dead check
+	// must not blame the address for a switch of either.
+	hgen := health.generation()
 	if direct {
 		out, err = dialDirect(ctx, "tcp", fmt.Sprintf("%s:%d", dstIP, dstPort))
 		if err == nil {
@@ -656,8 +659,9 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 		if silent {
 			defer videoConns.add(ip, conn, wc)()
 			t := time.AfterFunc(deadWait, func() {
+				defer guard("dead check")
 				if wc.first.Load() == 0 {
-					checkDead(gen, ip, wc.start, cred)
+					checkDead(gen, hgen, ip, wc.start, cred)
 				}
 			})
 			defer t.Stop()
@@ -711,7 +715,7 @@ var deadChecks sync.Map
 // deadWait. The address is dead only if the VDS answers meanwhile: to
 // another session since this one's hello, or to a probe of its own. A
 // relay in trouble says nothing about the address.
-func checkDead(gen uint64, ip string, since time.Time, cred []byte) {
+func checkDead(gen, hgen uint64, ip string, since time.Time, cred []byte) {
 	if picker.deadNow(ip) {
 		videoConns.close(ip)
 		return
@@ -726,6 +730,9 @@ func checkDead(gen uint64, ip string, since time.Time, cred []byte) {
 	if relayAlive.Load() <= since.UnixNano() && probeRelay(cred) != nil {
 		return
 	}
+	if health.generation() != hgen {
+		return
+	}
 	if picker.markDead(gen, ip) {
 		videoConns.close(ip)
 	}
@@ -733,7 +740,9 @@ func checkDead(gen uint64, ip string, since time.Time, cred []byte) {
 
 // recheckDead: a dead address the player asked for again. One hello to it
 // through the relay; any byte back within deadWait means it is alive.
-func recheckDead(gen uint64, ip string, cred []byte) {
+// Silence extends the mark only if the VDS answered others meanwhile.
+func recheckDead(gen, hgen uint64, ip string, cred []byte) {
+	defer guard("dead recheck")
 	if health.down() || overQuota() {
 		return
 	}
@@ -747,7 +756,12 @@ func recheckDead(gen uint64, ip string, cred []byte) {
 	wc := &watchConn{Conn: out, start: time.Now()}
 	wc.SetDeadline(time.Now().Add(deadWait))
 	tls.Client(wc, &tls.Config{ServerName: "redirector.googlevideo.com", InsecureSkipVerify: true}).Handshake()
-	picker.recheckDone(gen, ip, wc.first.Load() > 0)
+	if health.generation() != hgen {
+		return
+	}
+	if alive := wc.first.Load() > 0; alive || relayAlive.Load() > wc.start.UnixNano() {
+		picker.recheckDone(gen, ip, alive)
+	}
 }
 
 var refusedLog = throttle{every: time.Minute}

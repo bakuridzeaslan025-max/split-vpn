@@ -673,3 +673,33 @@ func TestRecheck(t *testing.T) {
 		t.Fatal("still dead after an answer")
 	}
 }
+
+// Two bursts to a node before it turns out dead: both failures forgiven.
+func TestMarkDead_ForgivesEveryFailure(t *testing.T) {
+	p, _, _ := picking(t)
+	p.mu.Lock()
+	p.won = true // three failures before the winner moves on
+	p.mu.Unlock()
+	try(p, "1.1.1.1", false)
+	advance(p, time.Second)
+	try(p, "1.1.1.1", false)
+	if p.fails != 2 {
+		t.Fatalf("fails %d before the mark", p.fails)
+	}
+	p.markDead(p.gen, "1.1.1.1")
+	if p.fails != 0 {
+		t.Fatalf("fails %d after the mark", p.fails)
+	}
+}
+
+// The network's winner saved after a mark keeps the dead address in the map.
+func TestMarkDead_SurvivesWinner(t *testing.T) {
+	p, _, file := picking(t)
+	p.markDead(p.gen, "9.9.9.9")
+	try(p, "1.1.1.1", true)
+	try(p, "2.2.2.2", true)
+	e := readMap(t, file)["cell:25001"]
+	if e.Win == "" || e.Dead["9.9.9.9"] == 0 {
+		t.Fatalf("map entry %+v", e)
+	}
+}

@@ -819,11 +819,15 @@ func tryDesync(app net.Conn, first []byte, name string, dstIP net.IP, dstPort ui
 		since, logFail = picker.result(gen, st.id, ip, start, err == nil, fmt.Sprint(err))
 	}
 	if err != nil {
+		to := "relay"
+		if picker.deadNow(ip) {
+			to = "closed, dead"
+		}
 		switch {
 		case logFail:
-			log.Printf("sni desync %s → %s %s FAIL: %v → relay (%d ok since the last FAIL line)", name, dst, st.id, err, since)
+			log.Printf("sni desync %s → %s %s FAIL: %v → %s (%d ok since the last FAIL line)", name, dst, st.id, err, to, since)
 		case verbose.Load():
-			log.Printf("sni desync %s → %s %s FAIL: %v → relay", name, dst, st.id, err)
+			log.Printf("sni desync %s → %s %s FAIL: %v → %s", name, dst, st.id, err, to)
 		}
 		return first, false
 	}
