@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -591,6 +592,11 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 		out, err = dialRelay(ctx, cred, dstIP, dstPort)
 	}
 	cancel()
+	var deadGen uint64
+	watch := false
+	if !direct && err == nil && strings.HasSuffix(name, ".googlevideo.com") {
+		deadGen, watch = picker.silentNow(dstIP.String())
+	}
 	if err != nil {
 		// During an outage or over the quota, the relay's own lines tell the story.
 		if direct || !health.down() && !errors.Is(err, errQuota) {
@@ -612,7 +618,39 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 		}
 		out.SetWriteDeadline(time.Time{})
 	}
+	if watch {
+		fb := &firstByteConn{Conn: out}
+		ip := dstIP.String()
+		t := time.AfterFunc(deadWait, func() {
+			if !fb.got.Load() {
+				picker.markDead(deadGen, ip)
+			}
+		})
+		defer t.Stop()
+		out = fb
+	}
 	relay(conn, out)
+}
+
+// firstByteConn tells whether anything came back.
+type firstByteConn struct {
+	net.Conn
+	got atomic.Bool
+}
+
+func (c *firstByteConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		c.got.Store(true)
+	}
+	return n, err
+}
+
+func (c *firstByteConn) CloseWrite() error {
+	if hc, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return hc.CloseWrite()
+	}
+	return nil
 }
 
 func way(direct bool) string {

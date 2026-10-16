@@ -22,6 +22,7 @@ const (
 	needFails    = 2                // counted failures before a strategy moves on...
 	needFailsWon = 3                // ...and before this network's winner does
 	silentFor    = 30 * time.Minute // an address the winner does not get through to goes by relay
+	deadWait     = 5 * time.Second  // a silent address's relay session with no byte back this long: dead both ways
 	noneFor      = 7 * 24 * time.Hour
 	addrMemory   = 64 // addresses kept per network: googlevideo's change with every video
 	mapMax       = 64
@@ -131,6 +132,7 @@ type pickState struct {
 	tried     int       // strategies failed in a row
 	ok        addrs     // where cur got through
 	silent    addrs     // relay until
+	dead      addrs     // silent through the relay too: its names stop resolving until
 	noneUntil time.Time
 	slow      int
 	attempts  int
@@ -282,7 +284,7 @@ func (p *pickState) resetLocked() {
 	p.cur, p.won, p.confirmed = "", false, false
 	p.fails, p.tried, p.slow, p.attempts = 0, 0, 0, 0
 	p.lastFail, p.noneUntil = time.Time{}, time.Time{}
-	p.ok, p.silent, p.passed = addrs{}, addrs{}, false
+	p.ok, p.silent, p.dead, p.passed = addrs{}, addrs{}, addrs{}, false
 	p.tally, p.summarized, p.okSinceFail, p.lastFailLog = tally{}, tally{}, 0, time.Time{}
 }
 
@@ -393,6 +395,39 @@ func (p *pickState) pick(ip string) (*strategy, uint64) {
 		i = slices.IndexFunc(list, func(s strategy) bool { return s.id == p.cur })
 	}
 	return &list[i], p.gen
+}
+
+// silentNow: ip goes by relay because the winner never got through to it;
+// gen goes back with markDead.
+func (p *pickState) silentNow(ip string) (uint64, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	until, ok := p.silent.get(ip)
+	return p.gen, ok && p.now().Before(until)
+}
+
+// markDead: a silent address the relay does not reach either. Seen with a
+// Google cache inside one ISP's network, which answers only that ISP's
+// users: the player got its link on that ISP's Wi-Fi and keeps it for
+// minutes after a switch to LTE (plans/youtube-direct.md, «Баг
+// 2026-10-12»). DNS hides the name, see hideDead.
+func (p *pickState) markDead(gen uint64, ip string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if gen != p.gen {
+		return
+	}
+	if !p.dead.has(ip) {
+		log.Printf("sni desync: %s silent through the relay too → its names resolve to nothing for %s", ip, silentFor)
+	}
+	p.dead.put(ip, p.now().Add(silentFor))
+}
+
+func (p *pickState) deadNow(ip string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	until, ok := p.dead.get(ip)
+	return ok && p.now().Before(until)
 }
 
 // restartLocked: the current strategy is gone from Remote Config's list
