@@ -11,7 +11,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -185,59 +184,6 @@ func serveDNSTCP(c net.Conn) {
 // Never returns nil: on failure the client gets SERVFAIL immediately
 // instead of waiting for its own timeout.
 func resolveDNS(q []byte) []byte {
-	return hideDead(q, resolve(q))
-}
-
-// videoTTL caps what clients keep a googlevideo answer for (1800 s as it
-// comes): long enough for one video's bursts, short enough that a name
-// hidden by hideDead is asked for again soon.
-const videoTTL = 30
-
-var deadLog = throttle{every: time.Minute}
-
-// hideDead: a googlevideo name whose every address is dead both ways gets
-// NXDOMAIN, so the player gives up the node instead of waiting on it.
-// Never cached: the answer has no SOA, and the tunnel does not cache it.
-func hideDead(q, resp []byte) []byte {
-	name, ips := answerA(resp)
-	if !strings.HasSuffix(name, ".googlevideo.com.") {
-		return resp
-	}
-	if len(ips) > 0 && !slices.ContainsFunc(ips, func(ip net.IP) bool { return !picker.deadNow(ip.String()) }) {
-		if more, ok := deadLog.allow(name, time.Now()); ok {
-			log.Printf("dns %s: %s dead both ways, NXDOMAIN%s", name, ips[0], more)
-		}
-		return emptyAnswer(q, dnsmessage.RCodeNameError)
-	}
-	return capTTL(resp, videoTTL)
-}
-
-// capTTL lowers the answer and authority TTLs to max. Additionals keep
-// theirs: OPT's TTL field holds flags.
-func capTTL(msg []byte, max uint32) []byte {
-	var m dnsmessage.Message
-	if m.Unpack(msg) != nil {
-		return msg
-	}
-	capped := false
-	for _, rs := range [][]dnsmessage.Resource{m.Answers, m.Authorities} {
-		for i := range rs {
-			if rs[i].Header.TTL > max {
-				rs[i].Header.TTL, capped = max, true
-			}
-		}
-	}
-	if !capped {
-		return msg
-	}
-	out, err := m.Pack()
-	if err != nil {
-		return msg
-	}
-	return out
-}
-
-func resolve(q []byte) []byte {
 	if len(q) < 12 {
 		return servfail(q)
 	}

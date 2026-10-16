@@ -555,3 +555,27 @@ func TestPick_NoneShownOnNetwork(t *testing.T) {
 		t.Fatalf("lines %q", out.lines)
 	}
 }
+
+// A dead address stays refused for deadFor from the first mark: later
+// silent sessions do not extend it, and a mark from before a network
+// switch does not count.
+func TestMarkDead_WindowAndNetwork(t *testing.T) {
+	captureLog(t)
+	p := freshPicker(t)
+	if !p.markDead(p.gen, "78.37.65.14") || !p.deadNow("78.37.65.14") {
+		t.Fatal("not dead after the mark")
+	}
+	advance(p, deadFor-time.Second)
+	p.markDead(p.gen, "78.37.65.14")
+	advance(p, time.Second)
+	if p.deadNow("78.37.65.14") {
+		t.Fatal("a later mark extended the window")
+	}
+	gen := p.gen
+	p.mu.Lock()
+	p.resetLocked()
+	p.mu.Unlock()
+	if p.markDead(gen, "78.37.65.13") || p.deadNow("78.37.65.13") {
+		t.Fatal("dead from an earlier network")
+	}
+}

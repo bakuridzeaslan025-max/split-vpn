@@ -146,8 +146,14 @@ type bufConn struct {
 func (c *bufConn) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	countQuota(n)
+	if n > 0 {
+		relayAlive.Store(time.Now().UnixNano())
+	}
 	return n, err
 }
+
+// relayAlive: when the VDS last sent anything, in any session.
+var relayAlive atomic.Int64
 
 func (c *bufConn) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
@@ -532,6 +538,14 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 		r.Complete(true)
 		return
 	}
+	if a := id.LocalAddress.As4(); directOn.Load() && picker.deadNow(net.IP(a[:]).String()) {
+		ip := net.IP(a[:]).String()
+		if more, ok := refusedLog.allow(ip, time.Now()); ok {
+			log.Printf("sni desync: %s dead, connection refused%s", ip, more)
+		}
+		r.Complete(true)
+		return
+	}
 
 	var wq waiter.Queue
 	ep, tcpErr := r.CreateEndpoint(&wq)
@@ -592,10 +606,11 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 		out, err = dialRelay(ctx, cred, dstIP, dstPort)
 	}
 	cancel()
-	var deadGen uint64
-	watch := false
-	if !direct && err == nil && strings.HasSuffix(name, ".googlevideo.com") {
-		deadGen, watch = picker.silentNow(dstIP.String())
+	video := !direct && err == nil && directOn.Load() && strings.HasSuffix(name, ".googlevideo.com")
+	var gen uint64
+	var silent bool
+	if video {
+		gen, silent = picker.silentNow(dstIP.String())
 	}
 	if err != nil {
 		// During an outage or over the quota, the relay's own lines tell the story.
@@ -618,35 +633,64 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 		}
 		out.SetWriteDeadline(time.Time{})
 	}
-	if watch {
-		fb := &firstByteConn{Conn: out}
-		ip := dstIP.String()
-		t := time.AfterFunc(deadWait, func() {
-			if !fb.got.Load() {
-				picker.markDead(deadGen, ip)
-			}
-		})
-		defer t.Stop()
-		out = fb
+	if video {
+		wc := &watchConn{Conn: out, start: time.Now()}
+		if verbose.Load() {
+			defer wc.logDone(name, dstIP)
+		}
+		if silent {
+			ip := dstIP.String()
+			// Only while the VDS answers others: a silent relay says nothing
+			// about the address.
+			t := time.AfterFunc(deadWait, func() {
+				if wc.first.Load() == 0 && relayAlive.Load() > wc.start.UnixNano() && picker.markDead(gen, ip) {
+					conn.Close()
+					wc.Close()
+				}
+			})
+			defer t.Stop()
+		}
+		out = wc
 	}
 	relay(conn, out)
 }
 
-// firstByteConn tells whether anything came back.
-type firstByteConn struct {
+var refusedLog = throttle{every: time.Minute}
+
+// watchConn: a relayed googlevideo session, for the dead-address check and
+// the debug log.
+type watchConn struct {
 	net.Conn
-	got atomic.Bool
+	start    time.Time
+	first    atomic.Int64 // since start, of the first byte back; 0 before it
+	down, up atomic.Int64
 }
 
-func (c *firstByteConn) Read(p []byte) (int, error) {
+func (c *watchConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	if n > 0 {
-		c.got.Store(true)
+		c.first.CompareAndSwap(0, int64(time.Since(c.start)))
+		c.down.Add(int64(n))
 	}
 	return n, err
 }
 
-func (c *firstByteConn) CloseWrite() error {
+func (c *watchConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.up.Add(int64(n))
+	return n, err
+}
+
+func (c *watchConn) logDone(name string, ip net.IP) {
+	first := "no byte back"
+	if f := c.first.Load(); f > 0 {
+		first = "first byte after " + time.Duration(f).Round(time.Millisecond).String()
+	}
+	log.Printf("sni %s → %s relay done: %s, down %d KB, up %d KB in %s",
+		name, ip, first, c.down.Load()/1024, c.up.Load()/1024, time.Since(c.start).Round(100*time.Millisecond))
+}
+
+func (c *watchConn) CloseWrite() error {
 	if hc, ok := c.Conn.(interface{ CloseWrite() error }); ok {
 		return hc.CloseWrite()
 	}

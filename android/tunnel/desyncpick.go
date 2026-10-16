@@ -23,6 +23,7 @@ const (
 	needFailsWon = 3                // ...and before this network's winner does
 	silentFor    = 30 * time.Minute // an address the winner does not get through to goes by relay
 	deadWait     = 5 * time.Second  // a silent address's relay session with no byte back this long: dead both ways
+	deadFor      = 3 * time.Minute  // its connections refused: the player moves to another node meanwhile
 	noneFor      = 7 * 24 * time.Hour
 	addrMemory   = 64 // addresses kept per network: googlevideo's change with every video
 	mapMax       = 64
@@ -132,7 +133,7 @@ type pickState struct {
 	tried     int       // strategies failed in a row
 	ok        addrs     // where cur got through
 	silent    addrs     // relay until
-	dead      addrs     // silent through the relay too: its names stop resolving until
+	dead      addrs     // silent through the relay too: connections refused until
 	noneUntil time.Time
 	slow      int
 	attempts  int
@@ -406,21 +407,24 @@ func (p *pickState) silentNow(ip string) (uint64, bool) {
 	return p.gen, ok && p.now().Before(until)
 }
 
-// markDead: a silent address the relay does not reach either. Seen with a
-// Google cache inside one ISP's network, which answers only that ISP's
-// users: the player got its link on that ISP's Wi-Fi and keeps it for
-// minutes after a switch to LTE (plans/youtube-direct.md, «Баг
-// 2026-10-12»). DNS hides the name, see hideDead.
-func (p *pickState) markDead(gen uint64, ip string) {
+// markDead: a silent address the relay does not reach either, such as a
+// Google cache inside one ISP's network seen from another network. Its
+// connections get refused for deadFor: a fast error instead of the
+// player's 30 s handshake timeout. Not extended while it lasts. Reports
+// whether ip is dead on this network now.
+func (p *pickState) markDead(gen uint64, ip string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if gen != p.gen {
-		return
+		return false
 	}
-	if !p.dead.has(ip) {
-		log.Printf("sni desync: %s silent through the relay too → its names resolve to nothing for %s", ip, silentFor)
+	now := p.now()
+	if until, ok := p.dead.get(ip); ok && now.Before(until) {
+		return true
 	}
-	p.dead.put(ip, p.now().Add(silentFor))
+	log.Printf("sni desync: %s silent through the relay too → closing, refusing connections for %s", ip, deadFor)
+	p.dead.put(ip, now.Add(deadFor))
+	return true
 }
 
 func (p *pickState) deadNow(ip string) bool {

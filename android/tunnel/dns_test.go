@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -426,46 +425,5 @@ func TestThrottle_FlushForgets(t *testing.T) {
 	}
 	if more, ok := th.allow("timeout", now.Add(61*time.Second)); !ok || more != "" {
 		t.Fatalf("after flush: %q %v", more, ok)
-	}
-}
-
-// A Google cache dead both ways stops resolving; other names keep theirs,
-// and googlevideo answers come with a short TTL so the change is seen.
-func TestResolveDNS_HidesDeadVideoNodes(t *testing.T) {
-	resetDNS()
-	p := freshPicker(t)
-	var calls atomic.Int32
-	doh = fakeDoH(t, &calls, func(q []byte) ([]byte, error) {
-		name, _, _ := strings.Cut(questionKey(q), "/")
-		return mustAnswer(t, binary.BigEndian.Uint16(q[:2]), name, 1800, [4]byte{78, 37, 65, 14}), nil
-	})
-	node := "rr3---sn-gvnuxaxjvh-axqz.googlevideo.com."
-	r := resolveDNS(mustQuery(t, 1, node, dnsmessage.TypeA))
-	if rcode(r) != dnsmessage.RCodeSuccess || responseTTL(r) != videoTTL*time.Second {
-		t.Fatalf("live node: rcode %v, ttl %s", rcode(r), responseTTL(r))
-	}
-	p.markDead(p.gen, "78.37.65.14")
-	if r := resolveDNS(mustQuery(t, 2, node, dnsmessage.TypeA)); rcode(r) != dnsmessage.RCodeNameError {
-		t.Fatalf("dead node: rcode %v", rcode(r))
-	}
-	if r := resolveDNS(mustQuery(t, 3, "other.test.", dnsmessage.TypeA)); rcode(r) != dnsmessage.RCodeSuccess || responseTTL(r) == videoTTL*time.Second {
-		t.Fatalf("not googlevideo: rcode %v, ttl %s", rcode(r), responseTTL(r))
-	}
-	advance(p, silentFor)
-	if r := resolveDNS(mustQuery(t, 4, node, dnsmessage.TypeA)); rcode(r) != dnsmessage.RCodeSuccess {
-		t.Fatalf("after %s: rcode %v", silentFor, rcode(r))
-	}
-}
-
-// Dead on the network it was found on: a result from before a switch is dropped.
-func TestMarkDead_EarlierNetworkIgnored(t *testing.T) {
-	p := freshPicker(t)
-	gen := p.gen
-	p.mu.Lock()
-	p.resetLocked()
-	p.mu.Unlock()
-	p.markDead(gen, "78.37.65.14")
-	if p.deadNow("78.37.65.14") {
-		t.Fatal("dead from an earlier network")
 	}
 }
