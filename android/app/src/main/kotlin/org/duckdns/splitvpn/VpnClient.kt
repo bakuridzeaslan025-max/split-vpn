@@ -30,6 +30,7 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
         const val MSG_REGISTER = 1
         const val MSG_UNREGISTER = 2
         const val MSG_SNAPSHOT = 3
+        const val MSG_LOG = 4
         const val KEY_STATE = "state"
         const val KEY_ERROR = "error"
         const val KEY_LOG = "log"
@@ -38,10 +39,12 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
         const val KEY_MIN_VERSION = "min_version"
         const val KEY_LATEST_VERSION = "latest_version"
         const val KEY_UPDATE_URL = "update_url"
+        const val KEY_APK_URL = "apk_url"
         const val KEY_USED = "used"
         const val KEY_LIMIT = "limit"
         const val KEY_DAY = "day"
         const val KEY_DIRECT = "direct"
+        const val KEY_LINE = "line"
 
         fun snapshot(state: VpnState, error: String?, log: List<String>, connectedAt: Long, waiting: Waiting?, versions: Versions, usage: Usage, direct: String): Message =
             Message.obtain(null, MSG_SNAPSHOT).apply {
@@ -54,6 +57,7 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
                     putLong(KEY_MIN_VERSION, versions.min)
                     putLong(KEY_LATEST_VERSION, versions.latest)
                     putString(KEY_UPDATE_URL, versions.url)
+                    putString(KEY_APK_URL, versions.apk)
                     putLong(KEY_USED, usage.used)
                     putLong(KEY_LIMIT, usage.limit)
                     putLong(KEY_DAY, usage.day)
@@ -71,7 +75,7 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
                 msg.data.getStringArrayList(KEY_LOG) ?: emptyList(),
                 msg.data.getLong(KEY_SINCE),
                 Waiting.values().getOrNull(msg.data.getInt(KEY_WAITING, -1)),
-                Versions(msg.data.getLong(KEY_MIN_VERSION), msg.data.getLong(KEY_LATEST_VERSION), msg.data.getString(KEY_UPDATE_URL).orEmpty()),
+                Versions(msg.data.getLong(KEY_MIN_VERSION), msg.data.getLong(KEY_LATEST_VERSION), msg.data.getString(KEY_UPDATE_URL).orEmpty(), msg.data.getString(KEY_APK_URL).orEmpty()),
                 Usage(msg.data.getLong(KEY_USED), msg.data.getLong(KEY_LIMIT), msg.data.getLong(KEY_DAY)),
                 msg.data.getString(KEY_DIRECT),
             )
@@ -101,6 +105,15 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
         service?.let { send(it, MSG_UNREGISTER) }
         service = null
         runCatching { ctx.unbindService(conn) }
+    }
+
+    /** A line for :vpn's file log, which the UI process cannot write; dropped while unbound. */
+    fun log(line: String) {
+        val to = service ?: return
+        try {
+            to.send(Message.obtain(null, MSG_LOG).apply { data = Bundle().apply { putString(KEY_LINE, line) } })
+        } catch (_: RemoteException) {
+        }
     }
 
     private fun send(to: Messenger, what: Int) {

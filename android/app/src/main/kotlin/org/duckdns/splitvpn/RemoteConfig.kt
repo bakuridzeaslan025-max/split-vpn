@@ -4,10 +4,14 @@ import android.content.Context
 
 /** Remote Config keys as fetched. */
 /** [dailyQuotaMb], [ytStrategies]: null when RC has no such key. */
-internal data class RcValues(val endpoints: String, val minVersion: Long, val latestVersion: Long, val updateUrl: String, val dailyQuotaMb: Long? = null, val ytStrategies: String? = null)
+internal data class RcValues(val endpoints: String, val minVersion: Long, val latestVersion: Long, val updateUrl: String, val dailyQuotaMb: Long? = null, val ytStrategies: String? = null, val apkUrl: String = "")
 
-/** The versions part of Remote Config; the UI gets it in VpnClient's snapshot. */
-data class Versions(val min: Long = 0, val latest: Long = 0, val url: String = "") {
+/**
+ * The versions part of Remote Config; the UI gets it in VpnClient's snapshot.
+ * [url] is a page for the browser (that is all 0.6.1–0.10 know it as), [apk]
+ * what self-update downloads; "" turns self-update off.
+ */
+data class Versions(val min: Long = 0, val latest: Long = 0, val url: String = "", val apk: String = "") {
     val required get() = BuildConfig.VERSION_CODE < min
     // Not for debug: release would go on top of it.
     val available get() = !debug && latest > BuildConfig.VERSION_CODE
@@ -30,6 +34,7 @@ internal object RemoteConfig {
     const val KEY_MIN_VERSION = "rc.min_version"
     const val KEY_LATEST_VERSION = "rc.latest_version"
     const val KEY_UPDATE_URL = "rc.update_url"
+    const val KEY_APK_URL = "rc.apk_url"
     const val KEY_YT_STRATEGIES = "rc.yt_strategies"
     private const val KEY_DROPPED = "rc.dropped_endpoints"
     // Two checks of one value, each with its own memory: one key would
@@ -38,7 +43,7 @@ internal object RemoteConfig {
     const val KEY_BAD_YT = "rc.bad_yt_strategies"
 
     fun versions(ctx: Context) = ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).let {
-        Versions(it.getLong(KEY_MIN_VERSION, 0), it.getLong(KEY_LATEST_VERSION, 0), it.getString(KEY_UPDATE_URL, "").orEmpty())
+        Versions(it.getLong(KEY_MIN_VERSION, 0), it.getLong(KEY_LATEST_VERSION, 0), it.getString(KEY_UPDATE_URL, "").orEmpty(), it.getString(KEY_APK_URL, "").orEmpty())
     }
 
     /**
@@ -69,6 +74,7 @@ internal object RemoteConfig {
                 .putLong(KEY_MIN_VERSION, v.minVersion)
                 .putLong(KEY_LATEST_VERSION, v.latestVersion)
                 .putString(KEY_UPDATE_URL, v.updateUrl)
+                .putString(KEY_APK_URL, v.apkUrl)
                 .apply()
             Quota.setLimitMb(ctx, v.dailyQuotaMb)
             // Each entry is Go's to judge (it drops the broken ones); a value

@@ -53,9 +53,14 @@ class MainActivity : Activity() {
 
         private const val VPN_REQUEST_CODE = 1
         private const val NOTIFICATION_REQUEST_CODE = 2
+        private const val INSTALL_PERMISSION_CODE = 3
 
-        /** From the VPN notification: open the download page once the snapshot says which. */
+        /** From the VPN notification: update once the snapshot says to what. */
         const val EXTRA_UPDATE = "update"
+
+        // Swapped in unit tests.
+        internal var update: (android.content.Context, Long, String, (Int) -> Unit) -> Updater.Result = Updater::update
+        internal var background: (Runnable) -> Unit = { Thread(it, "Update").start() }
 
         // Set on the first auto-switch to the keep-alive tab so it never repeats.
         private const val KEY_KEEPALIVE_SHOWN = "keepalive_shown"
@@ -149,6 +154,10 @@ class MainActivity : Activity() {
     // Go's verdict on direct YouTube, see VpnClient.
     private var direct: String? = null
     private var started = false
+    private var updating = false
+    // Percent of the download, -1 while the size is unknown.
+    private var progress = -1
+    private var installDialog: Dialog? = null
     private var updateWhenKnown = false
 
     private val ticker = Handler(Looper.getMainLooper())
@@ -177,7 +186,7 @@ class MainActivity : Activity() {
         render()
         if (updateWhenKnown && v != null) {
             updateWhenKnown = false
-            if (v.available) openDownloadPage()
+            if (v.available) startUpdate()
         }
         ticker.removeCallbacks(tick)
         if (started) ticker.post(tick)
@@ -236,7 +245,7 @@ class MainActivity : Activity() {
             setOnClickListener { shareLog() }
         }
         findViewById<View>(R.id.toggleButton).setOnClickListener {
-            if (quotaOut) return@setOnClickListener
+            if (quotaOut || updateRequired) return@setOnClickListener
             when (state) {
                 VpnState.DISCONNECTED -> startVpn()
                 VpnState.ERROR -> if (offlineRetry) stopVpn() else startVpn()
@@ -246,12 +255,12 @@ class MainActivity : Activity() {
         }
         findViewById<View>(R.id.errorAction).setOnClickListener {
             when {
-                updateRequired -> openDownloadPage()
+                updateRequired -> startUpdate()
                 error == TunnelVpnService.ERR_NEED_CODE -> showInviteDialog()
                 else -> startVpn()
             }
         }
-        findViewById<View>(R.id.updateAction).setOnClickListener { openDownloadPage() }
+        findViewById<View>(R.id.updateAction).setOnClickListener { startUpdate() }
         findViewById<View>(R.id.updateClose).setOnClickListener {
             versions?.let { prefs.edit().putLong(KEY_UPDATE_DISMISSED, it.latest).apply() }
             renderUpdate()
@@ -285,7 +294,7 @@ class MainActivity : Activity() {
         if (intent?.getBooleanExtra(EXTRA_UPDATE, false) != true) return
         showTab("vpn")
         val v = versions
-        if (v == null) updateWhenKnown = true else if (v.available) openDownloadPage()
+        if (v == null) updateWhenKnown = true else if (v.available) startUpdate()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -297,6 +306,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         inviteDialog?.dismiss()
         shareDialog?.dismiss()
+        installDialog?.dismiss()
         menuPopup?.dismiss()
         super.onDestroy()
     }
@@ -318,6 +328,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        Updater.takePending(this)?.let { runCatching { startActivity(it) } }
         val ignoring = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
         findViewById<TextView>(R.id.batteryStatus).text =
             if (ignoring) "✓ Оптимизация батареи отключена" else "Оптимизация батареи включена"
@@ -480,7 +491,8 @@ class MainActivity : Activity() {
         val green = 0xFF1E8E3E.toInt()
         val grey = 0xFF9AA0A6.toInt()
         // Not a failure but nothing to press until midnight: greyed out like busy.
-        val inert = busy || quotaOut
+        // Nor while min_version turns this version away: the red box's "Обновить" is the way.
+        val inert = busy || quotaOut || updateRequired
         dot.background = box(if (waitingNow) AMBER else if (on) green else if (busy) grey else 0xFF5F6368.toInt(), radius = 4f)
         findViewById<View>(R.id.buttonDot).background =
             box(if (waitingNow) AMBER else if (on) green else if (inert) grey else Color.WHITE, radius = 5f)
@@ -563,9 +575,12 @@ class MainActivity : Activity() {
         }
         action.text = when {
             needCode -> "Ввести код"
-            updateRequired -> "Обновить"
+            updateRequired -> updateLabel
             else -> "Повторить"
         }
+        val downloading = updateRequired && updating
+        action.isEnabled = !downloading
+        action.alpha = if (downloading) 0.6f else 1f
         val ink = if (needCode) Color.WHITE else 0xFF8C1D18.toInt()
         text.setTextColor(ink)
         action.setTextColor(if (needCode) 0xFFA8C7FA.toInt() else ink)
@@ -597,6 +612,12 @@ class MainActivity : Activity() {
     private val updateRequired get() = state == VpnState.ERROR && error == TunnelVpnService.ERR_UPDATE_REQUIRED ||
         state == VpnState.DISCONNECTED && versions?.required == true
 
+    private val updateLabel get() = when {
+        !updating -> "Обновить"
+        progress >= 0 -> "Скачивается… $progress%"
+        else -> "Скачивается…"
+    }
+
     // The calm banner of Waiting: news, not an error. A required update is
     // the error box's business instead.
     private fun renderUpdate() {
@@ -611,11 +632,80 @@ class MainActivity : Activity() {
             text = "Доступна новая версия"
             setTextColor(AMBER_INK)
         }
-        findViewById<TextView>(R.id.updateAction).setTextColor(AMBER_INK)
-        findViewById<TextView>(R.id.updateClose).setTextColor(AMBER_INK)
+        // While downloading: not a button, and no way to hide the only sign of it.
+        findViewById<TextView>(R.id.updateAction).apply {
+            text = updateLabel
+            setTextColor(AMBER_INK)
+            isEnabled = !updating
+            alpha = if (updating) 0.6f else 1f
+        }
+        findViewById<TextView>(R.id.updateClose).apply {
+            setTextColor(AMBER_INK)
+            visibility = if (updating) View.INVISIBLE else View.VISIBLE
+        }
     }
 
     private fun openDownloadPage() = openUrl((versions ?: Versions()).page)
+
+    private fun startUpdate() {
+        val v = versions ?: return
+        // Self-update turned off in Remote Config: no report, just the page.
+        if (v.apk.isEmpty()) return openDownloadPage()
+        if (updating) return
+        updating = true
+        progress = -1
+        render()
+        background(Runnable {
+            val r = update(applicationContext, v.latest, v.apk) { p ->
+                runOnUiThread {
+                    if (!updating || isDestroyed) return@runOnUiThread
+                    progress = p
+                    renderError()
+                    renderUpdate()
+                }
+            }
+            runOnUiThread { if (!isDestroyed) onUpdateResult(r, v) }
+        })
+    }
+
+    private fun onUpdateResult(r: Updater.Result, v: Versions) {
+        updating = false
+        val line = "update: $r" + (Updater.lastFailure?.takeIf { r == Updater.Result.FAILED || r == Updater.Result.BAD_URL }?.let { " ($it)" } ?: "")
+        AppLog.i(line)
+        vpn.log(line)
+        when (r) {
+            Updater.Result.NEED_PERMISSION -> showInstallHint()
+            // min_version raised, latest_version forgotten: nothing to download, but no way around it either.
+            Updater.Result.UP_TO_DATE -> if (v.required) openDownloadPage()
+            else prefs.edit().putLong(KEY_UPDATE_DISMISSED, v.latest).apply()
+            Updater.Result.FAILED -> {
+                Toast.makeText(this, "Не удалось скачать", Toast.LENGTH_SHORT).show()
+                openDownloadPage()
+            }
+            Updater.Result.BAD_URL, Updater.Result.DISABLED -> openDownloadPage()
+            Updater.Result.STARTED, Updater.Result.BUSY -> Unit
+        }
+        render()
+    }
+
+    // The system screen is bare and warns of danger: say first what it is for.
+    private fun showInstallHint() {
+        val dialog = Dialog(this)
+        dialog.setContentView(R.layout.dialog_install_simple)
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setLayout(resources.displayMetrics.widthPixels - dp(48), ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+        dialog.findViewById<View>(R.id.cancel).setOnClickListener { dialog.dismiss() }
+        dialog.findViewById<View>(R.id.apply).setOnClickListener {
+            dialog.dismiss()
+            // A ROM without the screen: the page, whose APK the browser installs.
+            runCatching { startActivityForResult(Updater.permissionIntent(this), INSTALL_PERMISSION_CODE) }
+                .onFailure { openDownloadPage() }
+        }
+        installDialog = dialog
+        dialog.show()
+    }
 
     private fun openUrl(url: String) {
         runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
@@ -880,6 +970,14 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == VPN_REQUEST_CODE && resultCode == RESULT_OK) {
             launchService()
+        }
+        // The settings screen answers RESULT_CANCELED either way. Not granted:
+        // the page, where the browser does the install instead.
+        // Some ROMs kill the process on the grant: the new one has no snapshot yet.
+        if (requestCode == INSTALL_PERMISSION_CODE) when {
+            !Updater.canInstall(this) -> openDownloadPage()
+            versions == null -> updateWhenKnown = true
+            else -> startUpdate()
         }
     }
 

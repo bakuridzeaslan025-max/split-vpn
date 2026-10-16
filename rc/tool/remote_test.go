@@ -99,7 +99,8 @@ func newFake(t *testing.T, tmpl string) (*fakeRC, *rcClient) {
 	return f, &rcClient{base: srv.URL + "/rc", http: srv.Client(), token: "tok"}
 }
 
-var testConfig = config{MinVersion: 110, LatestVersion: 114, UpdateURL: "https://o.github.io/r/", DailyQuotaMB: 1024,
+var testConfig = config{MinVersion: 110, LatestVersion: 114, UpdateURL: "https://o.github.io/r/",
+	APKURL: releasesPrefix + "latest/download/split-vpn.apk", DailyQuotaMB: 1024,
 	YTStrategies: json.RawMessage(`[ {"id": "rec2", "spec": "rec=host+1,midsld"},
 	{"id": "none", "spec": ""} ]`)}
 
@@ -159,6 +160,7 @@ func TestPush(t *testing.T) {
 	check("min_version", debugCondition, "110")
 	check("latest_version", debugCondition, "114")
 	check("update_url", debugCondition, testConfig.UpdateURL)
+	check("apk_url", debugCondition, testConfig.APKURL)
 	check("daily_quota_mb", debugCondition, "1024")
 	check("yt_strategies", debugCondition, `[{"id":"rec2","spec":"rec=host+1,midsld"},{"id":"none","spec":""}]`)
 	check("unrelated", "", "x")
@@ -349,6 +351,28 @@ func TestConfig(t *testing.T) {
 	} {
 		if load(`{"min_version":114,"latest_version":115,"update_url":"`+u+`","daily_quota_mb":2048}`) == nil {
 			t.Errorf("%q: accepted", u)
+		}
+	}
+	apk := func(u string) error {
+		return load(`{"min_version":114,"latest_version":115,"update_url":"` + good + `","apk_url":"` + u + `","daily_quota_mb":2048}`)
+	}
+	for _, u := range []string{"", releasesPrefix + "latest/download/split-vpn.apk", releasesPrefix + "download/v0.11.0/split-vpn-0.11.0.apk"} {
+		if err := apk(u); err != nil {
+			t.Errorf("apk_url %q: %v", u, err)
+		}
+	}
+	for _, u := range []string{
+		"http://github.com/bakuridzeaslan025-max/split-vpn/releases/latest/download/split-vpn.apk",
+		"https://github.com/someone/split-vpn/releases/latest/download/split-vpn.apk",
+		"https://o.github.io/r/split-vpn.apk",
+		releasesPrefix,
+		releasesPrefix + "latest/download/a.apk?x=1",
+		releasesPrefix + "download/v1/a.zip",
+		releasesPrefix + "download/v1/sub/a.apk",
+		releasesPrefix + "download/../a.apk",
+	} {
+		if apk(u) == nil {
+			t.Errorf("apk_url %q: accepted", u)
 		}
 	}
 }

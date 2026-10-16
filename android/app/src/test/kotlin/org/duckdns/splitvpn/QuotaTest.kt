@@ -362,12 +362,21 @@ class QuotaTest {
     fun requiredUpdateShowsOverAUsedUpDay() {
         Quota.save(app, 2048 * mb, day)
         vpnPrefs.edit().putLong(RemoteConfig.KEY_MIN_VERSION, Long.MAX_VALUE).commit()
+        // The UI's bind fetches while refused: RC still says so.
+        be.config = RcValues("", Long.MAX_VALUE, Long.MAX_VALUE, "")
         val a = launchUi()
         assertEquals(View.VISIBLE, a.findViewById<View>(R.id.errorBox).visibility)
         assertEquals("Обновить", a.findViewById<TextView>(R.id.errorAction).text.toString())
         assertEquals("Лимит на сегодня исчерпан", a.findViewById<TextView>(R.id.buttonLabel).text.toString())
         assertFalse(a.findViewById<View>(R.id.toggleButton).isEnabled)
-        a.findViewById<View>(R.id.errorAction).performClick()
+        // Debug: Updater refuses, the page opens. On this thread, not a race with the assert.
+        MainActivity.background = { it.run() }
+        try {
+            a.findViewById<View>(R.id.errorAction).performClick()
+        } finally {
+            MainActivity.background = { Thread(it, "Update").start() }
+        }
+        ShadowLooper.idleMainLooper()
         assertEquals(Intent.ACTION_VIEW, shadowOf(a).nextStartedActivity?.action)
     }
 

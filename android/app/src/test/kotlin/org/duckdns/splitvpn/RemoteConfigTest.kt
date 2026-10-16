@@ -77,6 +77,38 @@ class RemoteConfigTest {
 
     private fun logLines() = AppLog.files(app).reversed().flatMap { it.readLines() }
 
+    private fun register() {
+        val ui = android.os.Messenger(android.os.Handler(android.os.Looper.getMainLooper()) { true })
+        android.os.Messenger(svc.onBind(Intent(TunnelVpnService.ACTION_BIND))!!)
+            .send(android.os.Message.obtain(null, VpnClient.MSG_REGISTER).apply { replyTo = ui })
+        ShadowLooper.idleMainLooper()
+    }
+
+    /** The UI greys the toggle out while min_version refuses: only a fetch on its bind can tell it was lowered. */
+    @Test
+    fun uiBindFetchesOnlyWhileTheVersionIsRefused() {
+        register()
+        Thread.sleep(200)
+        assertEquals(0, be.fetches.get())
+
+        app.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).edit()
+            .putLong(RemoteConfig.KEY_MIN_VERSION, BuildConfig.VERSION_CODE + 1L).commit()
+        be.config = RcValues("", 0, 0, "")
+        register()
+        awaitFetches(1)
+        assertFalse(RemoteConfig.versions(app).required)
+    }
+
+    /** The UI process has no file log: its update lines go through :vpn. */
+    @Test
+    fun uiLinesReachTheFileLog() {
+        android.os.Messenger(svc.onBind(Intent(TunnelVpnService.ACTION_BIND))!!).send(
+            android.os.Message.obtain(null, VpnClient.MSG_LOG).apply { data = android.os.Bundle().apply { putString(VpnClient.KEY_LINE, "update: FAILED") } },
+        )
+        ShadowLooper.idleMainLooper()
+        assertTrue(logLines().any { it.endsWith("ui: update: FAILED") })
+    }
+
     @Test
     fun startDoesNotWaitForTheFetch() {
         be.blockConfig = true
@@ -95,14 +127,12 @@ class RemoteConfigTest {
 
     @Test
     fun fetchedListBecomesTheCache() {
-        be.config = RcValues(blob(fromRc), 110, 120, "https://example.org/app.apk")
+        val apk = Updater.RELEASES + "latest/download/split-vpn.apk"
+        be.config = RcValues(blob(fromRc), 110, 120, "https://example.org/split-vpn/", apkUrl = apk)
         start()
         awaitFetches(1)
         assertEquals(listOf(fromRc), Endpoints.cached(app))
-        val prefs = app.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE)
-        assertEquals(110L, prefs.getLong(RemoteConfig.KEY_MIN_VERSION, 0))
-        assertEquals(120L, prefs.getLong(RemoteConfig.KEY_LATEST_VERSION, 0))
-        assertEquals("https://example.org/app.apk", prefs.getString(RemoteConfig.KEY_UPDATE_URL, null))
+        assertEquals(Versions(110, 120, "https://example.org/split-vpn/", apk), RemoteConfig.versions(app))
         assertTrue(fromRc in Endpoints.known)
     }
 

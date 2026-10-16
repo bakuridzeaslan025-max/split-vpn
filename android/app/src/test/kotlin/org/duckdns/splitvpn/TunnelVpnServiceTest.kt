@@ -261,8 +261,31 @@ class TunnelVpnServiceTest {
             // The failed fetch is an expected error line of its own.
             assertTrue(ShadowLog.getLogsForTag(AppLog.TAG).none { it.type == Log.ERROR && !it.msg.startsWith("remote config") })
             assertFalse(vpnPrefs().getBoolean(TunnelVpnService.KEY_WANTED, true))
+            // ...until the update it asks for: BootReceiver resumes on that.
+            assertTrue(vpnPrefs().getBoolean(TunnelVpnService.KEY_RESUME_AFTER_UPDATE, false))
         }
         assertTrue(TunnelVpnService.expected(Exception(TunnelVpnService.ERR_UPDATE_REQUIRED)))
+        // Switched off by hand: the update comes with the tunnel off.
+        svc.onStartCommand(Intent(TunnelVpnService.ACTION_STOP), 0, 2)
+        assertFalse(vpnPrefs().getBoolean(TunnelVpnService.KEY_RESUME_AFTER_UPDATE, true))
+    }
+
+    // Let through after all (min_version lowered): it is wanted's business again,
+    // not a leftover that brings the tunnel up on some update months later.
+    @Test
+    fun startThatGetsThroughForgetsResumeAfterUpdate() {
+        val svc = controller.get()
+        fake = FakeBackend().apply { config = RcValues("", 0, 0, "") }
+        svc.backend = fake!!
+        Credentials.save(app, fakeCred(System.currentTimeMillis() / 1000 + 7 * 86400))
+        vpnPrefs().edit().putBoolean(TunnelVpnService.KEY_RESUME_AFTER_UPDATE, true).commit()
+        svc.onStartCommand(Intent(TunnelVpnService.ACTION_START), 0, 1)
+        awaitState(VpnState.CONNECTED)
+        assertFalse(vpnPrefs().getBoolean(TunnelVpnService.KEY_RESUME_AFTER_UPDATE, true))
+
+        vpnPrefs().edit().putBoolean(TunnelVpnService.KEY_RESUME_AFTER_UPDATE, true).commit()
+        svc.onRevoke()
+        assertFalse(vpnPrefs().getBoolean(TunnelVpnService.KEY_RESUME_AFTER_UPDATE, true))
     }
 
     // The cache predates the lowered min_version: the first tap connects, not the second.

@@ -134,7 +134,7 @@ internal object GoBackend : Backend {
         // Not asLong(): a typo in the console would throw and cost the endpoints too.
         val quota = rc.getValue("daily_quota_mb").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString()?.trim()?.toLongOrNull()
         val yt = rc.getValue("yt_strategies").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString()
-        return RcValues(rc.getString("endpoints"), rc.getLong("min_version"), rc.getLong("latest_version"), rc.getString("update_url"), quota, yt)
+        return RcValues(rc.getString("endpoints"), rc.getLong("min_version"), rc.getLong("latest_version"), rc.getString("update_url"), quota, yt, rc.getString("apk_url"))
     }
     override fun setQuota(used: Long, limit: Long) = tunnel.Tunnel.setQuota(used, limit)
     override fun usage() = tunnel.Tunnel.usage()
@@ -253,6 +253,8 @@ class TunnelVpnService : VpnService() {
         // process; SharedPreferences are not safe across processes.
         const val PREFS = "vpn"
         const val KEY_WANTED = "wanted"
+        // Wanted was dropped only for min_version: the update brings it back (BootReceiver).
+        const val KEY_RESUME_AFTER_UPDATE = "resume_after_update"
         const val KEY_SERVICES = "services"
         const val KEY_ADBLOCK = "adblock"
         const val KEY_DIRECT = "yt_direct"
@@ -295,6 +297,10 @@ class TunnelVpnService : VpnService() {
         // of dial and 10 s of upgrade. Only then is "still down" news about it.
         internal const val NEW_NETWORK_SWITCH_MS = NEW_NETWORK_GRACE_MS + 20_000L
         private const val REPROBE_DELAY_MS = 5_000L
+        // A probe started right after establish() may still go out on the old
+        // network: Android moves its socket to the VPN half a second later and
+        // the connection breaks. One more try is enough.
+        internal var PROBE_RETRY_MS = 1_000L
         private const val WHY_NEW_LIST = "new list"
         internal const val CHANNEL_ID = "vpn_channel"
         private const val NOTIFICATION_ID = 1
@@ -386,8 +392,12 @@ class TunnelVpnService : VpnService() {
             VpnClient.MSG_REGISTER -> msg.replyTo?.let {
                 clients += it; push(it); resetBackoff()
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) repostNotification()
+                // The UI keeps the toggle off while min_version turns this version
+                // away: only a fetch can tell it was lowered meanwhile.
+                if (RemoteConfig.versions(this).required) fetchConfig("required")
             }
             VpnClient.MSG_UNREGISTER -> msg.replyTo?.let { clients -= it }
+            VpnClient.MSG_LOG -> msg.data.getString(VpnClient.KEY_LINE)?.let { AppLog.i("ui: $it") }
         }
         true
     })
@@ -450,7 +460,7 @@ class TunnelVpnService : VpnService() {
         when (intent?.action) {
             ACTION_CRASH -> if (BuildConfig.DEBUG) Crash.smokeTest(intent.getStringExtra("kind") ?: "vpn")
             ACTION_STOP -> {
-                vpnPrefs.edit().putBoolean(KEY_WANTED, false).apply()
+                vpnPrefs.edit().putBoolean(KEY_WANTED, false).putBoolean(KEY_RESUME_AFTER_UPDATE, false).apply()
                 cancelRetry()
                 stopTunnel(stopSelfWhenDone = true)
             }
@@ -464,7 +474,8 @@ class TunnelVpnService : VpnService() {
                     else vpnPrefs.getBoolean(KEY_ADBLOCK, false)
                 val direct = if (intent?.hasExtra(EXTRA_DIRECT) == true) intent.getBooleanExtra(EXTRA_DIRECT, true)
                     else vpnPrefs.getBoolean(KEY_DIRECT, true)
-                vpnPrefs.edit().putBoolean(KEY_WANTED, true).apply()
+                // A version still turned away sets resume_after_update again in startTunnel.
+                vpnPrefs.edit().putBoolean(KEY_WANTED, true).putBoolean(KEY_RESUME_AFTER_UPDATE, false).apply()
                 cancelRetry()
                 if (BuildConfig.DEBUG) testHooks(intent)
                 startForegroundCompat()
@@ -1072,7 +1083,7 @@ class TunnelVpnService : VpnService() {
                     if (versions.required) {
                         AppLog.i("startTunnel: version ${BuildConfig.VERSION_CODE} below min_version ${versions.min}")
                         // No retries on bind or boot: only an update gets past this.
-                        vpnPrefs.edit().putBoolean(KEY_WANTED, false).apply()
+                        vpnPrefs.edit().putBoolean(KEY_WANTED, false).putBoolean(KEY_RESUME_AFTER_UPDATE, true).apply()
                         if (!synchronized(lock) { stopping }) fail(ERR_UPDATE_REQUIRED)
                         return@Thread
                     }
@@ -1443,12 +1454,22 @@ class TunnelVpnService : VpnService() {
             for (svc in enabled) {
                 pool.submit {
                     try {
-                        val t0 = System.nanoTime()
-                        val result = try {
+                        fun once(): String {
+                            val t0 = System.nanoTime()
                             backend.probe(svc.probeUrl)
-                            "${(System.nanoTime() - t0) / 1_000_000} мс"
-                        } catch (e: Exception) {
-                            "ошибка: ${e.javaClass.simpleName}"
+                            return "${(System.nanoTime() - t0) / 1_000_000} мс"
+                        }
+                        val result = try {
+                            once()
+                        } catch (_: Exception) {
+                            try {
+                                Thread.sleep(PROBE_RETRY_MS)
+                                once()
+                            } catch (e: InterruptedException) {
+                                return@submit // stopTunnel: nobody waits for it
+                            } catch (e: Exception) {
+                                "ошибка: ${e.javaClass.simpleName}"
+                            }
                         }
                         if (probeThread === me) TunnelState.log("${svc.title}: $result")
                     } finally {
@@ -1600,7 +1621,7 @@ class TunnelVpnService : VpnService() {
 
     override fun onRevoke() {
         // Another VPN took over or the user pulled permission: don't fight it.
-        vpnPrefs.edit().putBoolean(KEY_WANTED, false).apply()
+        vpnPrefs.edit().putBoolean(KEY_WANTED, false).putBoolean(KEY_RESUME_AFTER_UPDATE, false).apply()
         stopTunnel(stopSelfWhenDone = true)
     }
 

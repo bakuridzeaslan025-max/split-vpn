@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -25,13 +26,18 @@ import (
 const (
 	debugCondition = "build_debug"
 	appPackage     = "org.newvpn"
+	releasesPrefix = "https://github.com/bakuridzeaslan025-max/split-vpn/releases/"
 )
+
+var apkAsset = regexp.MustCompile(`^(?:download/[A-Za-z0-9_.+-]+|latest/download)/[A-Za-z0-9_.+-]+\.apk$`)
 
 type config struct {
 	MinVersion    int    `json:"min_version"`
 	LatestVersion int    `json:"latest_version"`
 	UpdateURL     string `json:"update_url"`
-	DailyQuotaMB  int    `json:"daily_quota_mb"`
+	// The APK self-update downloads; "" turns self-update off.
+	APKURL       string `json:"apk_url"`
+	DailyQuotaMB int    `json:"daily_quota_mb"`
 	// Direct YouTube's strategies, in the order to try them; [] turns it
 	// off for everyone. The app bakes this file's value in as its default.
 	YTStrategies json.RawMessage `json:"yt_strategies"`
@@ -58,6 +64,11 @@ func (c config) validate() error {
 	// The download page the app opens in the browser.
 	if u, err := url.Parse(c.UpdateURL); err != nil || u.Scheme != "https" || u.Host == "" {
 		return errors.New("config: update_url must be an https:// page")
+	}
+	// Updater.urlOk's check: what it refuses would file a non-fatal on every tap.
+	if c.APKURL != "" && (!strings.HasPrefix(c.APKURL, releasesPrefix) ||
+		!apkAsset.MatchString(strings.TrimPrefix(c.APKURL, releasesPrefix)) || strings.Contains(c.APKURL, "..")) {
+		return errors.New("config: apk_url must be empty or " + releasesPrefix + "{download/<tag>,latest/download}/<file>.apk")
 	}
 	if c.YTStrategies == nil {
 		return errors.New("config: yt_strategies is required, a JSON array ([] turns direct YouTube off)")
@@ -163,6 +174,7 @@ func values(c config, blob string) [][3]string {
 		{"min_version", "NUMBER", strconv.Itoa(c.MinVersion)},
 		{"latest_version", "NUMBER", strconv.Itoa(c.LatestVersion)},
 		{"update_url", "STRING", c.UpdateURL},
+		{"apk_url", "STRING", c.APKURL},
 		{"daily_quota_mb", "NUMBER", strconv.Itoa(c.DailyQuotaMB)},
 		{"yt_strategies", "STRING", c.ytValue()},
 	}
@@ -189,8 +201,8 @@ func push(rc *rcClient, t template, etag string, appID string, c config, blob st
 	if err != nil {
 		return fmt.Errorf("publish: %w", err)
 	}
-	fmt.Fprintf(out, "published version %s: min_version %d, latest_version %d, update_url %s, daily_quota_mb %d, yt_strategies %s, endpoints set (%s)\n",
-		ver, c.MinVersion, c.LatestVersion, c.UpdateURL, c.DailyQuotaMB, c.ytValue(), debugCondition)
+	fmt.Fprintf(out, "published version %s: min_version %d, latest_version %d, update_url %s, apk_url %s, daily_quota_mb %d, yt_strategies %s, endpoints set (%s)\n",
+		ver, c.MinVersion, c.LatestVersion, c.UpdateURL, c.APKURL, c.DailyQuotaMB, c.ytValue(), debugCondition)
 	return nil
 }
 
@@ -221,8 +233,8 @@ func promote(rc *rcClient, t template, etag string, out io.Writer) error {
 		return fmt.Errorf("publish: %w", err)
 	}
 	get := func(k string) string { s, _ := t.value(k, ""); return s }
-	fmt.Fprintf(out, "published version %s: defaults = %s: min_version %s, latest_version %s, update_url %s, daily_quota_mb %s, yt_strategies %s, endpoints as checked\n",
-		ver, debugCondition, get("min_version"), get("latest_version"), get("update_url"), get("daily_quota_mb"), get("yt_strategies"))
+	fmt.Fprintf(out, "published version %s: defaults = %s: min_version %s, latest_version %s, update_url %s, apk_url %s, daily_quota_mb %s, yt_strategies %s, endpoints as checked\n",
+		ver, debugCondition, get("min_version"), get("latest_version"), get("update_url"), get("apk_url"), get("daily_quota_mb"), get("yt_strategies"))
 	return nil
 }
 

@@ -61,7 +61,14 @@ internal class FakeBackend : Backend {
     override fun networkChanged() { events += "networkChanged" }
     override fun networkLost() { events += "networkLost" }
     override fun dnsChanged() { events += "dnsChanged" }
-    override fun probe(url: String) { if (blockProbe) probeGate.await() }
+    /** Probes that throw before the rest go through. */
+    val probeFailures = java.util.concurrent.atomic.AtomicInteger()
+    val probes = java.util.concurrent.atomic.AtomicInteger()
+    override fun probe(url: String) {
+        probes.incrementAndGet()
+        if (blockProbe) probeGate.await()
+        if (probeFailures.getAndDecrement() > 0) throw java.net.SocketException("Connection reset")
+    }
 
     override fun integrityToken(ctx: Context, nonce: ByteArray) = token
     override fun trustCA(pem: String) {}

@@ -224,6 +224,44 @@ class TunnelBugsTest {
         assertEquals(VpnState.DISCONNECTED, TunnelState.state)
     }
 
+    private fun awaitProbeLine(): String {
+        val deadline = System.currentTimeMillis() + 5_000
+        while (System.currentTimeMillis() < deadline) {
+            TunnelState.logLines().lastOrNull { it.contains("Telegram:") }?.let { return it }
+            Thread.sleep(20)
+        }
+        throw AssertionError("no probe line: ${TunnelState.logLines()}")
+    }
+
+    // The first probe can go out on the network the VPN is replacing and break.
+    @Test
+    fun probeBrokenOnceIsRetried() {
+        TunnelVpnService.PROBE_RETRY_MS = 10
+        try {
+            be.probeFailures.set(1)
+            start("telegram")
+            awaitState(VpnState.CONNECTED)
+            assertTrue(awaitProbeLine(), awaitProbeLine().endsWith(" мс"))
+            assertEquals(2, be.probes.get())
+        } finally {
+            TunnelVpnService.PROBE_RETRY_MS = 1_000L
+        }
+    }
+
+    @Test
+    fun probeBrokenTwiceIsAnError() {
+        TunnelVpnService.PROBE_RETRY_MS = 10
+        try {
+            be.probeFailures.set(2)
+            start("telegram")
+            awaitState(VpnState.CONNECTED)
+            assertTrue(awaitProbeLine(), awaitProbeLine().endsWith("ошибка: SocketException"))
+            assertEquals(2, be.probes.get())
+        } finally {
+            TunnelVpnService.PROBE_RETRY_MS = 1_000L
+        }
+    }
+
     // Б1: probes must not outlive the tunnel or delay stop.
     @Test
     fun stopDuringProbesIsFastAndDropsLateLog() {
