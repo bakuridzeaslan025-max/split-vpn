@@ -138,6 +138,10 @@ func upgrade(c net.Conn, ep *relayTarget, cred []byte) (*bufio.Reader, error) {
 	}
 }
 
+// relayAlive: when the VDS last sent anything, in any session, its
+// upgrade answers included.
+var relayAlive atomic.Int64
+
 // bufConn reads through the bufio.Reader that parsed the 101. It is the
 // relay session past the handshake, so it counts the quota both ways.
 type bufConn struct {
@@ -153,10 +157,6 @@ func (c *bufConn) Read(p []byte) (int, error) {
 	}
 	return n, err
 }
-
-// relayAlive: when the VDS last sent anything, in any session, its
-// upgrade answers included.
-var relayAlive atomic.Int64
 
 func (c *bufConn) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
@@ -541,18 +541,23 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 		r.Complete(true)
 		return
 	}
-	if a := id.LocalAddress.As4(); id.LocalPort == 443 && directOn.Load() {
-		if ip := net.IP(a[:]).String(); picker.deadNow(ip) {
-			if more, ok := refusedLog.allow(ip, time.Now()); ok {
-				log.Printf("sni desync: %s dead, connection refused%s", ip, more)
-			}
-			// The player never waits on the check: it gets the refusal now.
+	addrBytes := id.LocalAddress.As4()
+	dstIP := net.IP(addrBytes[:])
+	dstPort := id.LocalPort
+	ip := dstIP.String()
+	if dstPort == 443 && directOn.Load() && picker.deadNow(ip) {
+		if more, ok := refusedLog.allow(ip, time.Now()); ok {
+			log.Printf("sni desync: %s dead, connection refused%s", ip, more)
+		}
+		// The player never waits on the check: it gets the refusal now. A
+		// check that cannot happen does not take the turn.
+		if !health.down() && !overQuota() {
 			if gen, ok := picker.recheckDue(ip); ok {
 				go recheckDead(gen, health.generation(), ip, cred)
 			}
-			r.Complete(true)
-			return
 		}
+		r.Complete(true)
+		return
 	}
 
 	var wq waiter.Queue
@@ -565,10 +570,6 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 
 	conn := gonet.NewTCPConn(&wq, ep)
 	defer conn.Close()
-
-	addrBytes := id.LocalAddress.As4()
-	dstIP := net.IP(addrBytes[:])
-	dstPort := id.LocalPort
 
 	if !trackConn(conn) {
 		return
@@ -597,7 +598,7 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 			return
 		}
 		// Turned dead while this one tried direct.
-		if picker.deadNow(dstIP.String()) {
+		if picker.deadNow(ip) {
 			return
 		}
 	}
@@ -621,15 +622,6 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 		out, err = dialRelay(ctx, cred, dstIP, dstPort)
 	}
 	cancel()
-	ip := dstIP.String()
-	// Only a video cache node: a shared Google front (redirector, the API)
-	// must never be refused.
-	video := !direct && err == nil && directOn.Load() && strings.HasSuffix(name, ".googlevideo.com") && strings.Contains(name, "---sn-")
-	var gen uint64
-	var silent bool
-	if video {
-		gen, silent = picker.silentNow(ip)
-	}
 	if err != nil {
 		// During an outage or over the quota, the relay's own lines tell the story.
 		if direct || !health.down() && !errors.Is(err, errQuota) {
@@ -642,6 +634,15 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 	// which foreign sites share our subnets.
 	if direct {
 		log.Printf("sni %s → %s:%d direct", name, dstIP, dstPort)
+	}
+	// Only a video cache node: a shared Google front (redirector, the API)
+	// must never be refused.
+	lower := strings.ToLower(name)
+	video := !direct && directOn.Load() && strings.HasSuffix(lower, ".googlevideo.com") && strings.Contains(lower, "---sn-")
+	var gen uint64
+	var silent bool
+	if video {
+		gen, silent = picker.silentNow(ip)
 	}
 
 	if len(first) > 0 {
@@ -697,6 +698,21 @@ func (c *connsByAddr) add(ip string, app, out net.Conn) (remove func()) {
 	}
 }
 
+// answered: a session to ip got its first byte after since, the node is
+// alive and this one's silence is the path's.
+func (c *connsByAddr) answered(ip string, since time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, out := range c.m[ip] {
+		if wc, ok := out.(*watchConn); ok {
+			if f := wc.first.Load(); f > 0 && wc.start.Add(time.Duration(f)).After(since) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (c *connsByAddr) close(ip string) {
 	c.mu.Lock()
 	conns := maps.Clone(c.m[ip])
@@ -730,7 +746,7 @@ func checkDead(gen, hgen uint64, ip string, since time.Time, cred []byte) {
 	if relayAlive.Load() <= since.UnixNano() && probeRelay(cred) != nil {
 		return
 	}
-	if health.generation() != hgen {
+	if health.generation() != hgen || videoConns.answered(ip, since) {
 		return
 	}
 	if picker.markDead(gen, ip) {

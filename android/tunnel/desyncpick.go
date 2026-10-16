@@ -14,15 +14,14 @@ import (
 )
 
 // Which strategy works is picked on live YouTube traffic, per network: the
-// current one is tried, its failures move on to the next. Winners and
-// "nothing works" are kept per network in files/desync.json; the rest is
-// memory only. Stop and Start keep it all (a TUN rebuild is a Stop+Start
+// current one is tried, its failures move on to the next. Winners,
+// "nothing works" and dead addresses are kept per network in
+// files/desync.json; the rest is memory only. Stop and Start keep it all (a TUN rebuild is a Stop+Start
 // every 10 min at most); only another network starts afresh.
 const (
 	needFails    = 2                // counted failures before a strategy moves on...
 	needFailsWon = 3                // ...and before this network's winner does
 	silentFor    = 30 * time.Minute // an address the winner does not get through to goes by relay
-	deadWait     = 4 * time.Second  // a silent address's relay session with no byte back this long: dead both ways
 	deadFor      = 24 * time.Hour   // its connections refused on this network, kept in the map
 	deadMax      = 16               // dead addresses kept per network
 	deadRecheck  = 15 * time.Minute // a dead address the player asks for is probed again at most this often
@@ -140,7 +139,7 @@ type pickState struct {
 	silent    addrs          // relay until
 	dead      addrs          // silent through the relay too: connections refused until
 	failed    map[string]int // ip → failures counted against cur, forgiven if it turns dead
-	noHello   addrs          // the direct try got no ServerHello: its relay session is watched
+	noHello   addrs          // the direct try got no ServerHello back: its relay session is watched
 	checked   addrs          // dead ones by when they were last probed, see recheckDue
 	noneUntil time.Time
 	slow      int
@@ -169,6 +168,10 @@ type tally struct {
 }
 
 var picker = &pickState{now: time.Now}
+
+// deadWait: a silent address's relay session with no byte back this long
+// is dead both ways. A var for the tests.
+var deadWait = 4 * time.Second
 
 // started: Start's turn. The map is read once per process (Stop and Start
 // keep the memory), the new host hears the verdict afresh.
@@ -412,8 +415,8 @@ func (p *pickState) pick(ip string) (*strategy, uint64) {
 	return &list[i], p.gen
 }
 
-// silentNow: ip goes by relay because the direct path got no answer from
-// it: the winner never got through to it, or the try had no ServerHello
+// silentNow: ip goes by relay because the direct path got no ServerHello
+// from it: the winner never got through to it, or the try had no ServerHello
 // (also before the winner is confirmed). gen goes back with markDead.
 func (p *pickState) silentNow(ip string) (uint64, bool) {
 	p.mu.Lock()
@@ -426,7 +429,8 @@ func (p *pickState) silentNow(ip string) (uint64, bool) {
 // Google cache inside one ISP's network seen from another network. Its
 // connections get refused for deadFor, on this network even after a
 // restart: a fast error instead of the player's 30 s handshake timeout.
-// Not extended while it lasts. Its failure is not the strategy's.
+// A repeated mark does not extend it (recheckDone does). Its failures
+// are not the strategy's.
 // Reports whether ip is dead on this network now.
 func (p *pickState) markDead(gen uint64, ip string) bool {
 	p.mu.Lock()
@@ -457,7 +461,7 @@ func (p *pickState) markDead(gen uint64, ip string) bool {
 			dead[k] = u
 		}
 	}
-	for len(dead) > deadMax {
+	if len(dead) > deadMax {
 		oldest := ""
 		for k, u := range dead {
 			if oldest == "" || u < dead[oldest] {
