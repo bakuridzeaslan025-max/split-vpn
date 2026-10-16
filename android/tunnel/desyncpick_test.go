@@ -579,3 +579,34 @@ func TestMarkDead_WindowAndNetwork(t *testing.T) {
 		t.Fatal("dead from an earlier network")
 	}
 }
+
+// A dead address is kept for the network in the map: the next time on it
+// (here after a restart) its connections are refused from the start, and
+// the failure it caused is not held against the strategy.
+func TestMarkDead_KeptForTheNetwork(t *testing.T) {
+	p, _, file := picking(t)
+	try(p, "1.1.1.1", false)
+	if p.fails != 1 {
+		t.Fatalf("fails %d", p.fails)
+	}
+	if !p.markDead(p.gen, "1.1.1.1") || p.fails != 0 {
+		t.Fatalf("dead: fails %d", p.fails)
+	}
+	p.setNetKey("cell:25002")
+	if p.deadNow("1.1.1.1") {
+		t.Fatal("dead on another network")
+	}
+
+	q := freshPicker(t)
+	q.started(file)
+	q.setNetKey("cell:25001")
+	if !q.deadNow("1.1.1.1") {
+		t.Fatal("not dead after a restart")
+	}
+	advance(q, deadFor+time.Hour) // try moves the clock too
+	q.setNetKey("cell:25002")
+	q.setNetKey("cell:25001")
+	if q.deadNow("1.1.1.1") {
+		t.Fatalf("dead after %s", deadFor)
+	}
+}

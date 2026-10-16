@@ -152,7 +152,8 @@ func (c *bufConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// relayAlive: when the VDS last sent anything, in any session.
+// relayAlive: when the VDS last sent anything, in any session, its
+// upgrade answers included.
 var relayAlive atomic.Int64
 
 func (c *bufConn) Write(p []byte) (int, error) {
@@ -592,6 +593,7 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	var out net.Conn
+	var dialed time.Time
 	var err error
 	if direct {
 		out, err = dialDirect(ctx, "tcp", fmt.Sprintf("%s:%d", dstIP, dstPort))
@@ -603,6 +605,7 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 			}
 		}
 	} else {
+		dialed = time.Now()
 		out, err = dialRelay(ctx, cred, dstIP, dstPort)
 	}
 	cancel()
@@ -640,12 +643,12 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 		}
 		if silent {
 			ip := dstIP.String()
-			// Only while the VDS answers others: a silent relay says nothing
-			// about the address.
+			defer videoConns.add(ip, conn, wc)()
+			// Only while the VDS answers, this session's upgrade included: a
+			// silent relay says nothing about the address.
 			t := time.AfterFunc(deadWait, func() {
-				if wc.first.Load() == 0 && relayAlive.Load() > wc.start.UnixNano() && picker.markDead(gen, ip) {
-					conn.Close()
-					wc.Close()
+				if wc.first.Load() == 0 && relayAlive.Load() > dialed.UnixNano() && picker.markDead(gen, ip) {
+					videoConns.close(ip)
 				}
 			})
 			defer t.Stop()
@@ -653,6 +656,41 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 		out = wc
 	}
 	relay(conn, out)
+}
+
+// videoConns: relayed googlevideo sessions to silent addresses, so that all
+// of an address's go at once when it turns dead.
+var videoConns = connsByAddr{m: map[string]map[net.Conn]net.Conn{}}
+
+type connsByAddr struct {
+	mu sync.Mutex
+	m  map[string]map[net.Conn]net.Conn // ip → app side → relay side
+}
+
+func (c *connsByAddr) add(ip string, app, out net.Conn) (remove func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m[ip] == nil {
+		c.m[ip] = map[net.Conn]net.Conn{}
+	}
+	c.m[ip][app] = out
+	return func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		delete(c.m[ip], app)
+		if len(c.m[ip]) == 0 {
+			delete(c.m, ip)
+		}
+	}
+}
+
+func (c *connsByAddr) close(ip string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for app, out := range c.m[ip] {
+		app.Close()
+		out.Close()
+	}
 }
 
 var refusedLog = throttle{every: time.Minute}

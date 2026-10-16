@@ -158,7 +158,10 @@ func (h *relayHealth) ok(gen uint64) {
 
 // accepted records a 101. Not part of ok: the prober calls that on a
 // refused credential too, and no traffic goes through then.
-func (h *relayHealth) accepted() { h.lastOK.Store(time.Now().Unix()) }
+func (h *relayHealth) accepted() {
+	h.lastOK.Store(time.Now().Unix())
+	relayAlive.Store(time.Now().UnixNano())
+}
 
 // LastRelayOK is when the relay last let a session in (101), unix seconds;
 // 0 before any in this process.

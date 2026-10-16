@@ -22,8 +22,9 @@ const (
 	needFails    = 2                // counted failures before a strategy moves on...
 	needFailsWon = 3                // ...and before this network's winner does
 	silentFor    = 30 * time.Minute // an address the winner does not get through to goes by relay
-	deadWait     = 5 * time.Second  // a silent address's relay session with no byte back this long: dead both ways
-	deadFor      = 3 * time.Minute  // its connections refused: the player moves to another node meanwhile
+	deadWait     = 4 * time.Second  // a silent address's relay session with no byte back this long: dead both ways
+	deadFor      = 24 * time.Hour   // its connections refused on this network, kept in the map
+	deadMax      = 16               // dead addresses kept per network
 	noneFor      = 7 * 24 * time.Hour
 	addrMemory   = 64 // addresses kept per network: googlevideo's change with every video
 	mapMax       = 64
@@ -107,6 +108,9 @@ type netEntry struct {
 	Win  string `json:"win,omitempty"`
 	None bool   `json:"none,omitempty"`
 	At   int64  `json:"at"`
+	// Dead: ip → unix time its connections are refused until, see markDead.
+	// Not part of At: a dead address does not extend a week of None.
+	Dead map[string]int64 `json:"dead,omitempty"`
 }
 
 type netMapFile struct {
@@ -134,6 +138,7 @@ type pickState struct {
 	ok        addrs     // where cur got through
 	silent    addrs     // relay until
 	dead      addrs     // silent through the relay too: connections refused until
+	failed    addrs     // addresses behind the failures counted against cur
 	noneUntil time.Time
 	slow      int
 	attempts  int
@@ -285,7 +290,7 @@ func (p *pickState) resetLocked() {
 	p.cur, p.won, p.confirmed = "", false, false
 	p.fails, p.tried, p.slow, p.attempts = 0, 0, 0, 0
 	p.lastFail, p.noneUntil = time.Time{}, time.Time{}
-	p.ok, p.silent, p.dead, p.passed = addrs{}, addrs{}, addrs{}, false
+	p.ok, p.silent, p.dead, p.failed, p.passed = addrs{}, addrs{}, addrs{}, addrs{}, false
 	p.tally, p.summarized, p.okSinceFail, p.lastFailLog = tally{}, tally{}, 0, time.Time{}
 }
 
@@ -299,6 +304,11 @@ func (p *pickState) applyLocked() {
 		if e, ok := p.nets[p.key]; ok {
 			if until := time.Unix(e.At, 0).Add(noneFor); e.None && p.now().Before(until) {
 				p.noneUntil = until
+			}
+			for ip, until := range e.Dead {
+				if t := time.Unix(until, 0); p.now().Before(t) {
+					p.dead.put(ip, t)
+				}
 			}
 			if e.Win != "" && hasID(list, e.Win) {
 				p.cur, p.won = e.Win, true
@@ -409,9 +419,10 @@ func (p *pickState) silentNow(ip string) (uint64, bool) {
 
 // markDead: a silent address the relay does not reach either, such as a
 // Google cache inside one ISP's network seen from another network. Its
-// connections get refused for deadFor: a fast error instead of the
-// player's 30 s handshake timeout. Not extended while it lasts. Reports
-// whether ip is dead on this network now.
+// connections get refused for deadFor, on this network even after a
+// restart: a fast error instead of the player's 30 s handshake timeout.
+// Not extended while it lasts. Its failure is not the strategy's.
+// Reports whether ip is dead on this network now.
 func (p *pickState) markDead(gen uint64, ip string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -423,7 +434,40 @@ func (p *pickState) markDead(gen uint64, ip string) bool {
 		return true
 	}
 	log.Printf("sni desync: %s silent through the relay too → closing, refusing connections for %s", ip, deadFor)
-	p.dead.put(ip, now.Add(deadFor))
+	until := now.Add(deadFor)
+	p.dead.put(ip, until)
+	if p.failed.has(ip) {
+		p.failed.del(ip)
+		p.fails = max(p.fails-1, 0)
+	}
+	if p.key == "" {
+		return true
+	}
+	e := p.nets[p.key]
+	dead := map[string]int64{ip: until.Unix()}
+	for k, u := range e.Dead {
+		if now.Unix() < u && k != ip {
+			dead[k] = u
+		}
+	}
+	for len(dead) > deadMax {
+		oldest := ""
+		for k, u := range dead {
+			if oldest == "" || u < dead[oldest] {
+				oldest = k
+			}
+		}
+		delete(dead, oldest)
+	}
+	e.Dead = dead
+	if e.At == 0 {
+		e.At = now.Unix()
+	}
+	if p.nets == nil {
+		p.nets = map[string]netEntry{}
+	}
+	p.nets[p.key] = e
+	p.writeLocked()
 	return true
 }
 
@@ -438,7 +482,7 @@ func (p *pickState) deadNow(ip string) bool {
 // (or the list was empty): start this network again where the map says.
 func (p *pickState) restartLocked() {
 	p.won, p.confirmed, p.passed = false, false, false
-	p.fails, p.tried, p.ok = 0, 0, addrs{}
+	p.fails, p.tried, p.ok, p.failed = 0, 0, addrs{}, addrs{}
 	p.applyLocked()
 }
 
@@ -488,6 +532,7 @@ func (p *pickState) result(gen uint64, id, ip string, start time.Time, ok bool, 
 		return
 	}
 	if !start.Before(p.lastFail) {
+		p.failed.put(ip, time.Time{})
 		p.failLocked(why)
 	}
 	return
@@ -510,7 +555,7 @@ func (p *pickState) failLocked(why string) {
 	prev := p.cur
 	i := slices.IndexFunc(list, func(s strategy) bool { return s.id == prev })
 	p.cur = list[(i+1)%len(list)].id
-	p.won, p.confirmed, p.passed, p.fails, p.ok = false, false, false, 0, addrs{}
+	p.won, p.confirmed, p.passed, p.fails, p.ok, p.failed = false, false, false, 0, addrs{}, addrs{}
 	p.tried++
 	if p.tried >= len(list) {
 		p.noneLocked(fmt.Sprintf("all %d failed, last %s: %s", len(list), prev, why))
@@ -622,7 +667,12 @@ func (p *pickState) saveLocked(e netEntry) {
 	if p.nets == nil {
 		p.nets = map[string]netEntry{}
 	}
+	e.Dead = p.nets[p.key].Dead
 	p.nets[p.key] = e
+	p.writeLocked()
+}
+
+func (p *pickState) writeLocked() {
 	trimNetMap(p.nets)
 	if p.file == "" {
 		return
