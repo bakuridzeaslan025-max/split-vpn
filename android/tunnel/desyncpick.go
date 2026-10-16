@@ -25,6 +25,7 @@ const (
 	deadWait     = 4 * time.Second  // a silent address's relay session with no byte back this long: dead both ways
 	deadFor      = 24 * time.Hour   // its connections refused on this network, kept in the map
 	deadMax      = 16               // dead addresses kept per network
+	deadRecheck  = 15 * time.Minute // a dead address the player asks for is probed again at most this often
 	noneFor      = 7 * 24 * time.Hour
 	addrMemory   = 64 // addresses kept per network: googlevideo's change with every video
 	mapMax       = 64
@@ -139,6 +140,8 @@ type pickState struct {
 	silent    addrs     // relay until
 	dead      addrs     // silent through the relay too: connections refused until
 	failed    addrs     // addresses behind the failures counted against cur
+	noHello   addrs     // the direct try got no ServerHello: its relay session is watched
+	checked   addrs     // dead ones by when they were last probed, see recheckDue
 	noneUntil time.Time
 	slow      int
 	attempts  int
@@ -291,6 +294,7 @@ func (p *pickState) resetLocked() {
 	p.fails, p.tried, p.slow, p.attempts = 0, 0, 0, 0
 	p.lastFail, p.noneUntil = time.Time{}, time.Time{}
 	p.ok, p.silent, p.dead, p.failed, p.passed = addrs{}, addrs{}, addrs{}, addrs{}, false
+	p.noHello, p.checked = addrs{}, addrs{}
 	p.tally, p.summarized, p.okSinceFail, p.lastFailLog = tally{}, tally{}, 0, time.Time{}
 }
 
@@ -410,11 +414,14 @@ func (p *pickState) pick(ip string) (*strategy, uint64) {
 
 // silentNow: ip goes by relay because the winner never got through to it;
 // gen goes back with markDead.
+// silentNow: ip goes by relay because the direct path got no answer from
+// it: the winner never got through to it, or the try had no ServerHello
+// (also before the winner is confirmed). gen goes back with markDead.
 func (p *pickState) silentNow(ip string) (uint64, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	until, ok := p.silent.get(ip)
-	return p.gen, ok && p.now().Before(until)
+	return p.gen, ok && p.now().Before(until) || p.noHello.has(ip)
 }
 
 // markDead: a silent address the relay does not reach either, such as a
@@ -478,6 +485,48 @@ func (p *pickState) deadNow(ip string) bool {
 	return ok && p.now().Before(until)
 }
 
+// recheckDue: the player asks for a dead address that was not probed for
+// deadRecheck (or since it came from the map). True once per due time: the
+// caller probes it and reports with recheckDone.
+func (p *pickState) recheckDue(ip string) (uint64, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.now()
+	if at, ok := p.checked.get(ip); ok && now.Sub(at) < deadRecheck {
+		return 0, false
+	}
+	p.checked.put(ip, now)
+	return p.gen, true
+}
+
+// recheckDone: alive, the address is no longer dead; silent, it stays dead
+// for deadFor from now. Both written to the map.
+func (p *pickState) recheckDone(gen uint64, ip string, alive bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if gen != p.gen || !p.dead.has(ip) {
+		return
+	}
+	until := p.now().Add(deadFor)
+	if alive {
+		log.Printf("sni desync: %s answers through the relay again → no longer dead", ip)
+		p.dead.del(ip)
+	} else {
+		p.dead.put(ip, until)
+	}
+	if p.key == "" {
+		return
+	}
+	e := p.nets[p.key]
+	if alive {
+		delete(e.Dead, ip)
+	} else if e.Dead != nil {
+		e.Dead[ip] = until.Unix()
+	}
+	p.nets[p.key] = e
+	p.writeLocked()
+}
+
 // restartLocked: the current strategy is gone from Remote Config's list
 // (or the list was empty): start this network again where the map says.
 func (p *pickState) restartLocked() {
@@ -508,12 +557,21 @@ func (p *pickState) result(gen uint64, id, ip string, start time.Time, ok bool, 
 		return 0, false
 	}
 	since, logFail = p.countLocked(ok)
+	if ok {
+		p.noHello.del(ip)
+	} else {
+		p.noHello.put(ip, time.Time{})
+	}
 	if id != p.cur || p.now().Before(p.noneUntil) {
+		return
+	}
+	// A try begun before its address turned dead: not the strategy's.
+	if until, dead := p.dead.get(ip); !ok && dead && p.now().Before(until) {
 		return
 	}
 	p.attempts++
 	if ok {
-		p.fails, p.tried, p.passed = 0, 0, true
+		p.fails, p.tried, p.passed, p.failed = 0, 0, true, addrs{}
 		p.ok.put(ip, time.Time{})
 		if p.ok.len() >= 2 && !p.confirmed {
 			p.confirmed, p.won, p.lastWin = true, true, id

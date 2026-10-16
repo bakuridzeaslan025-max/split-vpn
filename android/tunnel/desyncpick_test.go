@@ -610,3 +610,66 @@ func TestMarkDead_KeptForTheNetwork(t *testing.T) {
 		t.Fatalf("dead after %s", deadFor)
 	}
 }
+
+// Before the winner is confirmed a node without a ServerHello is watched
+// all the same, and its failure is forgiven once it turns out dead.
+func TestNoHello_WatchedBeforeConfirmed(t *testing.T) {
+	p, _, _ := picking(t)
+	try(p, "1.1.1.1", false)
+	if _, watched := p.silentNow("1.1.1.1"); !watched {
+		t.Fatal("not watched before confirmed")
+	}
+	p.markDead(p.gen, "1.1.1.1")
+	if p.fails != 0 {
+		t.Fatalf("fails %d after the mark", p.fails)
+	}
+	// A try begun before the mark, reported after it, is not the strategy's.
+	st, gen := p.pick("2.2.2.2")
+	p.markDead(p.gen, "2.2.2.2")
+	p.result(gen, st.id, "2.2.2.2", p.now(), false, "silence")
+	if p.fails != 0 {
+		t.Fatalf("fails %d for a dead address", p.fails)
+	}
+}
+
+// A success clears the failures together with what they were for: a later
+// dead address forgives only its own.
+func TestFailed_ClearedBySuccess(t *testing.T) {
+	p, _, _ := picking(t)
+	try(p, "1.1.1.1", false)
+	try(p, "2.2.2.2", true)
+	try(p, "3.3.3.3", false)
+	p.markDead(p.gen, "1.1.1.1")
+	if p.fails != 1 {
+		t.Fatalf("fails %d: another address's failure forgiven", p.fails)
+	}
+}
+
+// The player's asks for a dead address bring a probe at most every
+// deadRecheck; an answer lifts the mark, also from the map, silence
+// extends it.
+func TestRecheck(t *testing.T) {
+	p, _, file := picking(t)
+	p.markDead(p.gen, "1.1.1.1")
+	gen, due := p.recheckDue("1.1.1.1")
+	if !due {
+		t.Fatal("not due after the mark")
+	}
+	if _, again := p.recheckDue("1.1.1.1"); again {
+		t.Fatal("due twice")
+	}
+	advance(p, deadFor-time.Minute)
+	p.recheckDone(gen, "1.1.1.1", false)
+	advance(p, time.Hour)
+	if !p.deadNow("1.1.1.1") {
+		t.Fatal("silence did not extend the mark")
+	}
+	gen, due = p.recheckDue("1.1.1.1")
+	if !due {
+		t.Fatalf("not due after %s", deadRecheck)
+	}
+	p.recheckDone(gen, "1.1.1.1", true)
+	if p.deadNow("1.1.1.1") || readMap(t, file)["cell:25001"].Dead["1.1.1.1"] != 0 {
+		t.Fatal("still dead after an answer")
+	}
+}

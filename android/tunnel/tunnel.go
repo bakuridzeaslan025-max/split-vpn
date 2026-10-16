@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
@@ -12,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -539,13 +541,18 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 		r.Complete(true)
 		return
 	}
-	if a := id.LocalAddress.As4(); directOn.Load() && picker.deadNow(net.IP(a[:]).String()) {
-		ip := net.IP(a[:]).String()
-		if more, ok := refusedLog.allow(ip, time.Now()); ok {
-			log.Printf("sni desync: %s dead, connection refused%s", ip, more)
+	if a := id.LocalAddress.As4(); id.LocalPort == 443 && directOn.Load() {
+		if ip := net.IP(a[:]).String(); picker.deadNow(ip) {
+			if more, ok := refusedLog.allow(ip, time.Now()); ok {
+				log.Printf("sni desync: %s dead, connection refused%s", ip, more)
+			}
+			// The player never waits on the check: it gets the refusal now.
+			if gen, ok := picker.recheckDue(ip); ok {
+				go recheckDead(gen, ip, cred)
+			}
+			r.Complete(true)
+			return
 		}
-		r.Complete(true)
-		return
 	}
 
 	var wq waiter.Queue
@@ -589,11 +596,14 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 		if first, done = tryDesync(conn, first, name, dstIP, dstPort, t0); done {
 			return
 		}
+		// Turned dead while this one tried direct.
+		if picker.deadNow(dstIP.String()) {
+			return
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	var out net.Conn
-	var dialed time.Time
 	var err error
 	if direct {
 		out, err = dialDirect(ctx, "tcp", fmt.Sprintf("%s:%d", dstIP, dstPort))
@@ -605,15 +615,17 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 			}
 		}
 	} else {
-		dialed = time.Now()
 		out, err = dialRelay(ctx, cred, dstIP, dstPort)
 	}
 	cancel()
-	video := !direct && err == nil && directOn.Load() && strings.HasSuffix(name, ".googlevideo.com")
+	ip := dstIP.String()
+	// Only a video cache node: a shared Google front (redirector, the API)
+	// must never be refused.
+	video := !direct && err == nil && directOn.Load() && strings.HasSuffix(name, ".googlevideo.com") && strings.Contains(name, "---sn-")
 	var gen uint64
 	var silent bool
 	if video {
-		gen, silent = picker.silentNow(dstIP.String())
+		gen, silent = picker.silentNow(ip)
 	}
 	if err != nil {
 		// During an outage or over the quota, the relay's own lines tell the story.
@@ -642,13 +654,10 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 			defer wc.logDone(name, dstIP)
 		}
 		if silent {
-			ip := dstIP.String()
 			defer videoConns.add(ip, conn, wc)()
-			// Only while the VDS answers, this session's upgrade included: a
-			// silent relay says nothing about the address.
 			t := time.AfterFunc(deadWait, func() {
-				if wc.first.Load() == 0 && relayAlive.Load() > dialed.UnixNano() && picker.markDead(gen, ip) {
-					videoConns.close(ip)
+				if wc.first.Load() == 0 {
+					checkDead(gen, ip, wc.start, cred)
 				}
 			})
 			defer t.Stop()
@@ -686,11 +695,59 @@ func (c *connsByAddr) add(ip string, app, out net.Conn) (remove func()) {
 
 func (c *connsByAddr) close(ip string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	for app, out := range c.m[ip] {
+	conns := maps.Clone(c.m[ip])
+	c.mu.Unlock()
+	for app, out := range conns {
 		app.Close()
 		out.Close()
 	}
+}
+
+// deadChecks: addresses being judged, one check at a time for the burst
+// of sessions a player opens to one node.
+var deadChecks sync.Map
+
+// checkDead: a relayed session to a silent address got nothing back in
+// deadWait. The address is dead only if the VDS answers meanwhile: to
+// another session since this one's hello, or to a probe of its own. A
+// relay in trouble says nothing about the address.
+func checkDead(gen uint64, ip string, since time.Time, cred []byte) {
+	if picker.deadNow(ip) {
+		videoConns.close(ip)
+		return
+	}
+	if _, busy := deadChecks.LoadOrStore(ip, true); busy {
+		return
+	}
+	defer deadChecks.Delete(ip)
+	if health.down() || overQuota() {
+		return
+	}
+	if relayAlive.Load() <= since.UnixNano() && probeRelay(cred) != nil {
+		return
+	}
+	if picker.markDead(gen, ip) {
+		videoConns.close(ip)
+	}
+}
+
+// recheckDead: a dead address the player asked for again. One hello to it
+// through the relay; any byte back within deadWait means it is alive.
+func recheckDead(gen uint64, ip string, cred []byte) {
+	if health.down() || overQuota() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	out, err := dialRelay(ctx, cred, net.ParseIP(ip).To4(), 443)
+	cancel()
+	if err != nil {
+		return
+	}
+	defer out.Close()
+	wc := &watchConn{Conn: out, start: time.Now()}
+	wc.SetDeadline(time.Now().Add(deadWait))
+	tls.Client(wc, &tls.Config{ServerName: "redirector.googlevideo.com", InsecureSkipVerify: true}).Handshake()
+	picker.recheckDone(gen, ip, wc.first.Load() > 0)
 }
 
 var refusedLog = throttle{every: time.Minute}
