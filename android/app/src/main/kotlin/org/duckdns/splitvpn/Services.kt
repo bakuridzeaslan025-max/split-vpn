@@ -30,6 +30,7 @@ object Services {
             Route("91.105.192.0", 23),
             Route("185.76.151.0", 24),
             Route("95.161.64.0", 20),
+            Route("194.221.250.50", 32), // fallback DC entry, relayAlways in sni.go
         ), listOf("telegram.org", "t.me", "telegram.me", "telesco.pe", "tdesktop.com", "telegram.dog")),
         Service("youtube", "YouTube", "https://www.youtube.com/", false, listOf(
             Route("216.58.192.0", 19),

@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -587,7 +588,7 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 	t0 := time.Now()
 	first := peekClientHello(conn)
 	name := parseSNI(first)
-	direct := name != "" && !relayByName(name)
+	direct := name != "" && !relayByName(name) && !slices.Contains(relayAlways, ip)
 	if name == "" {
 		name = "-"
 	}

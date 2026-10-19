@@ -377,6 +377,29 @@ func TestNetstack_FCMGoesDirect(t *testing.T) {
 	goesDirect(t, "google.com", "mtalk.google.com")
 }
 
+// Telegram's fallback entry names itself www.google.com, which is not ours.
+func TestNetstack_RelayAlwaysIgnoresName(t *testing.T) {
+	addr, got := fakeRelay(t)
+	withConns(t)
+	setDomains("telegram.org")
+	t.Cleanup(func() { setDomains("") })
+	_, ep := testStack(t, addr)
+
+	dst := tcpip.AddrFrom4([4]byte(net.ParseIP(relayAlways[0]).To4()))
+	p := handshake(t, ep, dst, 443)
+	p.send(header.TCPFlagAck|header.TCPFlagPsh, clientHello(t, "www.google.com"))
+
+	select {
+	case hdr := <-got:
+		if !bytes.Equal(hdr[1:5], dst.AsSlice()) {
+			t.Fatalf("bad header: % x", hdr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("went direct")
+	}
+	p.send(header.TCPFlagAck|header.TCPFlagFin, nil)
+}
+
 // hostIPv4 is a local address the stack under test can dial: gVisor drops
 // packets to loopback ("martian").
 func hostIPv4(t *testing.T) net.IP {

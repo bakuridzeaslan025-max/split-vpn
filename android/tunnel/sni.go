@@ -30,6 +30,11 @@ var alwaysDirect = []string{
 	"alt5-mtalk.google.com", "alt6-mtalk.google.com", "alt7-mtalk.google.com", "alt8-mtalk.google.com",
 }
 
+// Telegram's fallback DC entry from its special config (DNS TXT apv3.stel.com):
+// FakeTLS named www.google.com, so by name it would go direct, where it is
+// blocked. Telegram rotates it now and then: the route in Services.kt too.
+var relayAlways = []string{"194.221.250.50"}
+
 func setDomains(list string) {
 	relayDomains = relayDomains[:0]
 	for _, d := range strings.Split(list, "\n") {
