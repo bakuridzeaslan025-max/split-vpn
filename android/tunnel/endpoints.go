@@ -29,7 +29,11 @@ const (
 	minEndpointPath = 8
 )
 
+// ID is Remote Config's label for Analytics. Optional here: a blob from
+// before it (the defaults until a promote, a rollback) must still open;
+// rc/tool and gradle are where it is required.
 type endpoint struct {
+	ID   string `json:"id,omitempty"`
 	Host string `json:"host"`
 	IP   string `json:"ip"`
 	Port int    `json:"port"`
@@ -37,7 +41,7 @@ type endpoint struct {
 }
 
 // DecryptEndpoints opens a base64 blob [1 key version][12 nonce][ciphertext+tag]
-// and returns the endpoint list as a JSON array of {host, ip, port, path}.
+// and returns the endpoint list as a JSON array of {id, host, ip, port, path}.
 func DecryptEndpoints(blob string) (string, error) {
 	return decryptEndpoints(blob, endpointsKey)
 }

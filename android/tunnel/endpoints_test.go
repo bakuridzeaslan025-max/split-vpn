@@ -102,3 +102,12 @@ func TestEndpointsEmptyList(t *testing.T) {
 		t.Fatalf("got %q, %v", got, err)
 	}
 }
+
+// The label survives the re-marshalling; lists without one still open.
+func TestEndpointsKeepID(t *testing.T) {
+	const withID = `[{"id":"nl1","host":"cover.example.org","ip":"203.0.113.10","port":443,"path":"/test-path"},{"host":"backup.example.net","ip":"198.51.100.7","port":8443,"path":"/backup-path"}]`
+	got, err := decryptEndpoints(sealEndpoints(t, 1, endpointsAAD, withID), testEndpointsKey)
+	if err != nil || got != withID {
+		t.Fatalf("got %q, %v", got, err)
+	}
+}

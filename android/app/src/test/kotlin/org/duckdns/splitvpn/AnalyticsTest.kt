@@ -216,7 +216,7 @@ class AnalyticsTest {
         start()
         assertEquals(VpnState.ERROR, TunnelState.state)
         assertEquals(
-            listOf("need_code", "no_server", "other").map { "vpn_failed" to mapOf("reason" to it) },
+            listOf("need_code", "no_server", "other").map { "vpn_failed" to mapOf("reason" to it, "src" to "ui") },
             be.analytics.toList(),
         )
     }

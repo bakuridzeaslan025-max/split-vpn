@@ -15,7 +15,6 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
-import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -31,7 +30,6 @@ import androidx.core.content.ContextCompat
 import com.google.android.gms.tasks.Tasks
 import com.google.android.play.core.integrity.IntegrityManagerFactory
 import com.google.android.play.core.integrity.IntegrityTokenRequest
-import com.google.firebase.analytics.FirebaseAnalytics
 import com.google.firebase.remoteconfig.CustomSignals
 import com.google.firebase.remoteconfig.FirebaseRemoteConfig
 import com.google.firebase.remoteconfig.FirebaseRemoteConfigSettings
@@ -49,13 +47,17 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal interface Backend {
     fun establish(service: VpnService, enabled: List<Service>, extra: List<Route>): ParcelFileDescriptor?
     /** On success takes ownership of [fd]; on failure the caller closes it. */
-    fun start(fd: ParcelFileDescriptor, addr: String, sni: String, path: String, cred: ByteArray, domains: String, routes: String, cacheFile: String, desyncFile: String, host: tunnel.Host, logger: tunnel.Logger)
+    fun start(fd: ParcelFileDescriptor, ep: TunnelVpnService.Endpoint, cred: ByteArray, domains: String, routes: String, cacheFile: String, desyncFile: String, host: tunnel.Host, logger: tunnel.Logger)
     fun stop()
     /**
      * New relay sessions go to [ep], open ones stay; Go then reports RelayDown for it afresh.
      * [suspect]: moving on from a dead one, apps are refused until a probe gets through.
      */
     fun setEndpoint(ep: TunnelVpnService.Endpoint, suspect: Boolean)
+    /** The running endpoint's label only, its sessions and health untouched. */
+    fun setEndpointId(id: String)
+    /** Remote Config's dial_event_bp: the share of relay handshakes Go reports (Host.DialEvent). */
+    fun setDialEvents(bp: Int)
     fun networkChanged()
     fun networkLost()
     /** Drops Go's DNS cache only; the relay's health is networkChanged's business. */
@@ -81,12 +83,14 @@ internal interface Backend {
     fun setDirect(on: Boolean)
     /** Remote Config's yt_strategies; set before every start. Returns what Go dropped as broken, "" if nothing. */
     fun setStrategies(json: String): String
+    /** How many of setStrategies' entries Go kept. */
+    fun strategyCount(): Int
     /** The default network for direct YouTube, see [TunnelVpnService.netKey]; the same key again is a no-op. */
     fun setNetKey(key: String)
     /** Unix seconds of the last session the relay let in (101); 0: none in this process. */
     fun lastRelayOk(): Long
     /** Firebase Analytics. Names and values in latin, never a site, an address or an error's text. */
-    fun event(ctx: Context, name: String, params: Map<String, String> = emptyMap())
+    fun event(ctx: Context, name: String, params: Map<String, Any> = emptyMap())
     fun userProperty(ctx: Context, name: String, value: String)
     fun setAnalytics(ctx: Context, on: Boolean)
 }
@@ -103,9 +107,9 @@ internal object GoBackend : Backend {
         for (r in enabled.flatMap { it.allRoutes } + extra) b.addRoute(r.address, r.prefix)
         return b.establish()
     }
-    override fun start(fd: ParcelFileDescriptor, addr: String, sni: String, path: String, cred: ByteArray, domains: String, routes: String, cacheFile: String, desyncFile: String, host: tunnel.Host, logger: tunnel.Logger) {
+    override fun start(fd: ParcelFileDescriptor, ep: TunnelVpnService.Endpoint, cred: ByteArray, domains: String, routes: String, cacheFile: String, desyncFile: String, host: tunnel.Host, logger: tunnel.Logger) {
         tunnel.Tunnel.setVerbose(BuildConfig.DEBUG)
-        tunnel.Tunnel.start(fd.fd.toLong(), addr, sni, path, cred, domains, routes, cacheFile, desyncFile, host, logger)
+        tunnel.Tunnel.start(fd.fd.toLong(), ep.addr, ep.host, ep.path, ep.id, cred, domains, routes, cacheFile, desyncFile, host, logger)
         fd.detachFd() // Go owns it now; Tunnel.stop() closes it
     }
     override fun trustCA(pem: String) = tunnel.Tunnel.trustCA(pem)
@@ -134,32 +138,20 @@ internal object GoBackend : Backend {
         // Not asLong(): a typo in the console would throw and cost the endpoints too.
         val quota = rc.getValue("daily_quota_mb").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString()?.trim()?.toLongOrNull()
         val yt = rc.getValue("yt_strategies").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString()
-        return RcValues(rc.getString("endpoints"), rc.getLong("min_version"), rc.getLong("latest_version"), rc.getString("update_url"), quota, yt, rc.getString("apk_url"))
+        val bp = RemoteConfig.parseDialEventBp(rc.getValue("dial_event_bp").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString())
+        return RcValues(rc.getString("endpoints"), rc.getLong("min_version"), rc.getLong("latest_version"), rc.getString("update_url"), quota, yt, rc.getString("apk_url"), bp)
     }
     override fun setQuota(used: Long, limit: Long) = tunnel.Tunnel.setQuota(used, limit)
     override fun usage() = tunnel.Tunnel.usage()
     override fun setAdBlock(on: Boolean) = tunnel.Tunnel.setAdBlock(on)
     override fun setDirect(on: Boolean) = tunnel.Tunnel.setDirect(on)
     override fun setStrategies(json: String): String = tunnel.Tunnel.setStrategies(json)
+    override fun strategyCount() = tunnel.Tunnel.strategyCount().toInt()
     override fun setNetKey(key: String) = tunnel.Tunnel.setNetKey(key)
     override fun lastRelayOk() = tunnel.Tunnel.lastRelayOK()
-    override fun event(ctx: Context, name: String, params: Map<String, String>) = analytics(ctx) {
-        logEvent(name, Bundle().apply { params.forEach { (k, v) -> putString(k, v) } })
-    }
-    override fun userProperty(ctx: Context, name: String, value: String) = analytics(ctx) { setUserProperty(name, value) }
-    override fun setAnalytics(ctx: Context, on: Boolean) = analytics(ctx) {
-        setAnalyticsCollectionEnabled(on)
-        // Crash.init set it while collection was off, and the SDK dropped it.
-        if (on) Crash.userId(ctx)?.let(::setUserId)
-    }
-    // Analytics must never be the thing that takes the tunnel down.
-    private inline fun analytics(ctx: Context, body: FirebaseAnalytics.() -> Unit) {
-        try {
-            FirebaseAnalytics.getInstance(ctx).body()
-        } catch (e: Exception) {
-            AppLog.e("analytics", e)
-        }
-    }
+    override fun event(ctx: Context, name: String, params: Map<String, Any>) = Analytics.event(ctx, name, params)
+    override fun userProperty(ctx: Context, name: String, value: String) = Analytics.userProperty(ctx, name, value)
+    override fun setAnalytics(ctx: Context, on: Boolean) = Analytics.setCollection(ctx, on)
     override fun integrityToken(ctx: Context, nonce: ByteArray): ByteArray? {
         val project = BuildConfig.INTEGRITY_PROJECT
         if (project == 0L) return null
@@ -179,7 +171,9 @@ internal object GoBackend : Backend {
         tunnel.Tunnel.register(addr, sni, path, kind.toLong(), proof)
     override fun credExpires(cred: ByteArray) = tunnel.Tunnel.credExpires(cred)
     override fun stop() = tunnel.Tunnel.stop()
-    override fun setEndpoint(ep: TunnelVpnService.Endpoint, suspect: Boolean) = tunnel.Tunnel.setEndpoint(ep.addr, ep.host, ep.path, suspect)
+    override fun setEndpoint(ep: TunnelVpnService.Endpoint, suspect: Boolean) = tunnel.Tunnel.setEndpoint(ep.addr, ep.host, ep.path, ep.id, suspect)
+    override fun setEndpointId(id: String) = tunnel.Tunnel.setEndpointID(id)
+    override fun setDialEvents(bp: Int) = tunnel.Tunnel.setDialEvents(bp.toLong())
     override fun networkChanged() = tunnel.Tunnel.networkChanged()
     override fun networkLost() = tunnel.Tunnel.networkLost()
     override fun dnsChanged() = tunnel.Tunnel.dnsChanged()
@@ -208,7 +202,7 @@ class TunnelVpnService : VpnService() {
         const val EXTRA_ADBLOCK = "adblock"
         const val EXTRA_DIRECT = "yt_direct"
         // Debug builds only, for the instrumented tests against a relay on
-        // the host: "host|ip|port|path", the PEM CA its TLS chains to, and
+        // the host: "id|host|ip|port|path", the PEM CA its TLS chains to, and
         // whether to forget the test credential first (renewal cases).
         const val EXTRA_ENDPOINT = "endpoint"
         // Instead of EXTRA_ENDPOINT: a list as Remote Config would bring it,
@@ -230,12 +224,13 @@ class TunnelVpnService : VpnService() {
         const val ERR_OFFLINE = "Нет сети. Доступ обновится сам, когда сеть появится"
         const val ERR_UPDATE_REQUIRED = "Эта версия больше не поддерживается — обновите приложение"
         const val ERR_QUOTA = "Дневной лимит трафика исчерпан"
-        internal const val ERR_ESTABLISH = "VPN establish failed"
+        const val ERR_ESTABLISH = "Не удалось включить VPN"
+        const val ERR_VPN_TAKEN = "Разрешение VPN занято другим приложением — откройте Split VPN и включите снова"
 
         // Failures of normal life: no network, VDS down, access denied, no VPN
         // permission. Anything else on the way up is a bug and gets a report.
         internal fun expected(e: Throwable) = e.message.orEmpty().let { m ->
-            listOf("relay unreachable", "relay reply", "register reply", "rejected", "stopped", ERR_ESTABLISH, ERR_NEED_CODE, ERR_NO_SERVER, ERR_UPDATE_REQUIRED).any(m::contains)
+            listOf("relay unreachable", "relay reply", "register reply", "rejected", "stopped", ERR_ESTABLISH, ERR_VPN_TAKEN, ERR_NEED_CODE, ERR_NO_SERVER, ERR_UPDATE_REQUIRED).any(m::contains)
         }
         // vpn_failed's reason. Our own messages only: any other text may carry an address.
         internal fun reasonOf(msg: String) = when (msg) {
@@ -244,8 +239,16 @@ class TunnelVpnService : VpnService() {
             ERR_OFFLINE -> "offline"
             ERR_UPDATE_REQUIRED -> "update_required"
             ERR_QUOTA -> "quota"
-            ERR_ESTABLISH -> "establish"
+            ERR_ESTABLISH, ERR_VPN_TAKEN -> "establish"
             else -> "other"
+        }
+        // vpn_failed's src: who started. Only the UI sends the services; boot,
+        // the resume on create and the offline retry rely on what ran last.
+        internal fun srcOf(intent: Intent?) = when {
+            intent == null -> "sticky"
+            intent.action == SERVICE_INTERFACE -> "always_on"
+            intent.hasExtra(EXTRA_SERVICES) -> "ui"
+            else -> "resume"
         }
         // Renew this long before expiry so a week offline still ends connected.
         private const val RENEW_BEFORE_S = 24 * 3600L
@@ -260,6 +263,8 @@ class TunnelVpnService : VpnService() {
         const val KEY_DIRECT = "yt_direct"
         const val DESYNC_FILE = "desync.json"
         const val KEY_FAILED_AT = "failed_at"
+        // The last day relay_day went for.
+        private const val KEY_RELAY_DAY = "analytics.relay_day"
         // A fresh process (bind, sticky restart) does not retry a failed
         // connect sooner than this; explicit START and boot always try.
         const val RESUME_BACKOFF_MS = 60_000L
@@ -302,6 +307,8 @@ class TunnelVpnService : VpnService() {
         // the connection breaks. One more try is enough.
         internal var PROBE_RETRY_MS = 1_000L
         private const val WHY_NEW_LIST = "new list"
+        // vpn_failed's detail for a TUN refused for want of the VPN permission.
+        private const val PERM = "perm"
         internal const val CHANNEL_ID = "vpn_channel"
         private const val NOTIFICATION_ID = 1
 
@@ -312,7 +319,10 @@ class TunnelVpnService : VpnService() {
                 .createNotificationChannel(NotificationChannel(CHANNEL_ID, "Состояние VPN", NotificationManager.IMPORTANCE_LOW))
         }
         private const val QUOTA_NOTIFICATION_ID = 2
-        private const val QUOTA_CHANNEL_ID = "quota_channel"
+        internal const val PERM_NOTIFICATION_ID = 3
+        // Both "the VPN went off in the background" notices. The id is the
+        // old quota channel's, so a user's settings for it carry over.
+        private const val OFF_CHANNEL_ID = "quota_channel"
 
         /**
          * Direct YouTube's name for the default network (Tunnel.setNetKey):
@@ -343,7 +353,17 @@ class TunnelVpnService : VpnService() {
     // secret path. The list is the last one from Remote Config, else the
     // baked-in one. An unreachable relay does not fail start: the running
     // tunnel moves on by itself, see onNoServer.
+    // id: Remote Config's label, for relay_dial; "" in lists from before it.
+    // Not part of equality: a list that only brought labels is the same
+    // list, or the first fetch after an update would switch servers.
     data class Endpoint(val host: String, val ip: String, val port: Int, val path: String) {
+        var id = ""
+            private set
+
+        constructor(host: String, ip: String, port: Int, path: String, id: String) : this(host, ip, port, path) {
+            this.id = id
+        }
+
         val addr get() = "$ip:$port"
     }
 
@@ -354,10 +374,11 @@ class TunnelVpnService : VpnService() {
     // What the running tunnel talks to; null while none runs.
     @Volatile private var current: Endpoint? = null
 
-    // The running one (a rebuild keeps it), else the last that worked, then the rest in order.
+    // The running one (a rebuild keeps it), else the last that worked, then
+    // the rest in order. The list's own entry: it has the label.
     private fun ordered(): List<Endpoint> {
         val list = endpoints
-        val first = (current ?: Endpoints.working(this, testRc))?.takeIf { it in list } ?: return list
+        val first = (current ?: Endpoints.working(this, testRc))?.let { list.getOrNull(list.indexOf(it)) } ?: return list
         return listOf(first) + (list - first)
     }
     private val testStand get() = testEndpoint != null || testRc
@@ -479,7 +500,7 @@ class TunnelVpnService : VpnService() {
                 cancelRetry()
                 if (BuildConfig.DEBUG) testHooks(intent)
                 startForegroundCompat()
-                startTunnel(services, adBlock, direct, intent?.getStringExtra(EXTRA_INVITE))
+                startTunnel(services, adBlock, direct, intent?.getStringExtra(EXTRA_INVITE), srcOf(intent))
             }
         }
         return START_STICKY
@@ -490,12 +511,12 @@ class TunnelVpnService : VpnService() {
     private fun testHooks(intent: Intent?) = runCatching {
         collecting = intent?.getBooleanExtra(EXTRA_ANALYTICS, false) == true
         backend.setAnalytics(this, collecting)
-        val ep = intent?.getStringExtra(EXTRA_ENDPOINT)?.split("|")?.takeIf { it.size == 4 }
+        val ep = intent?.getStringExtra(EXTRA_ENDPOINT)?.split("|")?.takeIf { it.size == 5 }
         val rcList = intent?.getStringExtra(EXTRA_RC_ENDPOINTS)
-        testEndpoint = ep?.let { (host, ip, port, path) -> Endpoint(host, ip, port.toInt(), path) }
+        testEndpoint = ep?.let { (id, host, ip, port, path) -> Endpoint(host, ip, port.toInt(), path, id) }
         testRc = ep == null && rcList != null
         backend.trustCA(if (testStand) intent?.getStringExtra(EXTRA_CA).orEmpty() else "")
-        if (ep != null) AppLog.i("test endpoint ${ep[0]} ${ep[1]}:${ep[2]}")
+        if (ep != null) AppLog.i("test endpoint ${ep[1]} ${ep[2]}:${ep[3]}")
         if (testStand && intent?.getBooleanExtra(EXTRA_FORGET_CRED, false) == true) Credentials.clear(this, test = true)
         if (intent?.hasExtra(EXTRA_QUOTA_MB) == true) Quota.setLimitMb(this, intent.getLongExtra(EXTRA_QUOTA_MB, Quota.DEFAULT_MB))
         if (intent?.getBooleanExtra(EXTRA_QUOTA_RESET, false) == true) Quota.save(this, 0, Quota.today())
@@ -529,6 +550,10 @@ class TunnelVpnService : VpnService() {
     }
 
     private class NeedCode : Exception(ERR_NEED_CODE)
+    // The TUN did not come up. [detail] for vpn_failed: "perm" when the VPN
+    // permission is gone (another VPN took it), else the builder's exception
+    // class, never its text (it may name an address); [cause] is that exception.
+    private class NoTun(val detail: String?, cause: Throwable? = null) : Exception(if (detail == PERM) ERR_VPN_TAKEN else ERR_ESTABLISH, cause)
     // offline: no network with internet at all, so the retry is the network's
     // to trigger, not the user's.
     private class NoServer(val offline: Boolean) : Exception(ERR_NO_SERVER)
@@ -597,9 +622,43 @@ class TunnelVpnService : VpnService() {
         override fun quotaProgress() { mainHandler.post { onQuotaProgress() } }
         override fun directVerdict(state: String) {
             directVerdict = state
+            // Go tells unknown with direct off as well. On every Start too,
+            // so the start itself does not set it: this would undo it.
+            // testing goes as is: a pick still running is an answer too.
+            backend.userProperty(this@TunnelVpnService, "yt_direct", if (directOff) "off" else state)
             mainHandler.post { pushAll() }
         }
+        override fun dialEvent(id: String, result: String, ms: Long) {
+            if (!collecting) return
+            // Before CONNECTED (Start's own probe, the most telling one) there is no default callback yet.
+            val caps = defaultCaps?.second ?: runCatching {
+                getSystemService(ConnectivityManager::class.java).let { it.getNetworkCapabilities(it.activeNetwork) }
+            }.getOrNull()
+            val net = when {
+                caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true -> "wifi"
+                caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true -> "cell"
+                else -> "other"
+            }
+            val op = if (net == "cell") carrier()?.filter(Char::isDigit)?.takeIf { it.isNotEmpty() } else null
+            // Failures only: at dial_event_bp 10000 the successes would push the rest out of the rotated log.
+            if (BuildConfig.DEBUG && result != "ok") AppLog.i("relay_dial $id $result $ms ms $net${op?.let { " $it" }.orEmpty()}")
+            backend.event(
+                this@TunnelVpnService, "relay_dial",
+                buildMap<String, Any> {
+                    put("ep", id)
+                    put("net", net)
+                    op?.let { put("op", it) }
+                    put("result", result)
+                    put("ms", ms)
+                },
+            )
+        }
     }
+    // Direct YouTube off by the switch or with no strategy left: yt_direct
+    // says "off" whatever Go's verdict.
+    @Volatile private var directOff = false
+    // The switch as the running tunnel was started with; a rebuild keeps it.
+    @Volatile private var directOn = true
     @Volatile private var relayDown = false
     // Go's word on direct YouTube on this network, for the YouTube card.
     @Volatile private var directVerdict = "unknown"
@@ -736,6 +795,7 @@ class TunnelVpnService : VpnService() {
         resetRound()
         resetBackoff()
         awaitingVerdict = false
+        checkDay()
         checkActive()
         val ep = current ?: return
         if (testEndpoint == null && ep != Endpoints.working(this, testRc)) Endpoints.setWorking(this, ep, testRc)
@@ -797,6 +857,12 @@ class TunnelVpnService : VpnService() {
         }
         val cur = current ?: return
         val list = endpoints
+        // A cache from before the labels: they come with a fetch, without a switch.
+        list.getOrNull(list.indexOf(cur))?.takeIf { it.id != cur.id }?.let { labelled ->
+            if (synchronized(lock) { stopping || rebuilding || TunnelState.state != VpnState.CONNECTED }) return@let
+            backend.setEndpointId(labelled.id)
+            current = labelled
+        }
         if (!changed && cur in list) return
         resetRound()
         resetBackoff()
@@ -855,6 +921,7 @@ class TunnelVpnService : VpnService() {
         val versions = RemoteConfig.versions(this)
         val limit = Quota.limit(this)
         RemoteConfig.apply(this, v, decrypt, testRc)
+        backend.setDialEvents(RemoteConfig.dialEventBp(this))
         val after = Endpoints.cached(this, testRc)
         if (after != null) mainHandler.post { onNewList(changed = after != before) }
         if (RemoteConfig.versions(this) != versions) mainHandler.post { onNewVersions() }
@@ -881,15 +948,35 @@ class TunnelVpnService : VpnService() {
 
     private fun usedNow() = if (countDay == Quota.today()) backend.usage() else Quota.used(this)
 
-    // Main thread only. Midnight has passed since the count began: today's starts at zero.
+    // Main thread only. Midnight has passed since the count began: today's
+    // starts at zero. Go's full count, not the last step saved, is the
+    // day's traffic. A count from tomorrow (the clock went back) is dropped.
     private fun rollDay(): Boolean {
         val today = Quota.today()
         if (countDay < 0 || countDay == today) return false
+        if (countDay < today) relayDay(countDay, backend.usage())
         backend.setQuota(0, Quota.limit(this))
         countDay = today
         Quota.save(this, 0, today)
         AppLog.i("quota: new day")
         return true
+    }
+
+    // Main thread only. The day also turns on the screen and the network,
+    // not only on Go's 64 MB steps: a quiet night would leave the new day's
+    // first traffic in yesterday's count, and relay_day late. Apart from
+    // checkActive: the limit's day must not depend on Analytics.
+    private fun checkDay() {
+        if (countDay < 0 || synchronized(lock) { stopping || TunnelState.state != VpnState.CONNECTING && TunnelState.state != VpnState.CONNECTED }) return
+        rollDay()
+    }
+
+    // Main thread only. relay_day: the relay's traffic of a day gone by, for
+    // the VDS's load; each day once, whenever it gets sent.
+    private fun relayDay(day: Long, bytes: Long) {
+        if (!collecting || bytes <= 0 || day <= vpnPrefs.getLong(KEY_RELAY_DAY, -1)) return
+        vpnPrefs.edit().putLong(KEY_RELAY_DAY, day).apply()
+        backend.event(this, "relay_day", mapOf("mb" to (bytes + Quota.MB - 1) / Quota.MB))
     }
 
     // Main thread only. Go's step of traffic: to prefs, and to the UI with it.
@@ -917,22 +1004,25 @@ class TunnelVpnService : VpnService() {
         stopTunnel(stopSelfWhenDone = true, error = ERR_QUOTA)
     }
 
+    private fun notifyQuota() = notifyOff(QUOTA_NOTIFICATION_ID, "$ERR_QUOTA. Включите VPN снова после 00:00")
+
     // The tunnel goes down in the background, often with the app closed:
     // the notification is how the user learns why.
-    private fun notifyQuota() {
+    private fun notifyOff(id: Int, why: String) {
         val nm = getSystemService(NotificationManager::class.java)
         // Not the VPN's quiet channel: this one has to be noticed.
-        nm.createNotificationChannel(NotificationChannel(QUOTA_CHANNEL_ID, "Лимит трафика", NotificationManager.IMPORTANCE_DEFAULT))
+        nm.createNotificationChannel(NotificationChannel(OFF_CHANNEL_ID, "VPN выключен", NotificationManager.IMPORTANCE_DEFAULT))
         val open = android.app.PendingIntent.getActivity(
             this, 1,
             Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
             android.app.PendingIntent.FLAG_IMMUTABLE,
         )
         nm.notify(
-            QUOTA_NOTIFICATION_ID,
-            Notification.Builder(this, QUOTA_CHANNEL_ID)
-                .setContentTitle(ERR_QUOTA)
-                .setContentText("VPN выключен. Включите его снова после 00:00")
+            id,
+            Notification.Builder(this, OFF_CHANNEL_ID)
+                .setContentTitle("Split VPN выключен")
+                .setContentText(why)
+                .setStyle(Notification.BigTextStyle().bigText(why))
                 .setSmallIcon(android.R.drawable.ic_menu_compass)
                 .setContentIntent(open)
                 .setAutoCancel(true)
@@ -991,13 +1081,23 @@ class TunnelVpnService : VpnService() {
         val extra = RouteCache.routesFor(this, enabled, known)
         if (extra.isNotEmpty()) AppLog.i("routes: +${extra.size} from cache: ${extra.joinToString { it.address }}")
         routesInTun = known + extra
-        return backend.establish(this, enabled, extra) ?: throw IllegalStateException(ERR_ESTABLISH)
+        val fd = try {
+            backend.establish(this, enabled, extra)
+        } catch (e: Exception) {
+            throw NoTun(e.javaClass.simpleName, e)
+        }
+        // null: not prepared, by the docs. Asked only now, on a failure.
+        return fd ?: throw NoTun(if (VpnService.prepare(this) != null) PERM else null)
     }
 
     private fun startGo(fd: ParcelFileDescriptor, cred: ByteArray, enabled: List<Service>) {
         // Before each start, a rebuild's too: the list may have come with a fetch since.
         val yt = RemoteConfig.ytStrategies(this)
         val dropped = backend.setStrategies(yt)
+        // Before Go starts: it tells a verdict at once. Empty is also a list
+        // Go dropped whole as broken.
+        directOff = !directOn || backend.strategyCount() == 0
+        backend.setDialEvents(RemoteConfig.dialEventBp(this))
         // RC serves the same value on every fetch: a report the first time only.
         if (dropped.isNotEmpty()) AppLog.e("yt_strategies: dropped $dropped", expected = !RemoteConfig.firstDrop(this, yt, RemoteConfig.KEY_DROPPED_YT))
         anyEndpoint("start") {
@@ -1005,13 +1105,13 @@ class TunnelVpnService : VpnService() {
             val routes = routesInTun.joinToString("\n") { r -> "${r.address}/${r.prefix}" }
             // Before start: Go's first verdict may reach relayUp while start still runs.
             current = it
-            backend.start(fd, it.addr, it.host, it.path, cred, domains, routes, RouteCache.file(this).path, File(filesDir, DESYNC_FILE).path, host, goLogger)
+            backend.start(fd, it, cred, domains, routes, RouteCache.file(this).path, File(filesDir, DESYNC_FILE).path, host, goLogger)
             running = enabled to cred
             AppLog.i("Go tunnel started via ${it.host}")
         }
     }
 
-    private fun startTunnel(serviceIds: Set<String>, adBlock: Boolean, direct: Boolean, invite: String? = null) {
+    private fun startTunnel(serviceIds: Set<String>, adBlock: Boolean, direct: Boolean, invite: String?, src: String) {
         synchronized(lock) {
             // While stopping, the stop thread still owns tunnelThread and Go;
             // wanted stays true, so the next bind/boot brings it back.
@@ -1022,6 +1122,9 @@ class TunnelVpnService : VpnService() {
             TunnelState.clearLog()
             TunnelState.set(VpnState.CONNECTING)
         }
+        // Before any refusal below: its reason is not the permission. The
+        // quota notice stays past the quota check, a refusal there keeps it.
+        getSystemService(NotificationManager::class.java).cancel(PERM_NOTIFICATION_ID)
         AppLog.i("startTunnel services=$serviceIds adblock=$adBlock direct=$direct")
         // Before any fail: the SDK stamps it on every event after it. Its
         // share among the active also tells when the ad list starts to
@@ -1030,7 +1133,7 @@ class TunnelVpnService : VpnService() {
 
         val enabled = Services.ALL.filter { it.id in serviceIds }
         if (enabled.isEmpty()) {
-            fail("Не выбран ни один сервис")
+            fail("Не выбран ни один сервис", src = src)
             return
         }
         val used = Quota.used(this)
@@ -1039,11 +1142,15 @@ class TunnelVpnService : VpnService() {
             AppLog.i("startTunnel: quota $used of $limit bytes used today")
             // Boot and always-on would only come back here.
             vpnPrefs.edit().putBoolean(KEY_WANTED, false).apply()
-            fail(ERR_QUOTA)
+            fail(ERR_QUOTA, src = src)
             // A limit raised in RC lifts the refusal (onNewLimit); nothing else would fetch it.
             fetchConfig("quota")
             return
         }
+        // The tunnel was off at midnight: the last day's count is in prefs
+        // (stopTunnel saves Go's exact one). Here, not with the save below:
+        // that one comes only past the credential and the TUN.
+        if (Quota.day(this) in 0 until Quota.today()) relayDay(Quota.day(this), Quota.stored(this))
         getSystemService(NotificationManager::class.java).cancel(QUOTA_NOTIFICATION_ID)
         // Persisted only when these routes really go in, so a null-intent
         // restart reproduces what was running, not what was asked last.
@@ -1084,7 +1191,7 @@ class TunnelVpnService : VpnService() {
                         AppLog.i("startTunnel: version ${BuildConfig.VERSION_CODE} below min_version ${versions.min}")
                         // No retries on bind or boot: only an update gets past this.
                         vpnPrefs.edit().putBoolean(KEY_WANTED, false).putBoolean(KEY_RESUME_AFTER_UPDATE, true).apply()
-                        if (!synchronized(lock) { stopping }) fail(ERR_UPDATE_REQUIRED)
+                        if (!synchronized(lock) { stopping }) fail(ERR_UPDATE_REQUIRED, src = src)
                         return@Thread
                     }
                 }
@@ -1101,6 +1208,7 @@ class TunnelVpnService : VpnService() {
                 Quota.save(this, used, day)
                 backend.setAdBlock(adBlock)
                 backend.setDirect(direct)
+                directOn = direct
                 try {
                     startGo(fd, cred, enabled)
                 } catch (e: Exception) {
@@ -1136,17 +1244,19 @@ class TunnelVpnService : VpnService() {
                 TunnelState.log("Туннель поднят")
                 probeThread?.start()
             } catch (e: Throwable) {
-                AppLog.e("startTunnel failed", e, expected = expected(e))
+                // A builder's exception is a bug, not the permission.
+                AppLog.e("startTunnel failed", e, expected = if (e is NoTun) e.cause == null else expected(e))
                 fd?.close()
                 if (e is NeedCode) vpnPrefs.edit().putBoolean(KEY_NEED_CODE, true).apply()
                 // STOP already running: it will report DISCONNECTED itself.
                 if (synchronized(lock) { stopping }) return@Thread
                 val msg = e.message ?: e.javaClass.simpleName
                 when {
-                    e is NoServer && e.offline -> retryWhenOnline(serviceIds, invite)
-                    e is NoServer -> fail(msg, reason = "no_server")
-                    e is NeedCode -> fail(msg, reason = "need_code")
-                    else -> fail(msg)
+                    e is NoServer && e.offline -> retryWhenOnline(serviceIds, invite, src)
+                    e is NoServer -> fail(msg, reason = "no_server", src = src)
+                    e is NeedCode -> fail(msg, reason = "need_code", src = src)
+                    e is NoTun -> fail(msg, reason = "establish", src = src, detail = e.detail)
+                    else -> fail(msg, src = src)
                 }
             }
         }, "GoTunnel").also { it.start() }
@@ -1157,13 +1267,14 @@ class TunnelVpnService : VpnService() {
     // The service stays in the foreground, so the retry is not a start from
     // the background, and registers again once a network with internet is
     // up. A network that is up but blocks the issuer stays a plain error.
-    private fun retryWhenOnline(services: Set<String>, invite: String?) = mainHandler.post {
+    // [src]: the failed start's.
+    private fun retryWhenOnline(services: Set<String>, invite: String?, src: String) = mainHandler.post {
         // STOP may have landed between the GoTunnel thread's check and this post.
         if (synchronized(lock) { stopping } || !vpnPrefs.getBoolean(KEY_WANTED, false)) return@post
         cancelRetry()
         vpnPrefs.edit().putLong(KEY_FAILED_AT, System.currentTimeMillis()).apply()
         TunnelState.set(VpnState.ERROR, ERR_OFFLINE)
-        daily("vpn_failed", "offline")
+        daily("vpn_failed", "offline", src)
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 mainHandler.post {
@@ -1182,7 +1293,7 @@ class TunnelVpnService : VpnService() {
                         if (!vpnPrefs.getBoolean(KEY_WANTED, false) || TunnelState.lastError != ERR_OFFLINE) return@Runnable
                         AppLog.i("network available: $network, renewing the credential")
                         startForegroundCompat()
-                        startTunnel(services, vpnPrefs.getBoolean(KEY_ADBLOCK, false), vpnPrefs.getBoolean(KEY_DIRECT, true), invite)
+                        startTunnel(services, vpnPrefs.getBoolean(KEY_ADBLOCK, false), vpnPrefs.getBoolean(KEY_DIRECT, true), invite, "resume")
                     }.also { mainHandler.postDelayed(it, wait) }
                 }
             }
@@ -1223,6 +1334,7 @@ class TunnelVpnService : VpnService() {
                     netAppearedAt = android.os.SystemClock.elapsedRealtime()
                     newNetwork()
                     updateWaiting()
+                    checkDay()
                     checkActive()
                 }
             }
@@ -1258,7 +1370,10 @@ class TunnelVpnService : VpnService() {
                 // The old resolvers' answers may be local to their network.
                 backend.dnsChanged()
                 updateNetKey()
-                mainHandler.post { checkActive() }
+                mainHandler.post {
+                    checkDay()
+                    checkActive()
+                }
             }
 
             // A request's callback hears a new default network without a lost
@@ -1358,7 +1473,12 @@ class TunnelVpnService : VpnService() {
 
     private fun watchScreen() {
         val r = object : BroadcastReceiver() {
-            override fun onReceive(ctx: Context, intent: Intent) { mainHandler.post { checkActive() } }
+            override fun onReceive(ctx: Context, intent: Intent) {
+                mainHandler.post {
+                    checkDay()
+                    checkActive()
+                }
+            }
         }
         val filter = IntentFilter(Intent.ACTION_SCREEN_ON).apply { addAction(Intent.ACTION_SCREEN_OFF) }
         ContextCompat.registerReceiver(this, r, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
@@ -1373,20 +1493,28 @@ class TunnelVpnService : VpnService() {
     // Always in release; in debug as EXTRA_ANALYTICS says. Off, a day must
     // not be marked: the event would never go, and a later run with the
     // extra would find the day taken.
-    private var collecting = !BuildConfig.DEBUG
+    // Read by Go's DialEvent on its own threads.
+    @Volatile private var collecting = !BuildConfig.DEBUG
 
-    private fun eventKey(name: String, reason: String?) = listOfNotNull("analytics", name, reason).joinToString(".")
+    private fun eventKey(name: String, reason: String?, src: String? = null) = listOfNotNull("analytics", name, reason, src).joinToString(".")
 
-    // Main thread only. Each event at most once a local day (per reason):
-    // the reports count devices a day, and starts repeat themselves (resume
-    // on every bind, the offline retry, always-on after the quota).
-    private fun daily(name: String, reason: String? = null) {
+    // Main thread only. Each event at most once a local day (per reason and
+    // src): the reports count devices a day, and starts repeat themselves
+    // (resume on every bind, the offline retry, always-on after the quota).
+    // By src too: a background retry comes first on most days and would
+    // otherwise hide the same failure of a tap. [detail] is not in the key.
+    private fun daily(name: String, reason: String? = null, src: String? = null, detail: String? = null) {
         if (!collecting) return
-        val key = eventKey(name, reason)
+        val key = eventKey(name, reason, src)
         val today = Quota.today()
         if (vpnPrefs.getLong(key, -1) == today) return
         vpnPrefs.edit().putLong(key, today).apply()
-        backend.event(this, name, reason?.let { mapOf("reason" to it) }.orEmpty())
+        val params = buildMap<String, Any> {
+            reason?.let { put("reason", it) }
+            src?.let { put("src", it) }
+            detail?.takeIf { it.isNotEmpty() }?.let { put("detail", it) }
+        }
+        backend.event(this, name, params)
     }
 
     // Main thread only. vpn_active: the relay let a session in today, not
@@ -1407,11 +1535,21 @@ class TunnelVpnService : VpnService() {
         val now = SystemClock.elapsedRealtime()
         if (TunnelState.waiting == Waiting.NO_SERVER && defaultValidated?.second == true &&
             now - netAppearedAt >= NEW_NETWORK_SWITCH_MS && now - defaultChangedAt >= NEW_NETWORK_SWITCH_MS
-        ) daily("vpn_failed", "relay_down")
+        ) daily("vpn_failed", "relay_down", "run")
     }
 
-    private fun fail(msg: String, reason: String = reasonOf(msg)) {
+    // [src]: see srcOf; "run" for a failure of a running tunnel.
+    private fun fail(msg: String, reason: String = reasonOf(msg), src: String, detail: String? = null) {
         vpnPrefs.edit().putLong(KEY_FAILED_AT, System.currentTimeMillis()).apply()
+        // As stopTunnel: the next start in this process takes the count from prefs.
+        if (countDay >= 0) Quota.save(this, backend.usage(), countDay)
+        // Another VPN holds the permission, and only the app's screen can
+        // take it back: a background start would fail on every boot and bind,
+        // as after onRevoke, so it stops trying.
+        if (detail == PERM && src != "ui") {
+            vpnPrefs.edit().putBoolean(KEY_WANTED, false).putBoolean(KEY_RESUME_AFTER_UPDATE, false).apply()
+            notifyOff(PERM_NOTIFICATION_ID, ERR_VPN_TAKEN)
+        }
         unwatchNetwork()
         unwatchScreen()
         mainHandler.removeCallbacks(periodicRebuild)
@@ -1423,7 +1561,7 @@ class TunnelVpnService : VpnService() {
         current = null
         relayDown = false
         TunnelState.set(VpnState.ERROR, msg)
-        mainHandler.post { daily("vpn_failed", reason) }
+        mainHandler.post { daily("vpn_failed", reason, src, detail) }
         stopForeground(STOP_FOREGROUND_REMOVE)
         cancelLateNotification()
         stopSelf()
@@ -1520,9 +1658,9 @@ class TunnelVpnService : VpnService() {
                 fd = null
                 TunnelState.log("Маршруты обновлены")
             } catch (e: Throwable) {
-                AppLog.e("rebuild failed", e)
+                AppLog.e("rebuild failed", e, expected = if (e is NoTun) e.cause == null else expected(e))
                 fd?.close()
-                if (!synchronized(lock) { stopping }) fail(e.message ?: e.javaClass.simpleName, reason = "rebuild")
+                if (!synchronized(lock) { stopping }) fail(e.message ?: e.javaClass.simpleName, reason = "rebuild", src = "run", detail = (e as? NoTun)?.detail)
             } finally {
                 synchronized(lock) { rebuilding = false }
                 // A list that landed meanwhile could not switch.

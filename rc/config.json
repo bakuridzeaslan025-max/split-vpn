@@ -4,6 +4,7 @@
   "update_url": "https://bakuridzeaslan025-max.github.io/split-vpn/",
   "apk_url": "https://github.com/bakuridzeaslan025-max/split-vpn/releases/latest/download/split-vpn.apk",
   "daily_quota_mb": 2048,
+  "dial_event_bp": 10,
   "yt_strategies": [
     {"id": "rec2", "spec": "rec=host+1,midsld;cut=host+1,midsld"},
     {"id": "rec-mid-dis", "spec": "rec=midsld;cut=1;ttl1=1"},

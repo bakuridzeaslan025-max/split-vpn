@@ -216,7 +216,7 @@ class RemoteConfigTest {
         svc.onStartCommand(
             Intent(TunnelVpnService.ACTION_START)
                 .putStringArrayListExtra(TunnelVpnService.EXTRA_SERVICES, arrayListOf("telegram"))
-                .putExtra(TunnelVpnService.EXTRA_ENDPOINT, "test.local|10.0.2.2|8443|/app/test"),
+                .putExtra(TunnelVpnService.EXTRA_ENDPOINT, "stand|test.local|10.0.2.2|8443|/app/test"),
             0, 1,
         )
         awaitState(VpnState.CONNECTED)

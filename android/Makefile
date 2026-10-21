@@ -46,9 +46,9 @@ tunnel-test:
 # The stand goes down afterwards either way, the exit code is gradle's.
 itest:
 	$(MAKE) -C testenv up
-	ANDROID_SERIAL=$${ANDROID_SERIAL:-emulator-5554} ./gradlew connectedDebugAndroidTest \
+	ANDROID_SERIAL=$${ANDROID_SERIAL:-emulator-5556} ./gradlew connectedDebugAndroidTest \
 		-Pandroid.injected.androidTest.leaveApksInstalledAfterRun=true \
-		-Pandroid.testInstrumentationRunnerArguments.endpoint='test.local|10.0.2.2|8443|/app/test' \
+		-Pandroid.testInstrumentationRunnerArguments.endpoint='stand|test.local|10.0.2.2|8443|/app/test' \
 		-Pandroid.testInstrumentationRunnerArguments.ca=$$(base64 < testenv/certs/ca.crt | tr -d '\n') \
 		-Pandroid.testInstrumentationRunnerArguments.invites=$$(paste -sd, testenv/data/invites) \
 		-Pandroid.testInstrumentationRunnerArguments.control=10.0.2.2:9099; \

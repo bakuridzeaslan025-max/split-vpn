@@ -55,8 +55,19 @@ class MainActivityTest {
         )
     }
 
+    private val realEvent = Analytics.event
+    private val updateSteps = mutableListOf<String>()
+
+    @Before
+    fun stubAnalytics() {
+        Analytics.event = { _, name, params ->
+            if (name == "self_update") updateSteps += listOfNotNull(params["step"], params["detail"]).joinToString(":")
+        }
+    }
+
     @After
     fun tearDown() {
+        Analytics.event = realEvent
         Versions.debug = true
         MainActivity.update = Updater::update
         MainActivity.background = { Thread(it, "Update").start() }
@@ -151,12 +162,23 @@ class MainActivityTest {
     }
 
     @Test
-    fun otherErrorOffersRetryAndShowsTheReason() {
+    fun otherErrorShowsTheReasonAndLeavesTheRetryToTheToggle() {
         val a = launch()
         TunnelState.set(VpnState.ERROR, "связь потеряна")
         ShadowLooper.idleMainLooper()
-        assertEquals("Повторить", a.findViewById<TextView>(R.id.errorAction).text.toString())
+        assertEquals(View.GONE, a.findViewById<View>(R.id.errorAction).visibility)
         assertEquals("связь потеряна", a.findViewById<TextView>(R.id.errorText).text.toString())
+        assertEquals("Подключить", a.text(R.id.buttonLabel))
+    }
+
+    @Test
+    fun takenPermissionPointsToTheToggle() {
+        val a = launch()
+        TunnelState.set(VpnState.ERROR, TunnelVpnService.ERR_VPN_TAKEN)
+        ShadowLooper.idleMainLooper()
+        assertEquals("Разрешение VPN занято другим приложением. Нажмите «Подключить», чтобы вернуть его", a.text(R.id.errorText))
+        assertEquals(View.GONE, a.findViewById<View>(R.id.errorAction).visibility)
+        assertEquals("Подключить", a.text(R.id.buttonLabel))
     }
 
     @Test
@@ -366,7 +388,7 @@ class MainActivityTest {
         TunnelState.setWaiting(null)
         ShadowLooper.idleMainLooper()
         assertEquals(View.GONE, a.findViewById<View>(R.id.errorBox).visibility)
-        TunnelState.set(VpnState.ERROR, "связь потеряна")
+        TunnelState.set(VpnState.ERROR, TunnelVpnService.ERR_NEED_CODE)
         ShadowLooper.idleMainLooper()
         assertEquals(View.VISIBLE, a.findViewById<View>(R.id.errorAction).visibility)
     }
@@ -582,6 +604,24 @@ class MainActivityTest {
         assertEquals("Обновить", a.text(R.id.updateAction))
     }
 
+    // DISABLED, UP_TO_DATE, BUSY: nothing was tried.
+    @Test
+    fun updateResultsAreSteps() {
+        Versions.debug = false
+        updater(
+            Updater.Result.STARTED, Updater.Result.NEED_PERMISSION, Updater.Result.BAD_URL,
+            Updater.Result.BUSY, Updater.Result.UP_TO_DATE, Updater.Result.DISABLED,
+        )
+        val a = launch()
+        rc(latest = newer)
+        repeat(6) {
+            ShadowDialog.getLatestDialog()?.dismiss()
+            a.findViewById<View>(R.id.updateAction).performClick()
+            ShadowLooper.idleMainLooper()
+        }
+        assertEquals(listOf("started", "need_permission", "failed:url"), updateSteps)
+    }
+
     @Test
     fun failedDownloadOpensThePage() {
         Versions.debug = false
@@ -591,6 +631,7 @@ class MainActivityTest {
         a.findViewById<View>(R.id.updateAction).performClick()
         assertEquals("Не удалось скачать", ShadowToast.getTextOfLatestToast())
         assertOpens(url)
+        assertEquals("failed", updateSteps.single().substringBefore(":"))
     }
 
     @Test

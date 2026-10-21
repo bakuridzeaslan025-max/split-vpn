@@ -13,7 +13,7 @@ internal object Quota {
     private const val KEY_DAY = "quota.day"
     private const val KEY_USED = "quota.used"
     const val DEFAULT_MB = 2048L
-    private const val MB = 1024L * 1024
+    const val MB = 1024L * 1024
 
     internal var today: () -> Long = { java.time.LocalDate.now().toEpochDay() }
 
@@ -32,6 +32,9 @@ internal object Quota {
 
     /** Stored bytes of today; yesterday's count is none. */
     fun used(ctx: Context) = prefs(ctx).takeIf { day(ctx) == today() }?.getLong(KEY_USED, 0) ?: 0
+
+    /** Stored bytes of [day], whichever day that is. */
+    fun stored(ctx: Context) = prefs(ctx).getLong(KEY_USED, 0)
 
     /** [day]: the one [used] was counted on, which by now may be over. */
     fun save(ctx: Context, used: Long, day: Long) = prefs(ctx).edit().putLong(KEY_DAY, day).putLong(KEY_USED, used).apply()

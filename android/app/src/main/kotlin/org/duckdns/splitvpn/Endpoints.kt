@@ -142,11 +142,13 @@ object Endpoints {
     internal fun parse(json: String): List<TunnelVpnService.Endpoint> {
         val a = JSONArray(json)
         return List(a.length()) { i ->
-            a.getJSONObject(i).run { TunnelVpnService.Endpoint(getString("host"), getString("ip"), getInt("port"), getString("path")) }
+            a.getJSONObject(i).run { TunnelVpnService.Endpoint(getString("host"), getString("ip"), getInt("port"), getString("path"), optString("id")) }
         }
     }
 
     private fun toJson(list: List<TunnelVpnService.Endpoint>) = JSONArray(
-        list.map { JSONObject().put("host", it.host).put("ip", it.ip).put("port", it.port).put("path", it.path) },
+        list.map { e ->
+            JSONObject().put("host", e.host).put("ip", e.ip).put("port", e.port).put("path", e.path).apply { if (e.id.isNotEmpty()) put("id", e.id) }
+        },
     ).toString()
 }

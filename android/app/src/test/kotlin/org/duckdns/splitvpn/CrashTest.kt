@@ -97,7 +97,8 @@ class CrashTest {
             "registration rejected",
             "credential rejected",
             "stopped",
-            "VPN establish failed",
+            TunnelVpnService.ERR_ESTABLISH,
+            TunnelVpnService.ERR_VPN_TAKEN,
             TunnelVpnService.ERR_NEED_CODE,
         )) assertTrue(m, TunnelVpnService.expected(Exception(m)))
 

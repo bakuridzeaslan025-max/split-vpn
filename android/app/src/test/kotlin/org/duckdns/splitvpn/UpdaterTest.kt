@@ -30,9 +30,18 @@ class UpdaterTest {
     private val dest get() = File(app.cacheDir, "test.apk")
     private var server: ServerSocket? = null
     private val realVisible = Updater.visible
+    private val realEvent = Analytics.event
+    private val events = mutableListOf<Map<String, Any>>()
+
+    @org.junit.Before
+    fun setUp() {
+        Analytics.event = { _, name, params -> if (name == "self_update") events += params }
+        app.getSharedPreferences(Services.PREFS, Context.MODE_PRIVATE).edit().remove(Updater.KEY_SESSION).commit()
+    }
 
     @After
     fun tearDown() {
+        Analytics.event = realEvent
         server?.close()
         Versions.debug = true
         Updater.busy.set(false)
@@ -272,6 +281,54 @@ class UpdaterTest {
     }
 
     private fun notifications() = shadowOf(app.getSystemService(NotificationManager::class.java)).allNotifications
+
+    private fun committed(session: Int) =
+        app.getSharedPreferences(Services.PREFS, Context.MODE_PRIVATE).edit().putInt(Updater.KEY_SESSION, session).commit()
+
+    private fun steps() = events.map { listOfNotNull(it["step"], it["detail"]).joinToString(":") }
+
+    // The dialog came up over the app, so nothing was pending: the session
+    // committed is what tells the user's cancel.
+    @Test
+    fun cancelOfOurSessionOnScreenIsCancelled() {
+        Updater.visible = { true }
+        committed(7)
+        Updater.onStatus(app, status(PackageInstaller.STATUS_PENDING_USER_ACTION, confirm, session = 7))
+        Updater.onStatus(app, status(PackageInstaller.STATUS_FAILURE_ABORTED, session = 6))
+        Updater.onStatus(app, status(PackageInstaller.STATUS_FAILURE_ABORTED, session = 7))
+        assertEquals(listOf("cancelled"), steps())
+        // Final: a late duplicate is nobody's.
+        Updater.onStatus(app, status(PackageInstaller.STATUS_FAILURE_ABORTED, session = 7))
+        assertEquals(listOf("cancelled"), steps())
+    }
+
+    // A new install abandons the session committed before: its ABORTED is
+    // no cancel of the user's.
+    @Test
+    fun abandonedEarlierSessionIsNoCancel() {
+        Versions.debug = false
+        committed(5)
+        val apk = File(app.cacheDir, "u.apk").apply { writeBytes(ByteArray(16)) }
+        runCatching {
+            org.robolectric.util.ReflectionHelpers.callInstanceMethod<Unit>(
+                Updater, "install",
+                org.robolectric.util.ReflectionHelpers.ClassParameter.from(Context::class.java, app),
+                org.robolectric.util.ReflectionHelpers.ClassParameter.from(File::class.java, apk),
+            )
+        }
+        Updater.onStatus(app, status(PackageInstaller.STATUS_FAILURE_ABORTED, session = 5))
+        assertTrue(steps().isEmpty())
+    }
+
+    @Test
+    fun installerAnswersAreSteps() {
+        Updater.visible = { true }
+        committed(7)
+        Updater.onStatus(app, status(PackageInstaller.STATUS_SUCCESS, session = 7))
+        Updater.onStatus(app, status(PackageInstaller.STATUS_FAILURE_CONFLICT, session = 8))
+        Updater.onStatus(app, status(PackageInstaller.STATUS_PENDING_USER_ACTION, Intent(Intent.ACTION_VIEW), session = 9))
+        assertEquals(listOf("installed", "failed:install", "failed:confirm"), steps())
+    }
 
     // AppLog.e with a throwable is what Crash.record files as a non-fatal.
     private fun reported() = ShadowLog.getLogsForTag(AppLog.TAG).filter { it.type == Log.ERROR && it.throwable != null }

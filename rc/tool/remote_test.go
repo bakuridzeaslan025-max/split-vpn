@@ -100,7 +100,7 @@ func newFake(t *testing.T, tmpl string) (*fakeRC, *rcClient) {
 }
 
 var testConfig = config{MinVersion: 110, LatestVersion: 114, UpdateURL: "https://o.github.io/r/",
-	APKURL: releasesPrefix + "latest/download/split-vpn.apk", DailyQuotaMB: 1024,
+	APKURL: releasesPrefix + "latest/download/split-vpn.apk", DailyQuotaMB: 1024, DialEventBP: 25,
 	YTStrategies: json.RawMessage(`[ {"id": "rec2", "spec": "rec=host+1,midsld"},
 	{"id": "none", "spec": ""} ]`)}
 
@@ -162,12 +162,13 @@ func TestPush(t *testing.T) {
 	check("update_url", debugCondition, testConfig.UpdateURL)
 	check("apk_url", debugCondition, testConfig.APKURL)
 	check("daily_quota_mb", debugCondition, "1024")
+	check("dial_event_bp", debugCondition, "25")
 	check("yt_strategies", debugCondition, `[{"id":"rec2","spec":"rec=host+1,midsld"},{"id":"none","spec":""}]`)
 	check("unrelated", "", "x")
 	if _, dup := got["parameters"].(map[string]any)["min_version"]; dup {
 		t.Error("min_version duplicated at the top level")
 	}
-	for _, name := range []string{"latest_version", "daily_quota_mb"} {
+	for _, name := range []string{"latest_version", "daily_quota_mb", "dial_event_bp"} {
 		if p := got.findParam(name); p["valueType"] != "NUMBER" || p["defaultValue"].(map[string]any)["useInAppDefault"] != true {
 			t.Errorf("new parameter %s %v", name, p)
 		}
@@ -238,7 +239,7 @@ func TestPull(t *testing.T) {
 	for _, want := range []string{
 		"version 7",
 		"condition build_debug: e",
-		"endpoints\n  default: endpoints: bad base64\n  build_debug:\n    cover.example.org|203.0.113.10|443|/test-path\n    backup.example.net|198.51.100.7|8443|/backup-path\n",
+		"endpoints\n  default: endpoints: bad base64\n  build_debug:\n    |cover.example.org|203.0.113.10|443|/test-path\n    |backup.example.net|198.51.100.7|8443|/backup-path\n",
 		"min_version\n  default: 100\n  build_debug: -\n",
 		"update_url\n  default: -\n",
 		"daily_quota_mb\n  default: -\n",
@@ -308,9 +309,22 @@ func TestConfig(t *testing.T) {
 		if !strings.Contains(s, "yt_strategies") {
 			s = strings.TrimSuffix(s, "}") + `,"yt_strategies":[]}`
 		}
+		if !strings.Contains(s, "dial_event_bp") {
+			s = strings.TrimSuffix(s, "}") + `,"dial_event_bp":0}`
+		}
 		return loadRaw(s)
 	}
-	const base = `{"min_version":114,"latest_version":115,"update_url":"https://o.github.io/r/","daily_quota_mb":2048`
+	const base = `{"min_version":114,"latest_version":115,"update_url":"https://o.github.io/r/","daily_quota_mb":2048,"dial_event_bp":0`
+	for _, bp := range []string{"0", "1", "10000"} {
+		if err := load(`{"min_version":114,"latest_version":115,"update_url":"https://o.github.io/r/","daily_quota_mb":2048,"dial_event_bp":` + bp + `}`); err != nil {
+			t.Errorf("dial_event_bp %s: %v", bp, err)
+		}
+	}
+	for _, bp := range []string{"", `,"dial_event_bp":-1`, `,"dial_event_bp":10001`, `,"dial_event_bp":0.5`, `,"dial_event_bp":"1"`, `,"dial_event_bp":null`} {
+		if loadRaw(`{"min_version":114,"latest_version":115,"update_url":"https://o.github.io/r/","daily_quota_mb":2048,"yt_strategies":[]`+bp+"}") == nil {
+			t.Errorf("dial_event_bp %q: accepted", bp)
+		}
+	}
 	if err := loadRaw(base + `,"yt_strategies":[{"id":"rec2","spec":"rec=host+1,midsld;cut=host+1,midsld"}]}`); err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +399,7 @@ func TestRepoConfig(t *testing.T) {
 }
 
 func TestLoadEndpoints(t *testing.T) {
-	const spec = "cover.example.org|203.0.113.10|443|/test-path; backup.example.net|198.51.100.7|8443|/backup-path"
+	const spec = "nl1|cover.example.org|203.0.113.10|443|/test-path; nl2|backup.example.net|198.51.100.7|8443|/backup-path"
 	withFile := t.TempDir()
 	os.WriteFile(filepath.Join(withFile, "endpoints.json"), []byte(`[{"host":"file.example.org","ip":"203.0.113.30","port":443,"path":"/file-path"}]`), 0o600)
 	badFile := t.TempDir()

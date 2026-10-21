@@ -12,7 +12,7 @@ import org.junit.runner.RunWith
  * Real device/emulator + real VDS: consent → START → CONNECTED → probes →
  * traffic through the TUN → STOP → DISCONNECTED, nothing left behind.
  *
- *   ANDROID_SERIAL=emulator-5554 ./gradlew connectedDebugAndroidTest
+ *   ANDROID_SERIAL=emulator-5556 ./gradlew connectedDebugAndroidTest
  */
 @RunWith(AndroidJUnit4::class)
 class MainFlowTest {
