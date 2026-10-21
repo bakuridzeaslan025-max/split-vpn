@@ -136,6 +136,17 @@ class EndpointSwitchTest {
         assertTrue(TunnelState.logLines().last().endsWith("Сервер недоступен, возвращаюсь на основной"))
     }
 
+    // The label goes along with the switch, for relay_dial.
+    @Test
+    fun switchCarriesTheLabel() {
+        be.endpoints = listOf(a, b, c).mapIndexed { i, e -> TunnelVpnService.Endpoint(e.host, e.ip, e.port, e.path, "nl$i") }
+        start()
+        online()
+        verdict(true)
+        assertEquals(b, be.endpointsSet.last())
+        assertEquals("nl1", be.endpointsSet.last().id)
+    }
+
     @Test
     fun noNetworkIsNotAReason() {
         start()
@@ -239,7 +250,7 @@ class EndpointSwitchTest {
     @Test
     fun instrumentedTestRelayNeverSwitches() {
         Credentials.save(app, fakeCred(System.currentTimeMillis() / 1000 + 5 * 86400), test = true)
-        start(Intent(TunnelVpnService.ACTION_START).putExtra(TunnelVpnService.EXTRA_ENDPOINT, "test.local|10.0.2.2|8443|/app/test"))
+        start(Intent(TunnelVpnService.ACTION_START).putExtra(TunnelVpnService.EXTRA_ENDPOINT, "stand|test.local|10.0.2.2|8443|/app/test"))
         online()
         verdict(true)
         assertEquals(Waiting.NO_SERVER, TunnelState.waiting)

@@ -160,7 +160,8 @@ func debugTemplate(t *testing.T, eps ...endpoint) string {
     "update_url": {"defaultValue": {"value": "old"}, "conditionalValues": {"build_debug": {"value": "https://o.github.io/r/"}}, "valueType": "STRING"},
     "apk_url": {"defaultValue": {"value": ""}, "conditionalValues": {"build_debug": {"value": "https://github.com/bakuridzeaslan025-max/split-vpn/releases/latest/download/split-vpn.apk"}}, "valueType": "STRING"},
     "daily_quota_mb": {"defaultValue": {"useInAppDefault": true}, "conditionalValues": {"build_debug": {"value": "1024"}}, "valueType": "NUMBER"},
-    "yt_strategies": {"defaultValue": {"value": "[]"}, "conditionalValues": {"build_debug": {"value": "[{\"id\":\"none\",\"spec\":\"\"}]"}}, "valueType": "STRING"}
+    "yt_strategies": {"defaultValue": {"value": "[]"}, "conditionalValues": {"build_debug": {"value": "[{\"id\":\"none\",\"spec\":\"\"}]"}}, "valueType": "STRING"},
+    "dial_event_bp": {"defaultValue": {"value": "0"}, "conditionalValues": {"build_debug": {"value": "25"}}, "valueType": "NUMBER"}
   }
 }`, blob)
 }
@@ -190,7 +191,7 @@ func TestPromoteWhenAllWork(t *testing.T) {
 		t.Fatalf("calls %v, want %v", f.calls, want)
 	}
 	got := template(f.put)
-	for _, k := range []string{"endpoints", "min_version", "latest_version", "update_url", "apk_url", "daily_quota_mb", "yt_strategies"} {
+	for _, k := range []string{"endpoints", "min_version", "latest_version", "update_url", "apk_url", "daily_quota_mb", "yt_strategies", "dial_event_bp"} {
 		d, _ := got.value(k, "")
 		dbg, ok := got.value(k, debugCondition)
 		if !ok || d != dbg {
@@ -326,6 +327,26 @@ func TestPromoteConflict(t *testing.T) {
 	}
 }
 
+// Every handshake reported is a debug measurement: refused before any relay
+// is asked, rc-check still runs.
+func TestPromoteRefusesFullDialEvents(t *testing.T) {
+	st := newStand(t)
+	cred := newCred(st.now.Add(7 * 24 * time.Hour))
+	a := newFakeRelay(t, cred, "code-1")
+	f, rc := newFake(t, strings.Replace(debugTemplate(t, a.endpoint()), `{"value": "25"}`, `{"value": "10000"}`, 1))
+	tmpl, etag, _ := rc.get()
+	err := checkAndPromote(rc, tmpl, etag, testKey, st.p, st.credPath, "code-1", st.now, true, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "dial_event_bp") {
+		t.Fatalf("err %v", err)
+	}
+	if f.put != nil || a.hits.Load() != 0 {
+		t.Fatalf("published %v, relay asked %d times", f.put != nil, a.hits.Load())
+	}
+	if err := checkAndPromote(rc, tmpl, etag, testKey, st.p, st.credPath, "code-1", st.now, false, io.Discard); err != nil {
+		t.Fatalf("check: %v", err)
+	}
+}
+
 func TestPromoteNeedsDebugValues(t *testing.T) {
 	_, rc := newFake(t, consoleTemplate)
 	tmpl, etag, _ := rc.get()
@@ -370,4 +391,17 @@ func TestPromoteSameEndpointsSkipsCheck(t *testing.T) {
 			t.Errorf("%s: default %q", k, d)
 		}
 	}
+}
+
+// The label is printed, the address never.
+func TestCheckPrintsTheLabel(t *testing.T) {
+	st := newStand(t)
+	cred := newCred(st.now.Add(7 * 24 * time.Hour))
+	ep := newFakeRelay(t, cred, "code-1").endpoint()
+	ep.ID = "nl1"
+	var out strings.Builder
+	if !checkAll(st.p, []endpoint{ep}, cred, &out) || !strings.Contains(out.String(), "endpoint 1/1 (nl1): ok") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+	noAddresses(t, out.String(), ep)
 }

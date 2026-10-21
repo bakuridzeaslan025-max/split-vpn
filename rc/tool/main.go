@@ -41,6 +41,9 @@ type config struct {
 	// Direct YouTube's strategies, in the order to try them; [] turns it
 	// off for everyone. The app bakes this file's value in as its default.
 	YTStrategies json.RawMessage `json:"yt_strategies"`
+	// Basis points of relay handshakes the app reports as relay_dial:
+	// 10000 every one, 0 none.
+	DialEventBP int `json:"dial_event_bp"`
 }
 
 // ytValue is yt_strategies as RC carries it: a compact JSON string.
@@ -60,6 +63,8 @@ func (c config) validate() error {
 		return errors.New("config: min_version above latest_version")
 	case c.DailyQuotaMB < 0:
 		return errors.New("config: daily_quota_mb is required, 0 or more (0 = no limit)")
+	case c.DialEventBP < 0 || c.DialEventBP > 10000:
+		return errors.New("config: dial_event_bp is required, 0..10000 (basis points of relay handshakes reported, 0 = none)")
 	}
 	// The download page the app opens in the browser.
 	if u, err := url.Parse(c.UpdateURL); err != nil || u.Scheme != "https" || u.Host == "" {
@@ -84,8 +89,8 @@ func (c config) validate() error {
 }
 
 func loadConfig(path string) (config, error) {
-	// 0 means no limit, so a missing key must not decode to it.
-	c := config{DailyQuotaMB: -1}
+	// 0 means no limit (no events), so a missing key must not decode to it.
+	c := config{DailyQuotaMB: -1, DialEventBP: -1}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return c, err
@@ -177,6 +182,7 @@ func values(c config, blob string) [][3]string {
 		{"apk_url", "STRING", c.APKURL},
 		{"daily_quota_mb", "NUMBER", strconv.Itoa(c.DailyQuotaMB)},
 		{"yt_strategies", "STRING", c.ytValue()},
+		{"dial_event_bp", "NUMBER", strconv.Itoa(c.DialEventBP)},
 	}
 }
 
@@ -201,8 +207,8 @@ func push(rc *rcClient, t template, etag string, appID string, c config, blob st
 	if err != nil {
 		return fmt.Errorf("publish: %w", err)
 	}
-	fmt.Fprintf(out, "published version %s: min_version %d, latest_version %d, update_url %s, apk_url %s, daily_quota_mb %d, yt_strategies %s, endpoints set (%s)\n",
-		ver, c.MinVersion, c.LatestVersion, c.UpdateURL, c.APKURL, c.DailyQuotaMB, c.ytValue(), debugCondition)
+	fmt.Fprintf(out, "published version %s: min_version %d, latest_version %d, update_url %s, apk_url %s, daily_quota_mb %d, yt_strategies %s, dial_event_bp %d, endpoints set (%s)\n",
+		ver, c.MinVersion, c.LatestVersion, c.UpdateURL, c.APKURL, c.DailyQuotaMB, c.ytValue(), c.DialEventBP, debugCondition)
 	return nil
 }
 
@@ -233,14 +239,18 @@ func promote(rc *rcClient, t template, etag string, out io.Writer) error {
 		return fmt.Errorf("publish: %w", err)
 	}
 	get := func(k string) string { s, _ := t.value(k, ""); return s }
-	fmt.Fprintf(out, "published version %s: defaults = %s: min_version %s, latest_version %s, update_url %s, apk_url %s, daily_quota_mb %s, yt_strategies %s, endpoints as checked\n",
-		ver, debugCondition, get("min_version"), get("latest_version"), get("update_url"), get("apk_url"), get("daily_quota_mb"), get("yt_strategies"))
+	fmt.Fprintf(out, "published version %s: defaults = %s: min_version %s, latest_version %s, update_url %s, apk_url %s, daily_quota_mb %s, yt_strategies %s, dial_event_bp %s, endpoints as checked\n",
+		ver, debugCondition, get("min_version"), get("latest_version"), get("update_url"), get("apk_url"), get("daily_quota_mb"), get("yt_strategies"), get("dial_event_bp"))
 	return nil
 }
 
 // checkAndPromote checks every endpoint of the build_debug list through its
 // relay and promotes only when all of them work.
 func checkAndPromote(rc *rcClient, t template, etag string, key []byte, p prober, credPath, invite string, now time.Time, doPromote bool, out io.Writer) error {
+	// Before any relay is asked: a debug-only measurement must not reach release.
+	if bp, _ := t.value("dial_event_bp", debugCondition); doPromote && bp == "10000" {
+		return fmt.Errorf("dial_event_bp: %s is 10000, a debug measurement; set it back in config.json and make rc-push first", debugCondition)
+	}
 	blob, ok := t.value("endpoints", debugCondition)
 	if !ok {
 		return fmt.Errorf("endpoints: no %s value, make rc-push first", debugCondition)
@@ -301,7 +311,7 @@ func pull(t template, key []byte, out io.Writer) {
 				}
 				fmt.Fprintf(out, "  %s:\n", label)
 				for _, e := range eps {
-					fmt.Fprintf(out, "    %s|%s|%d|%s\n", e.Host, e.IP, e.Port, e.Path)
+					fmt.Fprintf(out, "    %s|%s|%s|%d|%s\n", e.ID, e.Host, e.IP, e.Port, e.Path)
 				}
 			}
 		}
@@ -346,6 +356,9 @@ func run(rcDir, gsPath, saPath, credPath string, args []string) error {
 		eps, src, err := loadEndpoints(rcDir, os.Getenv("VDS_ENDPOINTS"))
 		if err != nil {
 			return err
+		}
+		if err := checkIDs(eps); err != nil {
+			return fmt.Errorf("%s: %w", src, err)
 		}
 		if blob, err = encryptEndpoints(eps, key, rand.Reader); err != nil {
 			return fmt.Errorf("%s: %w", src, err)

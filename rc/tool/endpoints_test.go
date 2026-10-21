@@ -78,13 +78,56 @@ func TestEncryptRejects(t *testing.T) {
 }
 
 func TestParseEndpointSpec(t *testing.T) {
-	got, err := parseEndpointSpec("cover.example.org|203.0.113.10|443|/test-path; backup.example.net|198.51.100.7|8443|/backup-path;")
-	if err != nil || !reflect.DeepEqual(got, testEndpoints) {
+	got, err := parseEndpointSpec("nl1|cover.example.org|203.0.113.10|443|/test-path; nl2|backup.example.net|198.51.100.7|8443|/backup-path;")
+	want := []endpoint{testEndpoints[0], testEndpoints[1]}
+	want[0].ID, want[1].ID = "nl1", "nl2"
+	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, %v", got, err)
 	}
-	for _, s := range []string{"a|203.0.113.10|443", "a|203.0.113.10|https|/test-path"} {
+	for _, s := range []string{"a|b.example|203.0.113.10|443", "a|b.example|203.0.113.10|https|/test-path"} {
 		if _, err := parseEndpointSpec(s); err == nil {
 			t.Errorf("%q: no error", s)
 		}
+	}
+	if _, err := parseEndpointSpec("cover.example.org|203.0.113.10|443|/test-path"); err == nil || !strings.Contains(err.Error(), "id|host|ip|port|path") || strings.Contains(err.Error(), "203.0.113") {
+		t.Errorf("old format: %v", err)
+	}
+}
+
+func TestCheckIDs(t *testing.T) {
+	with := func(ids ...string) []endpoint {
+		eps := make([]endpoint, len(ids))
+		for i, id := range ids {
+			eps[i] = testEndpoints[0]
+			eps[i].ID = id
+		}
+		return eps
+	}
+	if err := checkIDs(with("nl1", "de-2", "0123456789abcdef")); err != nil {
+		t.Fatal(err)
+	}
+	for name, eps := range map[string][]endpoint{
+		"missing":   with("nl1", ""),
+		"twice":     with("nl1", "nl1"),
+		"uppercase": with("NL1"),
+		"too long":  with("0123456789abcdefg"),
+		"dot":       with("nl.1"),
+	} {
+		if err := checkIDs(eps); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+// The tunnel's copy keeps the label: TestEndpointsKeepID there.
+func TestIDRoundtrip(t *testing.T) {
+	eps := []endpoint{testEndpoints[0], testEndpoints[1]}
+	eps[0].ID, eps[1].ID = "nl1", "nl2"
+	blob, err := encryptEndpoints(eps, testKey, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := decryptEndpoints(blob, testKey); err != nil || !reflect.DeepEqual(got, eps) {
+		t.Fatalf("got %v, %v", got, err)
 	}
 }

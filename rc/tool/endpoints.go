@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -24,7 +25,11 @@ const (
 	minEndpointPath     = 8
 )
 
+// ID labels the endpoint in the app's relay_dial events. Not required by
+// the app (nor by decryptEndpoints here: blobs from before it), only by a
+// push, see checkIDs.
 type endpoint struct {
+	ID   string `json:"id,omitempty"`
 	Host string `json:"host"`
 	IP   string `json:"ip"`
 	Port int    `json:"port"`
@@ -44,8 +49,26 @@ func validateEndpoints(eps []endpoint) error {
 	return nil
 }
 
+var endpointID = regexp.MustCompile(`^[a-z0-9-]{1,16}$`)
+
+// checkIDs: every endpoint pushed has a label of its own. Labels are no
+// secret, they go to Analytics.
+func checkIDs(eps []endpoint) error {
+	seen := map[string]bool{}
+	for i, e := range eps {
+		if !endpointID.MatchString(e.ID) {
+			return fmt.Errorf("endpoints: entry %d: id is required, [a-z0-9-]{1,16}", i)
+		}
+		if seen[e.ID] {
+			return fmt.Errorf("endpoints: entry %d: id %s used twice", i, e.ID)
+		}
+		seen[e.ID] = true
+	}
+	return nil
+}
+
 // parseEndpointSpec reads vds.endpoints from local.properties:
-// host|ip|port|path;host|ip|port|path, the same list gradle bakes in.
+// id|host|ip|port|path;id|host|ip|port|path, the same list gradle bakes in.
 func parseEndpointSpec(spec string) ([]endpoint, error) {
 	var eps []endpoint
 	for i, e := range strings.Split(spec, ";") {
@@ -53,14 +76,17 @@ func parseEndpointSpec(spec string) ([]endpoint, error) {
 			continue
 		}
 		p := strings.Split(strings.TrimSpace(e), "|")
-		if len(p) != 4 {
-			return nil, fmt.Errorf("vds.endpoints: entry %d: expected host|ip|port|path", i)
+		if len(p) == 4 {
+			return nil, fmt.Errorf("vds.endpoints: entry %d: no id, the format is id|host|ip|port|path now", i)
 		}
-		port, err := strconv.Atoi(p[2])
+		if len(p) != 5 {
+			return nil, fmt.Errorf("vds.endpoints: entry %d: expected id|host|ip|port|path", i)
+		}
+		port, err := strconv.Atoi(p[3])
 		if err != nil {
 			return nil, fmt.Errorf("vds.endpoints: entry %d: bad port", i)
 		}
-		eps = append(eps, endpoint{Host: p[0], IP: p[1], Port: port, Path: p[3]})
+		eps = append(eps, endpoint{ID: p[0], Host: p[1], IP: p[2], Port: port, Path: p[4]})
 	}
 	return eps, nil
 }

@@ -25,17 +25,28 @@ internal class FakeBackend : Backend {
     var startedWith: ByteArray? = null
     var startedDomains: String? = null
     var startedSni: String? = null
+    var startedId: String? = null
 
     val establishedExtra = CopyOnWriteArrayList<List<Route>>()
     var startedHost: tunnel.Host? = null
     var startedRoutes: String? = null
 
-    override fun establish(service: VpnService, enabled: List<Service>, extra: List<Route>): ParcelFileDescriptor {
+    /** What Builder.establish() does instead of a TUN: return null, or throw. */
+    @Volatile var establishNull = false
+    @Volatile var establishError: Exception? = null
+    @Volatile var establishHook: (() -> Unit)? = null
+
+    override fun establish(service: VpnService, enabled: List<Service>, extra: List<Route>): ParcelFileDescriptor? {
         establishedExtra += extra
+        establishHook?.invoke()
+        establishError?.let { throw it }
+        if (establishNull) return null
         return pfd ?: ParcelFileDescriptor.open(File.createTempFile("tun", null), ParcelFileDescriptor.MODE_READ_ONLY)
     }
 
-    override fun start(fd: ParcelFileDescriptor, addr: String, sni: String, path: String, cred: ByteArray, domains: String, routes: String, cacheFile: String, desyncFile: String, host: tunnel.Host, logger: tunnel.Logger) {
+    override fun start(fd: ParcelFileDescriptor, ep: TunnelVpnService.Endpoint, cred: ByteArray, domains: String, routes: String, cacheFile: String, desyncFile: String, host: tunnel.Host, logger: tunnel.Logger) {
+        val sni = ep.host
+        startedId = ep.id
         startedDomains = domains
         startedAdBlock = adBlock
         startedDirect = direct
@@ -58,6 +69,10 @@ internal class FakeBackend : Backend {
     val endpointsSet = CopyOnWriteArrayList<TunnelVpnService.Endpoint>()
     val suspects = CopyOnWriteArrayList<Boolean>()
     override fun setEndpoint(ep: TunnelVpnService.Endpoint, suspect: Boolean) { endpointsSet += ep; suspects += suspect }
+    val endpointIds = CopyOnWriteArrayList<String>()
+    override fun setEndpointId(id: String) { endpointIds += id }
+    @Volatile var dialEvents: Int? = null
+    override fun setDialEvents(bp: Int) { dialEvents = bp }
     override fun networkChanged() { events += "networkChanged" }
     override fun networkLost() { events += "networkLost" }
     override fun dnsChanged() { events += "dnsChanged" }
@@ -108,16 +123,19 @@ internal class FakeBackend : Backend {
     var dropped = ""
     override fun setDirect(on: Boolean) { direct = on }
     override fun setStrategies(json: String): String { strategies = json; return dropped }
+    /** What Go kept of setStrategies; null: every entry of the JSON. */
+    @Volatile var kept: Int? = null
+    override fun strategyCount() = kept ?: runCatching { org.json.JSONArray(strategies).length() }.getOrDefault(0)
     val netKeys = CopyOnWriteArrayList<String>()
     override fun setNetKey(key: String) { netKeys += key }
     /** Go's LastRelayOK, unix seconds. */
     @Volatile var lastRelayOk = 0L
     override fun lastRelayOk() = lastRelayOk
     /** What went to Analytics: event names with their params. */
-    val analytics = CopyOnWriteArrayList<Pair<String, Map<String, String>>>()
+    val analytics = CopyOnWriteArrayList<Pair<String, Map<String, Any>>>()
     val userProperties = java.util.concurrent.ConcurrentHashMap<String, String>()
     @Volatile var analyticsOn: Boolean? = null
-    override fun event(ctx: Context, name: String, params: Map<String, String>) { analytics += name to params }
+    override fun event(ctx: Context, name: String, params: Map<String, Any>) { analytics += name to params }
     override fun userProperty(ctx: Context, name: String, value: String) { userProperties[name] = value }
     override fun setAnalytics(ctx: Context, on: Boolean) { analyticsOn = on }
     override fun register(addr: String, sni: String, path: String, kind: Int, proof: ByteArray): ByteArray {

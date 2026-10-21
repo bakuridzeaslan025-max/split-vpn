@@ -228,10 +228,10 @@ func credential(p prober, eps []endpoint, path, invite string, now time.Time, ou
 	for i, ep := range eps {
 		cred, err := p.register(ep, invite)
 		if err != nil {
-			errs = append(errs, fmt.Sprintf("endpoint %d: %s", i+1, scrub(err, ep)))
+			errs = append(errs, fmt.Sprintf("endpoint %d%s: %s", i+1, label(ep), scrub(err, ep)))
 			continue
 		}
-		fmt.Fprintf(out, "credential: registered via endpoint %d, valid until %s\n", i+1, credExpires(cred).UTC().Format(time.DateTime))
+		fmt.Fprintf(out, "credential: registered via endpoint %d%s, valid until %s\n", i+1, label(ep), credExpires(cred).UTC().Format(time.DateTime))
 		// The code is spent by now: this run still uses the credential.
 		if err := os.WriteFile(path, []byte(hex.EncodeToString(cred)+"\n"), 0o600); err != nil {
 			fmt.Fprintf(out, "warning: credential not cached (%v), the next run needs a new invite code\n", err)
@@ -241,18 +241,26 @@ func credential(p prober, eps []endpoint, path, invite string, now time.Time, ou
 	return nil, fmt.Errorf("register: %s", strings.Join(errs, "; "))
 }
 
+// label: an endpoint's id for the output, no secret unlike the rest.
+func label(ep endpoint) string {
+	if ep.ID == "" {
+		return ""
+	}
+	return " (" + ep.ID + ")"
+}
+
 // checkAll reports each endpoint by number and whether all of them work.
 func checkAll(p prober, eps []endpoint, cred []byte, out io.Writer) bool {
 	ok, refused := true, false
 	for i, ep := range eps {
 		t0 := time.Now()
 		if err := p.check(ep, cred); err != nil {
-			fmt.Fprintf(out, "endpoint %d/%d: %s\n", i+1, len(eps), scrub(err, ep))
+			fmt.Fprintf(out, "endpoint %d/%d%s: %s\n", i+1, len(eps), label(ep), scrub(err, ep))
 			ok = false
 			refused = refused || errors.Is(err, errCredRejected)
 			continue
 		}
-		fmt.Fprintf(out, "endpoint %d/%d: ok in %s\n", i+1, len(eps), time.Since(t0).Round(time.Millisecond))
+		fmt.Fprintf(out, "endpoint %d/%d%s: ok in %s\n", i+1, len(eps), label(ep), time.Since(t0).Round(time.Millisecond))
 	}
 	if refused {
 		fmt.Fprintln(out, "a refused credential: revoked, or the relay has another issuer key; delete rc/.check-cred and run again with INVITE=<code>")

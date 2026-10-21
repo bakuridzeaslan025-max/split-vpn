@@ -536,6 +536,8 @@ class MainActivity : Activity() {
     private fun errorText(): String {
         val e = error ?: ""
         return when {
+            // The service's text is for its notification, read outside the app.
+            e == TunnelVpnService.ERR_VPN_TAKEN -> "Разрешение VPN занято другим приложением. Нажмите «Подключить», чтобы вернуть его"
             e.any { it in 'а'..'я' } -> e
             "unreachable" in e || "relay reply" in e -> "Сервер недоступен. Проверьте интернет и повторите"
             "rejected" in e -> "Сервер отклонил доступ"
@@ -559,7 +561,6 @@ class MainActivity : Activity() {
             view.background = box(AMBER_BG, radius = 16f)
             return
         }
-        action.visibility = View.VISIBLE
         // A used-up day is told by the toggle and the usage line: a normal state, not a failure.
         // A stale one is over. An update still shows: the one thing to do right now.
         if (!updateRequired && (state != VpnState.ERROR || quotaError)) {
@@ -568,16 +569,14 @@ class MainActivity : Activity() {
         }
         view.visibility = View.VISIBLE
         val needCode = error == TunnelVpnService.ERR_NEED_CODE
+        // A plain retry is the toggle's own "Подключить".
+        action.visibility = if (needCode || updateRequired) View.VISIBLE else View.GONE
         text.text = when {
             needCode -> "Не удалось проверить устройство через Google Play"
             updateRequired -> TunnelVpnService.ERR_UPDATE_REQUIRED
             else -> errorText()
         }
-        action.text = when {
-            needCode -> "Ввести код"
-            updateRequired -> updateLabel
-            else -> "Повторить"
-        }
+        action.text = if (needCode) "Ввести код" else updateLabel
         val downloading = updateRequired && updating
         action.isEnabled = !downloading
         action.alpha = if (downloading) 0.6f else 1f
@@ -663,6 +662,14 @@ class MainActivity : Activity() {
                     renderError()
                     renderUpdate()
                 }
+            }
+            // Here, not in onUpdateResult: that one is skipped for a destroyed activity.
+            when (r) {
+                Updater.Result.STARTED -> Updater.event(applicationContext, "started")
+                Updater.Result.NEED_PERMISSION -> Updater.event(applicationContext, "need_permission")
+                Updater.Result.FAILED -> Updater.event(applicationContext, "failed", Updater.lastKind?.tag)
+                Updater.Result.BAD_URL -> Updater.event(applicationContext, "failed", "url")
+                Updater.Result.UP_TO_DATE, Updater.Result.DISABLED, Updater.Result.BUSY -> Unit
             }
             runOnUiThread { if (!isDestroyed) onUpdateResult(r, v) }
         })

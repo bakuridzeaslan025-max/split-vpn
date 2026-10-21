@@ -3,8 +3,8 @@ package org.duckdns.splitvpn
 import android.content.Context
 
 /** Remote Config keys as fetched. */
-/** [dailyQuotaMb], [ytStrategies]: null when RC has no such key. */
-internal data class RcValues(val endpoints: String, val minVersion: Long, val latestVersion: Long, val updateUrl: String, val dailyQuotaMb: Long? = null, val ytStrategies: String? = null, val apkUrl: String = "")
+/** [dailyQuotaMb], [ytStrategies]: null when RC has no such key. [dialEventBp]: already [RemoteConfig.parseDialEventBp]'s. */
+internal data class RcValues(val endpoints: String, val minVersion: Long, val latestVersion: Long, val updateUrl: String, val dailyQuotaMb: Long? = null, val ytStrategies: String? = null, val apkUrl: String = "", val dialEventBp: Int = 0)
 
 /**
  * The versions part of Remote Config; the UI gets it in VpnClient's snapshot.
@@ -36,6 +36,7 @@ internal object RemoteConfig {
     const val KEY_UPDATE_URL = "rc.update_url"
     const val KEY_APK_URL = "rc.apk_url"
     const val KEY_YT_STRATEGIES = "rc.yt_strategies"
+    const val KEY_DIAL_EVENT_BP = "rc.dial_event_bp"
     private const val KEY_DROPPED = "rc.dropped_endpoints"
     // Two checks of one value, each with its own memory: one key would
     // make them report each other's value as new, by turns.
@@ -54,6 +55,15 @@ internal object RemoteConfig {
     fun ytStrategies(ctx: Context): String =
         ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).getString(KEY_YT_STRATEGIES, null)
             ?: BuildConfig.YT_STRATEGIES
+
+    /**
+     * dial_event_bp: the share of relay handshakes reported, in basis points
+     * (10000 every one). No key, no number or out of 0..10000: none.
+     */
+    fun parseDialEventBp(raw: String?): Int = raw?.trim()?.toIntOrNull()?.takeIf { it in 0..10000 } ?: 0
+
+    fun dialEventBp(ctx: Context): Int =
+        ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).getInt(KEY_DIAL_EVENT_BP, 0)
 
     /**
      * RC serves a broken blob on every fetch until someone publishes a fixed
@@ -75,6 +85,7 @@ internal object RemoteConfig {
                 .putLong(KEY_LATEST_VERSION, v.latestVersion)
                 .putString(KEY_UPDATE_URL, v.updateUrl)
                 .putString(KEY_APK_URL, v.apkUrl)
+                .putInt(KEY_DIAL_EVENT_BP, v.dialEventBp)
                 .apply()
             Quota.setLimitMb(ctx, v.dailyQuotaMb)
             // Each entry is Go's to judge (it drops the broken ones); a value

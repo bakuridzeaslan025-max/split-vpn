@@ -18,7 +18,8 @@ val integrityProject = localProps.getProperty("integrity.project")?.trim()?.take
 // Default relay endpoints, baked in encrypted so the addresses are not a grep
 // of the APK away. local.properties:
 //   rc.key=<64 hex>   AES-256 key, the same one `make tunnel` gives Go
-//   vds.endpoints=host|ip|port|path;host|ip|port|path   first one is primary
+//   vds.endpoints=id|host|ip|port|path;id|host|ip|port|path   first one is primary,
+//   id the server's label in Analytics ([a-z0-9-]{1,16}, no secret)
 // Either missing: the list is empty and the app cannot connect, so only a
 // debug build goes on (with a warning); a release one fails.
 val endpointsBlob = encryptEndpoints(
@@ -62,14 +63,16 @@ fun encryptEndpoints(keyHex: String, spec: String): String {
     }
     require(Regex("[0-9a-fA-F]{64}").matches(keyHex)) { "rc.key: expected 64 hex chars" }
     val key = keyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-    val json = spec.split(';').filter { it.isNotBlank() }.joinToString(",", "[", "]") { e ->
-        val p = e.trim().split('|')
+    val entries = spec.split(';').filter { it.isNotBlank() }.map { it.trim().split('|') }
+    require(entries.none { it.size == 4 }) { "vds.endpoints: no id, the format is id|host|ip|port|path now" }
+    val json = entries.joinToString(",", "[", "]") { p ->
         require(
-            p.size == 4 && p.none { it.isEmpty() || '"' in it || '\\' in it } && isIpLiteral(p[1]) &&
-                p[2].toIntOrNull() in 1..65535 && p[3].startsWith("/") && p[3].length >= 8,
-        ) { "vds.endpoints: expected host|ip|port|path;… (ip a literal, port 1..65535, path /… of 8+ chars)" }
-        """{"host":"${p[0]}","ip":"${p[1]}","port":${p[2]},"path":"${p[3]}"}"""
+            p.size == 5 && Regex("[a-z0-9-]{1,16}").matches(p[0]) && p.none { it.isEmpty() || '"' in it || '\\' in it } && isIpLiteral(p[2]) &&
+                p[3].toIntOrNull() in 1..65535 && p[4].startsWith("/") && p[4].length >= 8,
+        ) { "vds.endpoints: expected id|host|ip|port|path;… (id [a-z0-9-]{1,16}, ip a literal, port 1..65535, path /… of 8+ chars)" }
+        """{"id":"${p[0]}","host":"${p[1]}","ip":"${p[2]}","port":${p[3]},"path":"${p[4]}"}"""
     }.toByteArray()
+    require(entries.map { it[0] }.toSet().size == entries.size) { "vds.endpoints: every id once" }
     val aad = "endpoints|v1".toByteArray()
     fun hmac(k: ByteArray, data: ByteArray) = javax.crypto.Mac.getInstance("HmacSHA256")
         .apply { init(javax.crypto.spec.SecretKeySpec(k, "HmacSHA256")) }.doFinal(data)
@@ -93,8 +96,8 @@ android {
         applicationId = "org.newvpn" // Play Console package; Kotlin namespace stays
         minSdk = 26
         targetSdk = 36
-        versionCode = 133 // an earlier internal release in Play took 68
-        versionName = "0.11.2"
+        versionCode = 134 // an earlier internal release in Play took 68
+        versionName = "0.12.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("long", "INTEGRITY_PROJECT", "${integrityProject}L")
         buildConfigField("String", "ENDPOINTS", "\"$endpointsBlob\"")

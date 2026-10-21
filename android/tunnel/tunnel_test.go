@@ -73,6 +73,9 @@ func setConns(m map[net.Conn]struct{}) {
 // lastHello receives every ClientHello the fake listeners see (buffered, drop when full).
 var lastHello = make(chan *tls.ClientHelloInfo, 64)
 
+// fakeTLSNextProtos: the ALPN the next fakeTLSListener picks from.
+var fakeTLSNextProtos []string
+
 // fakeTLSListener is a TLS listener with a self-signed cert the package trusts.
 func fakeTLSListener(t *testing.T) net.Listener {
 	t.Helper()
@@ -99,6 +102,7 @@ func fakeTLSListener(t *testing.T) net.Listener {
 
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
 		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
+		NextProtos:   fakeTLSNextProtos,
 		GetConfigForClient: func(h *tls.ClientHelloInfo) (*tls.Config, error) {
 			select {
 			case lastHello <- h:
@@ -178,7 +182,7 @@ func TestDialRelay_BadSNI(t *testing.T) {
 func TestStart_FailedInitLeavesNoTunFile(t *testing.T) {
 	addr, _ := fakeRelay(t)
 
-	err := Start(9999, addr, "relay.test", "/app/x", testCred, "", "", "", "", nil, nil) // not an open fd: fdbased.New fails
+	err := Start(9999, addr, "relay.test", "/app/x", "", testCred, "", "", "", "", nil, nil) // not an open fd: fdbased.New fails
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -201,7 +205,7 @@ func TestStart_ProbeSetsLastRelayOK(t *testing.T) {
 	addr, _ := fakeRelay(t)
 	health.lastOK.Store(0)
 	t0 := time.Now().Unix()
-	Start(9999, addr, "relay.test", "/app/x", testCred, "", "", "", "", nil, nil) // fails later, on the fake fd
+	Start(9999, addr, "relay.test", "/app/x", "", testCred, "", "", "", "", nil, nil) // fails later, on the fake fd
 	wantRelayOKSince(t, t0)
 }
 
@@ -350,7 +354,7 @@ func TestSetEndpoint_MovesNewSessionsOnly(t *testing.T) {
 	health.now = func() time.Time { return now }
 	openBreaker(&health, &now)
 	gen := health.generation()
-	if err := SetEndpoint(addrB, "relay.test", "/app/y", false); err != nil {
+	if err := SetEndpoint(addrB, "relay.test", "/app/y", "", false); err != nil {
 		t.Fatal(err)
 	}
 	health.failed(gen, "connect", "tls: connect failed: late", errTimeout)
@@ -372,7 +376,7 @@ func TestSetEndpoint_MovesNewSessionsOnly(t *testing.T) {
 	if _, err := io.ReadFull(old, buf); err != nil || string(buf) != "ping" {
 		t.Fatalf("old session: %q %v", buf, err)
 	}
-	if SetEndpoint(addrB, "relay.test", "", false) == nil {
+	if SetEndpoint(addrB, "relay.test", "", "", false) == nil {
 		t.Fatal("SetEndpoint without a path must fail")
 	}
 }
@@ -388,7 +392,7 @@ func TestSetEndpoint_Concurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 20; j++ {
-				SetEndpoint(fmt.Sprintf("127.0.0.1:%d", 1+j%2), "relay.test", "/app/x", false)
+				SetEndpoint(fmt.Sprintf("127.0.0.1:%d", 1+j%2), "relay.test", "/app/x", "", false)
 			}
 		}()
 		go func() {
@@ -419,7 +423,7 @@ func TestSetEndpoint_NewDoHClient(t *testing.T) {
 		mu.Unlock()
 	})
 
-	if err := SetEndpoint(addrB, "relay.test", "/app/y", false); err != nil {
+	if err := SetEndpoint(addrB, "relay.test", "/app/y", "", false); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -463,7 +467,7 @@ func TestStart_WhileOldConnsUntrack(t *testing.T) {
 	}()
 	for i := 0; i < 5; i++ {
 		Stop()
-		Start(9999, closed, "relay.test", "/app/x", testCred, "", "", "", "", nil, nil) // fails on the fake fd, after the tracker
+		Start(9999, closed, "relay.test", "/app/x", "", testCred, "", "", "", "", nil, nil) // fails on the fake fd, after the tracker
 	}
 	<-done
 }

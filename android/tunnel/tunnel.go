@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"maps"
+	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	utls "github.com/refraction-networking/utls"
@@ -68,7 +70,8 @@ var (
 // The relay sits behind the cover site's nginx at a secret path. Sessions
 // are a WebSocket upgrade (credential in the subprotocol header, raw bytes
 // after 101, no WS framing); registration is a POST. See relay/http.go.
-type relayTarget struct{ addr, sni, path string }
+// id is the endpoint's label in Remote Config, for DialEvent; "" none.
+type relayTarget struct{ addr, sni, path, id string }
 
 // relayEP is read by every new relay session, so SetEndpoint moves them
 // without touching sessions already open.
@@ -110,7 +113,8 @@ func httpRoundTrip(c net.Conn, req string) (*http.Response, *bufio.Reader, error
 	br := bufio.NewReader(c)
 	res, err := http.ReadResponse(br, nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("relay reply: %v", err)
+		// %w: dialResult tells a timeout and a reset from the cause.
+		return nil, nil, fmt.Errorf("relay reply: %w", err)
 	}
 	return res, br, nil
 }
@@ -135,9 +139,14 @@ func upgrade(c net.Conn, ep *relayTarget, cred []byte) (*bufio.Reader, error) {
 	case http.StatusNotFound:
 		return nil, ErrCredRejected
 	default:
-		return nil, fmt.Errorf("relay reply: http %d", res.StatusCode)
+		return nil, httpStatus(res.StatusCode)
 	}
 }
+
+// httpStatus: the relay's nginx answered the upgrade, but not with 101 or 404.
+type httpStatus int
+
+func (s httpStatus) Error() string { return fmt.Sprintf("relay reply: http %d", int(s)) }
 
 // relayAlive: when the VDS last sent anything, in any session, its
 // upgrade answers included.
@@ -229,7 +238,8 @@ func Register(vpnAddr, sni, path string, kind int, proof []byte) ([]byte, error)
 // vpnAddr is "ip:port" — the caller resolves the host before the TUN takes
 // over DNS, otherwise DoH would loop through our own resolver. sni is the
 // hostname for TLS verification, path the relay's location on the cover
-// site, cred a credential from Register.
+// site, id its label for DialEvent ("" for none), cred a credential from
+// Register.
 // domains is a newline-separated list of site suffixes that go through the
 // relay; any other name inside the routed subnets is dialed directly via
 // host. Sessions without a name (MTProto, plain TCP) go through the relay.
@@ -237,7 +247,7 @@ func Register(vpnAddr, sni, path string, kind int, proof []byte) ([]byte, error)
 // route cache (see routes.go); host hears when a listed site resolves
 // outside routes. desyncFile keeps what works for direct YouTube on which
 // network (desyncpick.go).
-func Start(tunFd int, vpnAddr string, sni string, path string, cred []byte, domains string, routes string, cacheFile string, desyncFile string, host Host, logger Logger) error {
+func Start(tunFd int, vpnAddr string, sni string, path string, id string, cred []byte, domains string, routes string, cacheFile string, desyncFile string, host Host, logger Logger) error {
 	setLogger(logger)
 	setDomains(domains)
 	protector = host
@@ -255,7 +265,7 @@ func Start(tunFd int, vpnAddr string, sni string, path string, cred []byte, doma
 	// gomobile lends the Java array only for this call; every later
 	// connection reads cred, so keep our own copy.
 	cred = append([]byte(nil), cred...)
-	relayEP.Store(&relayTarget{vpnAddr, sni, path})
+	relayEP.Store(&relayTarget{vpnAddr, sni, path, id})
 
 	// Probe the relay before touching TUN. The probe is a full handshake:
 	// ErrCredRejected tells the caller to register again instead of showing
@@ -316,21 +326,97 @@ func Start(tunFd int, vpnAddr string, sni string, path string, cred []byte, doma
 }
 
 // probeRelay is a full handshake and nothing more. Its failures count as
-// dials: dialTLS records its own, the upgrade is recorded here as in
-// dialRelay, so a pocketed phone's outage still has its error kinds.
+// dials, as dialRelay's do, so a pocketed phone's outage still has its
+// error kinds.
 func probeRelay(cred []byte) error {
-	gen := health.generation()
-	ep := relayEP.Load()
-	probe, err := dialTLS(context.Background(), gen, ep.addr, ep.sni)
-	if err != nil {
-		return err
-	}
-	defer probe.Close()
-	probe.SetDeadline(time.Now().Add(handshakeTimeout))
-	if _, err = upgrade(probe, ep, cred); err != nil && !errors.Is(err, ErrCredRejected) {
-		health.failed(gen, "upgrade", fmt.Sprintf("relay: upgrade failed: %v", err), err)
+	c, _, err := relayHandshake(context.Background(), health.generation(), relayEP.Load(), cred)
+	if err == nil {
+		c.Close()
 	}
 	return err
+}
+
+// relayHandshake is TLS to the VDS and the upgrade, for app sessions and
+// probes alike: the health record of a failed upgrade and the DialEvent
+// are made here. gen and ep are the caller's, read together: a SetEndpoint
+// meanwhile changes neither the address dialed nor whose event it is.
+func relayHandshake(ctx context.Context, gen uint64, ep *relayTarget, cred []byte) (net.Conn, *bufio.Reader, error) {
+	t0 := time.Now()
+	c, stage, err := dialTLSStage(ctx, gen, ep.addr, ep.sni)
+	if err == nil {
+		stage = "upgrade"
+		c.SetDeadline(time.Now().Add(handshakeTimeout))
+		var br *bufio.Reader
+		if br, err = upgrade(c, ep, cred); err == nil {
+			dialEvent(gen, ep, stage, nil, t0)
+			return c, br, nil
+		}
+		c.Close()
+		// TLS passing and the upgrade dying is an outage too (DPI after the
+		// hello, relay down behind nginx). A refused credential is not.
+		if !errors.Is(err, ErrCredRejected) {
+			health.failed(gen, "upgrade", fmt.Sprintf("relay: upgrade failed: %v", err), err)
+		}
+	}
+	dialEvent(gen, ep, stage, err, t0)
+	return nil, nil, err
+}
+
+// dialBP: the share of handshakes the host hears of, in basis points.
+var dialBP atomic.Int32
+
+// SetDialEvents sets the share of relay handshakes reported by
+// Host.DialEvent, in basis points: 10000 every one, 0 (or anything outside
+// 0..10000) none. Remote Config's dial_event_bp.
+func SetDialEvents(bp int) {
+	if bp < 0 || bp > 10000 {
+		bp = 0
+	}
+	dialBP.Store(int32(bp))
+}
+
+// dialEvent tells the host how a handshake went, if it was sampled. Not
+// about the relay's reach: a refused credential (it answered), the caller
+// giving up, a handshake that outlived its network or endpoint (health
+// drops those too). The dice are Go's, so gomobile is not crossed for the
+// handshakes left out.
+func dialEvent(gen uint64, ep *relayTarget, stage string, err error, t0 time.Time) {
+	bp := int(dialBP.Load())
+	h := protector
+	if bp <= 0 || h == nil || ep.id == "" || gen == notCounted || errors.Is(err, ErrCredRejected) || errors.Is(err, context.Canceled) {
+		return
+	}
+	if mrand.IntN(10000) >= bp || health.generation() != gen {
+		return
+	}
+	go h.DialEvent(ep.id, dialResult(stage, err), time.Since(t0).Milliseconds())
+}
+
+// dialResult names a handshake's outcome for DialEvent: "ok", or the
+// stage (connect, hello, upgrade) and why it failed in one word.
+func dialResult(stage string, err error) string {
+	if err == nil {
+		return "ok"
+	}
+	var ne net.Error
+	var st httpStatus
+	switch {
+	// handleTCP's 15 s context is shorter than a dial and a hello: its
+	// deadline is the server's silence all the same.
+	case errors.Is(err, context.DeadlineExceeded) || errors.As(err, &ne) && ne.Timeout():
+		return stage + "_timeout"
+	case stage == "connect" && errors.Is(err, syscall.ECONNREFUSED):
+		return "connect_refused"
+	// No network at all: kept apart, or a phone offline would blur the
+	// endpoint's shares.
+	case stage == "connect" && (errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH)):
+		return "connect_unreach"
+	case stage != "connect" && (errors.Is(err, syscall.ECONNRESET) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)):
+		return stage + "_reset"
+	case stage == "upgrade" && errors.As(err, &st):
+		return "upgrade_http"
+	}
+	return stage + "_other"
 }
 
 func routeCacheSet(c *routeCache) {
@@ -416,13 +502,13 @@ func DnsChanged() {
 // suspect: the host moves on because the last one was down, so this one may
 // be too; apps are refused until a probe gets through, instead of each
 // waiting out a dial timeout.
-func SetEndpoint(vpnAddr, sni, path string, suspect bool) error {
+func SetEndpoint(vpnAddr, sni, path, id string, suspect bool) error {
 	if path == "" {
 		return errors.New("no relay path")
 	}
 	// Before the health reset: a dial that reads the new generation must
 	// also read the new endpoint.
-	relayEP.Store(&relayTarget{vpnAddr, sni, path})
+	relayEP.Store(&relayTarget{vpnAddr, sni, path, id})
 	health.newEndpoint(suspect)
 	firstHello.Store(false)
 	// A fresh client: lookups in flight would return their conns to the old
@@ -437,6 +523,23 @@ func SetEndpoint(vpnAddr, sni, path string, suspect bool) error {
 		d.CloseIdleConnections()
 	}
 	return nil
+}
+
+// SetEndpointID relabels the current endpoint, nothing else: a list from
+// Remote Config that only brought the label. SetEndpoint would reset the
+// relay's health for the same address.
+func SetEndpointID(id string) {
+	for {
+		old := relayEP.Load()
+		if old == nil || old.id == id {
+			return
+		}
+		ep := *old
+		ep.id = id
+		if relayEP.CompareAndSwap(old, &ep) {
+			return
+		}
+	}
 }
 
 // NetworkLost cuts every relay connection: the network they were opened on
@@ -841,20 +944,8 @@ func dialRelay(ctx context.Context, cred []byte, dstIP net.IP, dstPort uint16) (
 		return nil, err
 	}
 	gen := health.generation()
-	ep := relayEP.Load()
-	rawConn, err := dialTLS(ctx, gen, ep.addr, ep.sni)
+	rawConn, br, err := relayHandshake(ctx, gen, relayEP.Load(), cred)
 	if err != nil {
-		return nil, err
-	}
-	rawConn.SetDeadline(time.Now().Add(handshakeTimeout))
-	br, err := upgrade(rawConn, ep, cred)
-	if err != nil {
-		rawConn.Close()
-		// TLS passing and the upgrade dying is an outage too (DPI after the
-		// hello, relay down behind nginx). A refused credential is not.
-		if !errors.Is(err, ErrCredRejected) {
-			health.failed(gen, "upgrade", fmt.Sprintf("relay: upgrade failed: %v", err), err)
-		}
 		return nil, err
 	}
 	health.accepted()
@@ -922,6 +1013,13 @@ var (
 // picked addr: a failure on the endpoint SetEndpoint just replaced must not
 // count against the new one.
 func dialTLS(ctx context.Context, gen uint64, addr, sni string) (net.Conn, error) {
+	c, _, err := dialTLSStage(ctx, gen, addr, sni)
+	return c, err
+}
+
+// dialTLSStage is dialTLS that also names the stage a failure came at:
+// "connect" or "hello".
+func dialTLSStage(ctx context.Context, gen uint64, addr, sni string) (net.Conn, string, error) {
 	t0 := time.Now()
 	// Idle above the relay's 2 min idle close: a live session ends before
 	// the first probe, a dead path (no onLost) still breaks after ~195 s.
@@ -930,7 +1028,7 @@ func dialTLS(ctx context.Context, gen uint64, addr, sni string) (net.Conn, error
 	}}).DialContext(ctx, "tcp", addr)
 	if err != nil {
 		health.failed(gen, "connect", fmt.Sprintf("tls: connect %s failed after %s: %v", addr, time.Since(t0).Round(time.Millisecond), err), err)
-		return nil, err
+		return nil, "connect", err
 	}
 	uc := utls.UClient(raw, &utls.Config{ServerName: sni, RootCAs: relayRootCAs}, chromeHello)
 	// The dialer timeout ends at connect; without this a server that never
@@ -939,19 +1037,19 @@ func dialTLS(ctx context.Context, gen uint64, addr, sni string) (net.Conn, error
 	if err := uc.HandshakeContext(ctx); err != nil {
 		raw.Close()
 		health.failed(gen, "hello", fmt.Sprintf("tls: chrome hello to %s failed after %s: %v", sni, time.Since(t0).Round(time.Millisecond), err), err)
-		return nil, err
+		return nil, "hello", err
 	}
 	raw.SetDeadline(time.Time{})
 	st := uc.ConnectionState()
 	if st.NegotiatedProtocol == "h2" {
 		uc.Close()
 		log.Printf("tls: %s picked h2, cannot speak it", sni)
-		return nil, errors.New("server picked h2")
+		return nil, "hello", errors.New("server picked h2")
 	}
 	if firstHello.CompareAndSwap(false, true) {
 		log.Printf("tls: chrome hello to %s ok in %s (tls 0x%04x, alpn %q)", sni, time.Since(t0).Round(time.Millisecond), st.Version, st.NegotiatedProtocol)
 	}
-	return uc, nil
+	return uc, "", nil
 }
 
 type trackedConn struct {

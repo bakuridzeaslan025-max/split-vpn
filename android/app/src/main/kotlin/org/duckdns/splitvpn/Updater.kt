@@ -36,6 +36,10 @@ object Updater {
     private const val CHANNEL_ID = "update"
     // 1 and 2 are TunnelVpnService's.
     private const val NOTIFICATION_ID = 3
+    // Our committed session, in the UI process's prefs: the installer's
+    // answer may come to a new process (from the notification, after the
+    // install). Only its ABORTED is the user's cancel.
+    internal const val KEY_SESSION = "update.session"
     // Hidden API: CONFIRM_INSTALL since Android 10, CONFIRM_PERMISSIONS before.
     private val confirmActions = setOf("android.content.pm.action.CONFIRM_INSTALL", "android.content.pm.action.CONFIRM_PERMISSIONS")
 
@@ -84,6 +88,7 @@ object Updater {
         if (!busy.compareAndSet(false, true)) return Result.BUSY
         val apk = File(ctx.cacheDir, FILE)
         lastFailure = null
+        lastKind = null
         val t0 = System.nanoTime()
         try {
             download(apkUrl, apk, progress = progress)?.let {
@@ -187,11 +192,23 @@ object Updater {
     var lastFailure: String? = null
         private set
 
+    /** And its kind, for self_update's detail. */
+    @Volatile
+    var lastKind: Kind? = null
+        private set
+
     private fun report(f: Failure) {
         val e = failure(f)
         lastFailure = e.message
+        lastKind = f.kind
         AppLog.e("update failed", e)
     }
+
+    /** self_update: the funnel from the tap to the installed version. */
+    internal fun event(ctx: Context, step: String, detail: String? = null) =
+        Analytics.event(ctx, "self_update", if (detail == null) mapOf("step" to step) else mapOf("step" to step, "detail" to detail))
+
+    private fun prefs(ctx: Context) = ctx.getSharedPreferences(Services.PREFS, Context.MODE_PRIVATE)
 
     @Suppress("DEPRECATION")
     private val signFlags =
@@ -227,7 +244,9 @@ object Updater {
             if (Build.VERSION.SDK_INT >= 31) setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
         }
         // One left over from an unconfirmed attempt holds a copy of an older APK.
-        // Their status comes back as STATUS_FAILURE_ABORTED, which is not reported.
+        // Their status comes back as STATUS_FAILURE_ABORTED, which is not reported:
+        // first forget the one committed, or its ABORTED would be the user's cancel.
+        prefs(ctx).edit().remove(KEY_SESSION).apply()
         for (old in installer.mySessions) runCatching { installer.abandonSession(old.sessionId) }
         pending = null
         ctx.getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
@@ -242,6 +261,9 @@ object Updater {
                 val flags = PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
                 val status = PendingIntent.getBroadcast(ctx, id, Intent(ctx, InstallReceiver::class.java), flags)
                 s.commit(status.intentSender)
+                // After the commit: a session abandoned below must not
+                // come back as the user's cancel on top of the failure.
+                prefs(ctx).edit().putInt(KEY_SESSION, id).apply()
             } catch (e: Exception) {
                 s.abandon()
                 throw e
@@ -256,15 +278,26 @@ object Updater {
         // Answered from the notification: coming back to the app must not ask
         // again. Not by an abandoned session's ABORTED, though.
         if (st != PackageInstaller.STATUS_PENDING_USER_ACTION && pending?.first == session) pending = null
+        val ours = session != -1 && prefs(ctx).getInt(KEY_SESSION, -1) == session
+        // A final answer about ours: nothing more will come for it.
+        if (ours && st != PackageInstaller.STATUS_PENDING_USER_ACTION) prefs(ctx).edit().remove(KEY_SESSION).apply()
         when (st) {
             PackageInstaller.STATUS_PENDING_USER_ACTION ->
                 confirm(ctx, session, IntentCompat.getParcelableExtra(intent, Intent.EXTRA_INTENT, Intent::class.java))
             PackageInstaller.STATUS_SUCCESS -> {
                 AppLog.i("update: installed")
+                event(ctx, "installed")
                 installed(ctx)
             }
-            PackageInstaller.STATUS_FAILURE_ABORTED -> AppLog.i("update: cancelled by the user")
-            else -> report(Failure(Kind.INSTALL, "status $st"))
+            PackageInstaller.STATUS_FAILURE_ABORTED -> {
+                AppLog.i("update: cancelled by the user")
+                // Others are the sessions install() abandoned itself.
+                if (ours) event(ctx, "cancelled")
+            }
+            else -> {
+                report(Failure(Kind.INSTALL, "status $st"))
+                event(ctx, "failed", Kind.INSTALL.tag)
+            }
         }
     }
 
@@ -272,6 +305,7 @@ object Updater {
         // It arrives through a mutable PendingIntent: start only the system's own dialog.
         if (confirm == null || confirm.action !in confirmActions) {
             report(Failure(Kind.INSTALL, "confirm action ${confirm?.action}"))
+            event(ctx, "failed", "confirm")
             return
         }
         confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

@@ -114,7 +114,7 @@ func TestErrKind(t *testing.T) {
 		{errTimeout, "timeout"},
 		{&net.OpError{Op: "read", Net: "tcp", Err: timeoutErr{}}, "timeout"},
 		{context.DeadlineExceeded, "timeout"},
-		{fmt.Errorf("relay reply: %v", &net.OpError{Op: "read", Net: "tcp", Err: timeoutErr{}}), "i/o timeout"},
+		{fmt.Errorf("relay reply: %w", &net.OpError{Op: "read", Net: "tcp", Err: timeoutErr{}}), "timeout"},
 		{errors.New("dial tcp 195.0.2.1:443: connect: network is unreachable"), "network is unreachable"},
 		{errors.New("EOF"), "EOF"},
 	} {
@@ -393,7 +393,7 @@ func TestStart_UnreachableRelayIsNotAnError(t *testing.T) {
 	closed := ln.Addr().String()
 	ln.Close()
 	host := &fakeProtector{}
-	err := Start(9999, closed, "relay.test", "/app/x", testCred, "", "", "", "", host, nil)
+	err := Start(9999, closed, "relay.test", "/app/x", "", testCred, "", "", "", "", host, nil)
 	if err == nil || !strings.Contains(err.Error(), "fdbased") {
 		t.Fatalf("err = %v, want the fd failure after the probe", err)
 	}

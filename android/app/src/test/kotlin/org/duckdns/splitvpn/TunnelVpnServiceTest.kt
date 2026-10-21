@@ -442,7 +442,7 @@ class TunnelVpnServiceTest {
         Credentials.save(app, fakeCred(System.currentTimeMillis() / 1000 + 7 * 86400), test = true)
         rc(min = newer)
         svc.onStartCommand(
-            Intent(TunnelVpnService.ACTION_START).putExtra(TunnelVpnService.EXTRA_ENDPOINT, "cover.example.org|203.0.113.10|443|/test"),
+            Intent(TunnelVpnService.ACTION_START).putExtra(TunnelVpnService.EXTRA_ENDPOINT, "stand|cover.example.org|203.0.113.10|443|/test"),
             0, 1,
         )
         awaitState(VpnState.CONNECTED)

@@ -71,8 +71,37 @@ class QuotaTest {
         ShadowLooper.idleMainLooper()
     }
 
-    private fun quotaNotification() = shadowOf(app.getSystemService(NotificationManager::class.java)).allNotifications
-        .firstOrNull { it.extras.getString("android.title") == TunnelVpnService.ERR_QUOTA }
+    private val nm get() = app.getSystemService(NotificationManager::class.java)
+    private fun quotaNotification() = shadowOf(nm).getNotification(2)
+
+    private fun exhaust() {
+        start()
+        be.used = 2048 * mb
+        be.startedHost!!.quotaExceeded()
+        awaitState(VpnState.ERROR)
+        awaitServiceThreads()
+    }
+
+    @Test
+    fun quotaNotificationSaysWhy() {
+        exhaust()
+        val n = quotaNotification()!!
+        assertEquals("Split VPN выключен", n.extras.getString(android.app.Notification.EXTRA_TITLE))
+        assertEquals("Дневной лимит трафика исчерпан. Включите VPN снова после 00:00", n.extras.getString(android.app.Notification.EXTRA_TEXT))
+        assertEquals("quota_channel", n.channelId)
+    }
+
+    // A start refused on the limit: the permission notice is stale, the quota one is not.
+    @Test
+    fun startRefusedOnTheLimitDropsThePermNoticeKeepsTheQuotaOne() {
+        exhaust()
+        nm.notify(TunnelVpnService.PERM_NOTIFICATION_ID, android.app.Notification.Builder(app, "quota_channel").setSmallIcon(android.R.drawable.ic_menu_compass).build())
+        svc.onStartCommand(Intent(TunnelVpnService.ACTION_START), 0, 2)
+        awaitState(VpnState.ERROR)
+        assertEquals(TunnelVpnService.ERR_QUOTA, TunnelState.lastError)
+        assertNull(shadowOf(nm).getNotification(TunnelVpnService.PERM_NOTIFICATION_ID))
+        assertNotNull(quotaNotification())
+    }
 
     @Test
     fun defaultLimitIsTwoGigabytesAndRcCanChangeOrLiftIt() {

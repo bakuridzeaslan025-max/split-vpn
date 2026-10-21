@@ -335,6 +335,10 @@ func SetStrategies(js string) string {
 	return strings.Join(problems, "; ")
 }
 
+// StrategyCount: how many strategies SetStrategies kept; 0 is direct
+// YouTube off.
+func StrategyCount() int { return len(strategiesNow()) }
+
 // tlsRecSplit cuts the single TLS record of h at each of ps (ascending,
 // offsets in h) into several records.
 func tlsRecSplit(h []byte, ps []int) []byte {

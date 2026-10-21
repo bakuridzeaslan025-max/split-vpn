@@ -98,10 +98,12 @@ class VpnHarness {
      * single one; on a running tunnel it is a new list, the start itself is skipped.
      * [quotaMb]: the daily limit, as if from Remote Config; it stays until the next one.
      * [quotaReset]: today's count starts from zero.
+     * [fromUi] false: a start as boot's or the resume on create, without the services
+     * (the service takes the last run's); [services] are ignored then.
      */
-    fun start(vararg services: String, forgetCred: Boolean = false, rcList: String? = null, quotaMb: Long? = null, quotaReset: Boolean = false, direct: Boolean? = null) {
+    fun start(vararg services: String, forgetCred: Boolean = false, rcList: String? = null, quotaMb: Long? = null, quotaReset: Boolean = false, direct: Boolean? = null, fromUi: Boolean = true) {
         val i = Intent(ctx, TunnelVpnService::class.java).setAction(TunnelVpnService.ACTION_START)
-            .putStringArrayListExtra(TunnelVpnService.EXTRA_SERVICES, arrayListOf(*services))
+        if (fromUi) i.putStringArrayListExtra(TunnelVpnService.EXTRA_SERVICES, arrayListOf(*services))
         direct?.let { i.putExtra(TunnelVpnService.EXTRA_DIRECT, it) }
         quotaMb?.let { i.putExtra(TunnelVpnService.EXTRA_QUOTA_MB, it) }
         if (quotaReset) i.putExtra(TunnelVpnService.EXTRA_QUOTA_RESET, true)
@@ -117,15 +119,15 @@ class VpnHarness {
 
     /** The stand's endpoint with another path (testenv/nginx.conf) or port. */
     fun stand(path: String? = null, port: Int? = null): String {
-        val (host, ip, p, pth) = endpoint!!.split("|")
-        return listOf(host, ip, port ?: p, path ?: pth).joinToString("|")
+        val (id, host, ip, p, pth) = endpoint!!.split("|")
+        return listOf(id, host, ip, port ?: p, path ?: pth).joinToString("|")
     }
 
-    /** Decrypted Remote Config JSON of "host|ip|port|path" entries. */
+    /** Decrypted Remote Config JSON of "id|host|ip|port|path" entries. */
     fun rcList(vararg eps: String) = org.json.JSONArray(
         eps.map { e ->
-            val (host, ip, port, path) = e.split("|")
-            org.json.JSONObject().put("host", host).put("ip", ip).put("port", port.toInt()).put("path", path)
+            val (id, host, ip, port, path) = e.split("|")
+            org.json.JSONObject().put("id", id).put("host", host).put("ip", ip).put("port", port.toInt()).put("path", path)
         },
     ).toString()
 
