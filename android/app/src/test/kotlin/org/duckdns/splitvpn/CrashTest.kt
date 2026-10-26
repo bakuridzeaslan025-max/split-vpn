@@ -33,6 +33,25 @@ class CrashTest {
     }
 
     /**
+     * A debug build installed over release leaves the SDK's flag off, and
+     * release must turn it back on in each process, or it never sends again.
+     */
+    @Test
+    fun releaseTurnsAnalyticsOnInEachProcess() {
+        val app = RuntimeEnvironment.getApplication()
+        val real = Analytics.setCollection
+        val calls = mutableListOf<Boolean>()
+        Analytics.setCollection = { _, on -> calls += on }
+        try {
+            Analytics.start(app, "ui", debug = false)
+            Analytics.start(app, "vpn", debug = false)
+        } finally {
+            Analytics.setCollection = real
+        }
+        assertEquals(listOf(true, true), calls)
+    }
+
+    /**
      * Unit tests must never reach the production dashboard. They did once: a
      * NullPointerException from ShadowService showed up among the users'
      * crashes, because the real SDK picks up the real google-services.json.

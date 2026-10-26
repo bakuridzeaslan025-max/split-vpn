@@ -16,10 +16,28 @@ internal object Analytics {
 
     fun userProperty(ctx: Context, name: String, value: String) = analytics(ctx) { setUserProperty(name, value) }
 
-    fun setCollection(ctx: Context, on: Boolean) = analytics(ctx) {
-        setAnalyticsCollectionEnabled(on)
-        // Crash.init set it while collection was off, and the SDK dropped it.
-        if (on) Crash.userId(ctx)?.let(::setUserId)
+    // Swapped in unit tests: the real SDK there reports to the production property.
+    internal var setCollection: (Context, Boolean) -> Unit = { ctx, on ->
+        analytics(ctx) {
+            setAnalyticsCollectionEnabled(on)
+            // Crash.init set it while collection was off, and the SDK dropped it.
+            if (on) Crash.userId(ctx)?.let(::setUserId)
+        }
+    }
+
+    /**
+     * Each process's start, from [Crash.init]. Release turns collection on
+     * every time: a debug build, signed with the same key, installs over it
+     * with the data and leaves the SDK's flag off, and that flag outranks
+     * the manifest's. It did, for weeks, on a device that had run debug.
+     */
+    fun start(ctx: Context, process: String, debug: Boolean = BuildConfig.DEBUG) {
+        if (!debug) return setCollection(ctx, true)
+        analytics(ctx) { Crash.userId(ctx)?.let(::setUserId) }
+        // The SDK's flag outlives the process and goes off seconds late, so a
+        // test run's last START may leave it on for the next launch. Only
+        // :vpn turns it on, by EXTRA_ANALYTICS.
+        if (process == "ui") setCollection(ctx, false)
     }
 
     /** Numbers go as longs: GA sums them as custom metrics. */

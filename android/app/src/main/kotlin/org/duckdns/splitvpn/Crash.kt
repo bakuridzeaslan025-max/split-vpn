@@ -5,7 +5,6 @@ import android.content.Context
 import android.os.Build
 import android.provider.Settings
 import com.google.firebase.FirebaseApp
-import com.google.firebase.analytics.FirebaseAnalytics
 import com.google.firebase.crashlytics.FirebaseCrashlytics
 import java.math.BigInteger
 import java.security.MessageDigest
@@ -65,14 +64,7 @@ object Crash {
             scrubFatals()
         }
         // After the scrubbing and on its own: Analytics throwing must not cost it.
-        runCatching {
-            val analytics = FirebaseAnalytics.getInstance(ctx)
-            userId(ctx)?.let(analytics::setUserId)
-            // Debug: the SDK's flag outlives the process and goes off seconds
-            // late, so a test run's last START may leave it on for the next
-            // launch. Only :vpn turns it on, by EXTRA_ANALYTICS.
-            if (BuildConfig.DEBUG && process == "ui") analytics.setAnalyticsCollectionEnabled(false)
-        }
+        runCatching { Analytics.start(ctx, process) }
     }
 
     /**
