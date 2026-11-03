@@ -1,6 +1,8 @@
 package sfu
 
 import (
+	"strings"
+
 	"github.com/pion/webrtc/v4"
 
 	protocol "github.com/bakuridzeaslan025-max/split-vpn/vktransport/proto"
@@ -13,8 +15,13 @@ func turnInfoToICEServers(infos []protocol.TURNInfo) []webrtc.ICEServer {
 		if info.Address == "" {
 			continue
 		}
+		// Address is host:port after normalization; build a TURN URI for pion.
+		url := info.Address
+		if !strings.Contains(url, "://") && !strings.HasPrefix(url, "turn:") && !strings.HasPrefix(url, "turns:") {
+			url = "turn:" + url + "?transport=udp"
+		}
 		servers = append(servers, webrtc.ICEServer{
-			URLs:       []string{"turn:" + info.Address},
+			URLs:       []string{url},
 			Username:   info.Username,
 			Credential: info.Password,
 		})

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 
 	"github.com/pion/webrtc/v4"
 
@@ -48,6 +49,36 @@ func (s *Server) Listen(ctx context.Context, callID string) (net.Listener, error
 }
 
 func (s *Server) acceptLoop(ctx context.Context, ln *listener) {
+	var (
+		pcsMu sync.Mutex
+		pcs   []*webrtc.PeerConnection
+	)
+
+	defer func() {
+		pcsMu.Lock()
+		for _, pc := range pcs {
+			_ = pc.Close()
+		}
+		pcsMu.Unlock()
+	}()
+
+	addPC := func(pc *webrtc.PeerConnection) {
+		pcsMu.Lock()
+		pcs = append(pcs, pc)
+		pcsMu.Unlock()
+	}
+
+	removePC := func(pc *webrtc.PeerConnection) {
+		pcsMu.Lock()
+		for i, p := range pcs {
+			if p == pc {
+				pcs = append(pcs[:i], pcs[i+1:]...)
+				break
+			}
+		}
+		pcsMu.Unlock()
+	}
+
 	events := s.ph.WatchEvents(ctx)
 	for {
 		select {
@@ -67,13 +98,15 @@ func (s *Server) acceptLoop(ctx context.Context, ln *listener) {
 				if sdpOffer == "" {
 					continue
 				}
-				go s.handleOffer(ctx, ln, sdpOffer)
+				go s.handleOffer(ctx, ln, sdpOffer, addPC, removePC)
 			}
 		}
 	}
 }
 
-func (s *Server) handleOffer(ctx context.Context, ln *listener, sdpOffer string) {
+func (s *Server) handleOffer(ctx context.Context, ln *listener, sdpOffer string,
+	addPC func(*webrtc.PeerConnection), removePC func(*webrtc.PeerConnection)) {
+
 	iceServers := turnInfoToICEServers(s.ph.GetTURNInfo())
 
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
@@ -83,6 +116,16 @@ func (s *Server) handleOffer(ctx context.Context, ln *listener, sdpOffer string)
 		slog.Warn("sfu server create peer connection failed", "error", err)
 		return
 	}
+	addPC(pc)
+
+	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		if state == webrtc.PeerConnectionStateFailed ||
+			state == webrtc.PeerConnectionStateDisconnected ||
+			state == webrtc.PeerConnectionStateClosed {
+			removePC(pc)
+			_ = pc.Close()
+		}
+	})
 
 	offer := webrtc.SessionDescription{
 		Type: webrtc.SDPTypeOffer,
@@ -90,6 +133,7 @@ func (s *Server) handleOffer(ctx context.Context, ln *listener, sdpOffer string)
 	}
 	if err := pc.SetRemoteDescription(offer); err != nil {
 		slog.Warn("sfu server set remote description failed", "error", err)
+		removePC(pc)
 		_ = pc.Close()
 		return
 	}
@@ -97,18 +141,21 @@ func (s *Server) handleOffer(ctx context.Context, ln *listener, sdpOffer string)
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
 		slog.Warn("sfu server create answer failed", "error", err)
+		removePC(pc)
 		_ = pc.Close()
 		return
 	}
 
 	if err := pc.SetLocalDescription(answer); err != nil {
 		slog.Warn("sfu server set local description failed", "error", err)
+		removePC(pc)
 		_ = pc.Close()
 		return
 	}
 
 	if err := s.ph.SendAcceptProducer(answer.SDP); err != nil {
 		slog.Warn("sfu server send accept-producer failed", "error", err)
+		removePC(pc)
 		_ = pc.Close()
 		return
 	}

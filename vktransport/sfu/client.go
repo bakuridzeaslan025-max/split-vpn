@@ -32,7 +32,10 @@ func (c *Client) Connect(ctx context.Context, callID, serverPeerID string) (net.
 		return nil, fmt.Errorf("sfu client signaling connect: %w", err)
 	}
 
+	cleanup := func() { c.ph.Disconnect() }
+
 	if err := c.ph.NotifyVideoStream(true); err != nil {
+		cleanup()
 		return nil, fmt.Errorf("sfu client notify video stream: %w", err)
 	}
 
@@ -43,9 +46,11 @@ func (c *Client) Connect(ctx context.Context, callID, serverPeerID string) (net.
 	for {
 		select {
 		case <-ctx.Done():
+			cleanup()
 			return nil, ctx.Err()
 		case ev, ok := <-events:
 			if !ok {
+				cleanup()
 				return nil, errors.New("sfu client: event channel closed")
 			}
 			if ev.Type == platform.EventCallEnded {
@@ -58,6 +63,7 @@ func (c *Client) Connect(ctx context.Context, callID, serverPeerID string) (net.
 						reason = r
 					}
 				}
+				cleanup()
 				return nil, fmt.Errorf("sfu client: call ended: %s", reason)
 			}
 			if ev.Type == platform.EventRemoteMediaUpdated {
@@ -77,8 +83,17 @@ negotiate:
 		ICEServers: iceServers,
 	})
 	if err != nil {
+		cleanup()
 		return nil, fmt.Errorf("sfu client create peer connection: %w", err)
 	}
+
+	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		if state == webrtc.PeerConnectionStateFailed ||
+			state == webrtc.PeerConnectionStateDisconnected ||
+			state == webrtc.PeerConnectionStateClosed {
+			_ = pc.Close()
+		}
+	})
 
 	offer := webrtc.SessionDescription{
 		Type: webrtc.SDPTypeOffer,
@@ -86,22 +101,26 @@ negotiate:
 	}
 	if err := pc.SetRemoteDescription(offer); err != nil {
 		_ = pc.Close()
+		cleanup()
 		return nil, fmt.Errorf("sfu client set remote description: %w", err)
 	}
 
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
 		_ = pc.Close()
+		cleanup()
 		return nil, fmt.Errorf("sfu client create answer: %w", err)
 	}
 
 	if err := pc.SetLocalDescription(answer); err != nil {
 		_ = pc.Close()
+		cleanup()
 		return nil, fmt.Errorf("sfu client set local description: %w", err)
 	}
 
 	if err := c.ph.SendAcceptProducer(answer.SDP); err != nil {
 		_ = pc.Close()
+		cleanup()
 		return nil, fmt.Errorf("sfu client send accept-producer: %w", err)
 	}
 	slog.Debug("sfu client sent accept-producer")
@@ -120,6 +139,7 @@ negotiate:
 	select {
 	case <-ctx.Done():
 		_ = pc.Close()
+		cleanup()
 		return nil, ctx.Err()
 	case dc := <-dcCh:
 		slog.Info("sfu client data channel open", "label", dc.Label())
