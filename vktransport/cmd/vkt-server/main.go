@@ -10,29 +10,58 @@ import (
 	"net"
 
 	"github.com/bakuridzeaslan025-max/split-vpn/vktransport"
+	vkplatform "github.com/bakuridzeaslan025-max/split-vpn/vktransport/platform/vk"
+	"github.com/bakuridzeaslan025-max/split-vpn/vktransport/sfu"
 )
 
 func main() {
 	listen := flag.String("listen", ":4461", "UDP address for DTLS listener")
+	sfuMode := flag.Bool("sfu", false, "use SFU/DataChannel transport instead of DTLS")
+	callID := flag.String("call-id", "", "VK call ID (SFU mode)")
 	flag.Parse()
 
-	log.Printf("listening on %s", *listen)
-
-	ln, err := vktransport.Listen(context.Background(), vktransport.ServerConfig{
-		ListenAddr: *listen,
-	})
-	if err != nil {
-		log.Fatalf("listen: %v", err)
-	}
-	defer ln.Close()
-
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			log.Printf("accept: %v", err)
-			continue
+	if *sfuMode {
+		if *callID == "" {
+			log.Fatal("--call-id is required in SFU mode")
 		}
-		go handleConn(conn)
+
+		ph := &vkplatform.Handler{}
+		srv := sfu.NewServer(ph)
+		log.Printf("SFU listening on call %s", *callID)
+
+		ln, err := srv.Listen(context.Background(), *callID)
+		if err != nil {
+			log.Fatalf("sfu listen: %v", err)
+		}
+		defer ln.Close()
+
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				log.Printf("sfu accept: %v", err)
+				return
+			}
+			go handleConn(conn)
+		}
+	} else {
+		log.Printf("listening on %s", *listen)
+
+		ln, err := vktransport.Listen(context.Background(), vktransport.ServerConfig{
+			ListenAddr: *listen,
+		})
+		if err != nil {
+			log.Fatalf("listen: %v", err)
+		}
+		defer ln.Close()
+
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				log.Printf("accept: %v", err)
+				continue
+			}
+			go handleConn(conn)
+		}
 	}
 }
 

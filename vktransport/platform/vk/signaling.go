@@ -17,9 +17,9 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/sdp/v3"
-	"github.com/bakuridzeaslan025-max/split-vpn/vktransport/platform"
-
 	"github.com/bakuridzeaslan025-max/split-vpn/vktransport/common"
+	"github.com/bakuridzeaslan025-max/split-vpn/vktransport/platform"
+	protocol "github.com/bakuridzeaslan025-max/split-vpn/vktransport/proto"
 )
 
 // vkMessage stores one decoded VK signaling message
@@ -262,26 +262,31 @@ func (V *Handler) handleIncomingMessage(msg *vkMessage) []platform.Event {
 
 	switch msg.Notification {
 	case "connection":
-		/*if msg.Endpoint != "" {
-			V.endpoint = msg.Endpoint
-		}
 		if turnRaw, ok := msg.ConversationParams["turn"]; ok {
 			if turn, ok := turnRaw.(map[string]any); ok {
-				V.turnUser = common.StringifyAny(turn["username"])
-				V.turnPass = common.FirstNonEmpty(common.StringifyAny(turn["credential"]), common.StringifyAny(turn["password"]))
+				turnUser := common.StringifyAny(turn["username"])
+				turnPass := common.FirstNonEmpty(common.StringifyAny(turn["credential"]), common.StringifyAny(turn["password"]))
 				if urls, ok := turn["urls"].([]any); ok {
 					raw := make([]string, 0, len(urls))
 					for _, u := range urls {
 						raw = append(raw, common.StringifyAny(u))
 					}
 					addresses := normalizeTurnAddresses(raw)
-					if len(addresses) > 0 {
-						V.turnAddr = addresses[0]
-						V.turnAddrs = addresses
+					turnInfos := make([]protocol.TURNInfo, len(addresses))
+					for i, addr := range addresses {
+						turnInfos[i] = protocol.TURNInfo{
+							Address:  addr,
+							Username: turnUser,
+							Password: turnPass,
+						}
+					}
+					if len(turnInfos) > 0 {
+						V.turnInfos = turnInfos
+						slog.Debug("vk signaling turn credentials updated from connection", "servers", len(turnInfos))
 					}
 				}
 			}
-		}*/
+		}
 		return V.handleConnectionSnapshot(msg.Conversation)
 	case "producer-updated":
 		remoteMedia, err := parseRemoteMediaDescription(msg.Description)
@@ -293,7 +298,7 @@ func (V *Handler) handleIncomingMessage(msg *vkMessage) []platform.Event {
 			}}
 		}
 		V.remoteMedia = remoteMedia
-		// TODO: send accept-producer response with SDP answer
+		V.remoteMediaSDP = msg.Description
 		return []platform.Event{{Type: platform.EventRemoteMediaUpdated, Payload: cloneRemoteMediaInfo(remoteMedia)}}
 	case "participant-joined":
 		participantID := int64(msg.ParticipantID)
@@ -575,6 +580,13 @@ func marshalCommandJSON(command string, sequence int, payload map[string]any) ([
 	}
 	out.WriteByte('}')
 	return out.Bytes(), nil
+}
+
+// SendAcceptProducer sends an accept-producer response with the given SDP answer
+func (V *Handler) SendAcceptProducer(sdpAnswer string) error {
+	return V.writeSimpleCommand("accept-producer", map[string]any{
+		"description": sdpAnswer,
+	})
 }
 
 // cloneRemoteMediaInfo copies the parsed remote media snapshot for safe external use

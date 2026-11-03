@@ -57,7 +57,8 @@ type Handler struct {
 
 	participantsByID  map[int64]*vkParticipant // call participants by ID
 	participantByPeer map[string]int64         // participant IDs by peer ID
-	remoteMedia       platform.RemoteMediaInfo // remote media description
+	remoteMedia    platform.RemoteMediaInfo // remote media description
+	remoteMediaSDP string                  // raw SDP from the latest producer-updated
 	videoTrackSlots   int                      // video track slots in use
 
 	subscribers    map[int]chan platform.Event // event subscribers by ID
@@ -133,6 +134,14 @@ func (V *Handler) GetRemoteMedia() platform.RemoteMediaInfo {
 	V.mu.RLock()
 	defer V.mu.RUnlock()
 	return cloneRemoteMediaInfo(V.remoteMedia)
+}
+
+// GetRemoteMediaSDP returns the raw SDP from the latest producer-updated notification
+func (V *Handler) GetRemoteMediaSDP() string {
+	V.ensureInit()
+	V.mu.RLock()
+	defer V.mu.RUnlock()
+	return V.remoteMediaSDP
 }
 
 // GetUsersBySourceIDs resolves participant or peer IDs to names when the roster contains them

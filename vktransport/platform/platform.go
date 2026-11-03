@@ -19,7 +19,9 @@ type Handler interface {
 	NotifyVideoStream(active bool) error                               // Notifies the signaling server that a video stream was started
 	GetPeers() []PeerInfo                                              // Returns all currently known peers connected to the call
 	GetRemoteMedia() RemoteMediaInfo                                   // Returns the latest parsed remote media description from signaling
+	GetRemoteMediaSDP() string                                         // Returns the raw SDP from the latest producer-updated notification
 	GetUsersBySourceIDs(sourceIDs []string) (map[string]string, error) // Resolves peer or participant IDs to user IDs when available
+	SendAcceptProducer(sdpAnswer string) error                        // Sends accept-producer with an SDP answer to the signaling server
 	WatchEvents(ctx context.Context) <-chan Event                      // Emits signaling events
 }
 
