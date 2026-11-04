@@ -18,6 +18,7 @@ func main() {
 	listen := flag.String("listen", ":4461", "UDP address for DTLS listener")
 	sfuMode := flag.Bool("sfu", false, "use SFU/DataChannel transport instead of DTLS")
 	callID := flag.String("call-id", "", "VK call ID (SFU mode)")
+	name := flag.String("name", "vkt-server", "display name in the VK call")
 	flag.Parse()
 
 	if *sfuMode {
@@ -26,6 +27,9 @@ func main() {
 		}
 
 		ph := &vkplatform.Handler{}
+		if err := ph.Authorize(*callID, *name); err != nil {
+			log.Fatalf("authorize: %v", err)
+		}
 		srv := sfu.NewServer(ph)
 		log.Printf("SFU listening on call %s", *callID)
 

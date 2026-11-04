@@ -25,10 +25,6 @@ func NewServer(ph platform.Handler) *Server {
 
 // Listen joins the VK call and returns a net.Listener that yields DataChannel connections.
 func (s *Server) Listen(ctx context.Context, callID string) (net.Listener, error) {
-	if err := s.ph.Authorize(callID, ""); err != nil {
-		return nil, fmt.Errorf("sfu server authorize: %w", err)
-	}
-
 	if err := s.ph.Connect(); err != nil {
 		return nil, fmt.Errorf("sfu server signaling connect: %w", err)
 	}

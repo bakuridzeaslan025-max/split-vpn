@@ -16,6 +16,7 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:1080", "local TCP address for proxy")
 	sfuMode := flag.Bool("sfu", false, "use SFU/DataChannel transport instead of DTLS")
 	peerID := flag.String("peer-id", "", "server peer ID in the VK call (SFU mode)")
+	name := flag.String("name", "vkt-client", "display name in the VK call")
 	flag.Parse()
 
 	if *callID == "" {
@@ -27,6 +28,9 @@ func main() {
 
 	if *sfuMode {
 		ph := &vkplatform.Handler{}
+		if err := ph.Authorize(*callID, *name); err != nil {
+			log.Fatalf("authorize: %v", err)
+		}
 		client := sfu.NewClient(ph)
 		serverPeer := *peerID
 		log.Printf("SFU connecting to call %s (peer %s)", *callID, serverPeer)

@@ -71,6 +71,21 @@ func (V *Handler) Connect() error {
 	}
 	V.connMu.Unlock()
 
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("parse signaling endpoint: %w", err)
+	}
+	q := u.Query()
+	q.Set("platform", "WEB")
+	q.Set("appVersion", vkCallsClientVer)
+	q.Set("version", "5")
+	q.Set("device", "browser")
+	q.Set("capabilities", "2F7F")
+	q.Set("clientType", "VK")
+	q.Set("tgt", "join")
+	u.RawQuery = q.Encode()
+	endpoint = u.String()
+
 	header := http.Header{}
 	header.Set("Origin", "https://vk.ru")
 	header.Set("User-Agent", profile.UserAgent)
@@ -81,6 +96,7 @@ func (V *Handler) Connect() error {
 	wsDialer := &websocket.Dialer{
 		NetDialContext:   common.ResolverDialContext(),
 		HandshakeTimeout: 45 * time.Second,
+		WriteBufferSize:  256 << 10,
 	}
 	conn, _, err := wsDialer.DialContext(ctx, endpoint, header)
 	if err != nil {
@@ -260,6 +276,8 @@ func (V *Handler) handleIncomingMessage(msg *vkMessage) []platform.Event {
 	V.mu.Lock()
 	defer V.mu.Unlock()
 
+	slog.Info("vk signaling notification", "notification", msg.Notification, "response", msg.Response, "type", msg.Type)
+
 	switch msg.Notification {
 	case "connection":
 		if turnRaw, ok := msg.ConversationParams["turn"]; ok {
@@ -328,6 +346,7 @@ func (V *Handler) handleIncomingMessage(msg *vkMessage) []platform.Event {
 			}
 		}
 	case "hungup", "closed-conversation":
+		slog.Info("vk signaling call ended notification", "notification", msg.Notification, "reason", msg.Reason, "description", msg.Description)
 		return []platform.Event{{Type: platform.EventCallEnded, Metadata: map[string]string{"reason": common.FirstNonEmpty(msg.Reason, msg.Notification)}}}
 	}
 	return nil
@@ -384,12 +403,8 @@ func (V *Handler) handleConnectionSnapshot(conversation map[string]any) []platfo
 	return events
 }
 
-// runSignalingLoop owns websocket reads and periodic pings for the active connection
+// runSignalingLoop owns websocket reads for the active connection
 func (V *Handler) runSignalingLoop(ctx context.Context, conn *websocket.Conn) {
-	const pingInterval = 5 * time.Second
-
-	pingTicker := time.NewTicker(pingInterval)
-	defer pingTicker.Stop()
 
 	type readResult struct {
 		messageType int
@@ -423,20 +438,6 @@ func (V *Handler) runSignalingLoop(ctx context.Context, conn *websocket.Conn) {
 		case <-ctx.Done():
 			_ = conn.Close()
 			return
-		case <-pingTicker.C:
-			V.connMu.Lock()
-			if V.conn == conn {
-				if err := conn.WriteControl(
-					websocket.PingMessage,
-					nil,
-					time.Now().Add(2*time.Second),
-				); err != nil {
-					V.connMu.Unlock()
-					terminate(err)
-					return
-				}
-			}
-			V.connMu.Unlock()
 		case result := <-readCh:
 			if result.err != nil {
 				terminate(result.err)
@@ -445,7 +446,15 @@ func (V *Handler) runSignalingLoop(ctx context.Context, conn *websocket.Conn) {
 			if result.messageType != websocket.TextMessage {
 				continue
 			}
-			if string(result.payload) == "pong" || string(result.payload) == "ping" {
+			if string(result.payload) == "pong" {
+				continue
+			}
+			if string(result.payload) == "ping" {
+				V.connMu.Lock()
+				if V.conn == conn {
+					_ = conn.WriteMessage(websocket.TextMessage, []byte("pong"))
+				}
+				V.connMu.Unlock()
 				continue
 			}
 
@@ -470,6 +479,9 @@ func (V *Handler) runSignalingLoop(ctx context.Context, conn *websocket.Conn) {
 					"vk signaling error message",
 					"bytes", len(result.payload),
 					"response", msg.Response,
+					"description", msg.Description,
+					"reason", msg.Reason,
+					"raw", compactPayloadPreview(result.payload, 300),
 				)
 				continue
 			}

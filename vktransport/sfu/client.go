@@ -24,10 +24,6 @@ func NewClient(ph platform.Handler) *Client {
 
 // Connect joins the VK call, negotiates WebRTC via SFU, and returns a net.Conn over DataChannel.
 func (c *Client) Connect(ctx context.Context, callID, serverPeerID string) (net.Conn, error) {
-	if err := c.ph.Authorize(callID, ""); err != nil {
-		return nil, fmt.Errorf("sfu client authorize: %w", err)
-	}
-
 	if err := c.ph.Connect(); err != nil {
 		return nil, fmt.Errorf("sfu client signaling connect: %w", err)
 	}
