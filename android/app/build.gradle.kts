@@ -144,6 +144,9 @@ android {
     }
 
     testOptions.unitTests.isIncludeAndroidResources = true
+
+    // Stored uncompressed, libgojni.so adds its full 19 MB to every download, including self-update.
+    packaging.jniLibs.useLegacyPackaging = true
 }
 
 dependencies {
