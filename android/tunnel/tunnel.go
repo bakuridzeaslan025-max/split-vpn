@@ -35,6 +35,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 	"gvisor.dev/gvisor/pkg/waiter"
+	"splitvpn.local/shared"
 )
 
 // Fake resolver address inside the TUN. Must match TunnelVpnService.
@@ -940,6 +941,9 @@ func dialRelay(ctx context.Context, cred []byte, dstIP net.IP, dstPort uint16) (
 	if overQuota() {
 		return nil, errQuota
 	}
+	if fb := shared.Active(); fb != nil {
+		return dialFallback(ctx, fb, dstIP, dstPort)
+	}
 	if err := health.allow(); err != nil {
 		return nil, err
 	}
@@ -969,6 +973,71 @@ func dialRelay(ctx context.Context, cred []byte, dstIP net.IP, dstPort uint16) (
 	}
 	c.SetWriteDeadline(time.Time{})
 	return c, nil
+}
+
+// dialFallback goes through the fallback's own exit, which is told the
+// destination by Dial: no upgrade and no 7-byte header, the stream is the app's
+// bytes from the start. It reports nothing to health or relayAlive: the host
+// would hear the relay is back and switch the fallback off.
+func dialFallback(ctx context.Context, fb shared.Fallback, dstIP net.IP, dstPort uint16) (net.Conn, error) {
+	rawConn, err := fb.Dial(ctx, "tcp", fmt.Sprintf("%s:%d", dstIP, dstPort))
+	if err != nil {
+		fallbackDialFailed(err)
+		return nil, err
+	}
+	fallbackErrs.Lock()
+	clear(fallbackErrs.seen)
+	fallbackErrs.Unlock()
+	c := &trackedConn{Conn: &quotaConn{rawConn}}
+	if !trackConn(c) {
+		rawConn.Close()
+		return nil, fmt.Errorf("stopped")
+	}
+	return c, nil
+}
+
+// fallbackErrs: kinds logged since the last fallback dial that worked. The
+// callers stay quiet while health.down(), which is when the fallback is on, so
+// this is the only record of it failing. By errKind, not by text: socket errors
+// carry the local port, and every failure would count as a new one.
+var fallbackErrs = struct {
+	sync.Mutex
+	seen map[string]bool
+}{seen: map[string]bool{}}
+
+func fallbackDialFailed(err error) {
+	kind := errKind(err)
+	fallbackErrs.Lock()
+	logged := fallbackErrs.seen[kind]
+	fallbackErrs.seen[kind] = true
+	fallbackErrs.Unlock()
+	if !logged {
+		log.Printf("fallback: dial failed: %v", err)
+	}
+}
+
+// quotaConn counts the quota both ways, as bufConn does for a relay session.
+type quotaConn struct {
+	net.Conn
+}
+
+func (c *quotaConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	countQuota(n)
+	return n, err
+}
+
+func (c *quotaConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	countQuota(n)
+	return n, err
+}
+
+func (c *quotaConn) CloseWrite() error {
+	if hc, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return hc.CloseWrite()
+	}
+	return nil
 }
 
 // relayRootCAs is nil in production (system roots); tests inject their own.

@@ -17,18 +17,26 @@ docker-image:
 # build as key_gen.go with raw bytes, deleted right after: -ldflags -X would
 # also leave it as text in the .so's build info. Without it the build still
 # works, the app just has no endpoints.
+# Bound from bind/, so tunnel and vkfallback share one Go runtime. No go mod
+# verify there: it fails with "missing ziphash" on tunnel, whose module path has
+# no dot. android/ also holds the signing key and rc-sa.json: mount only the
+# modules.
 tunnel: docker-image
 	mkdir -p app/libs
 	RC_KEY=$$(sed -n 's/^rc\.key[[:space:]]*=[[:space:]]*//p' local.properties 2>/dev/null | tr -d ' \r'); \
 	if [ -z "$$RC_KEY" ]; then echo "warning: no rc.key in local.properties, the app will not decrypt its endpoints"; \
 	elif ! echo "$$RC_KEY" | grep -qE '^[0-9a-fA-F]{64}$$'; then echo "rc.key: expected 64 hex chars"; exit 1; fi; \
 	RC_KEY=$$RC_KEY docker run --rm --platform linux/amd64 \
-		-v $(CURDIR)/tunnel:/src -v tunnel-gomod:/go/pkg/mod -e RC_KEY \
+		-v $(CURDIR)/tunnel:/src/tunnel -v $(CURDIR)/shared:/src/shared:ro \
+		-v $(CURDIR)/vkfallback:/src/vkfallback:ro -v $(CURDIR)/bind:/src/bind:ro \
+		-w /src/bind -v tunnel-gomod:/go/pkg/mod -e RC_KEY \
 		$(DOCKER_IMAGE):$(DOCKER_TAG) \
-		sh -c 'trap "rm -f key_gen.go" EXIT; \
+		sh -c 'trap "rm -f ../tunnel/key_gen.go" EXIT; \
 			if [ -n "$$RC_KEY" ]; then \
-				printf "package tunnel\n\nfunc init() { endpointsKey = []byte{%s} }\n" "$$(echo $$RC_KEY | sed "s/../0x&,/g")" > key_gen.go; fi; \
-			go mod verify && gomobile bind -target=android/arm64 -androidapi 26 -ldflags "-extldflags=-Wl,-z,max-page-size=16384" -o tunnel.aar .'
+				printf "package tunnel\n\nfunc init() { endpointsKey = []byte{%s} }\n" "$$(echo $$RC_KEY | sed "s/../0x&,/g")" > ../tunnel/key_gen.go; fi; \
+			(cd ../tunnel && go mod verify) && (cd ../vkfallback && go mod verify) && go mod tidy -diff && \
+			gomobile bind -target=android/arm64 -androidapi 26 -tags olcrtc_lean,olcrtc_vkcalls \
+				-ldflags "-checklinkname=0 -extldflags=-Wl,-z,max-page-size=16384" -o ../tunnel/tunnel.aar tunnel splitvpn.local/vkfallback'
 	mv tunnel/tunnel.aar app/libs/tunnel.aar
 
 test: rc-test adblock-test tunnel-test shared-test vkfallback-test
@@ -37,7 +45,8 @@ test: rc-test adblock-test tunnel-test shared-test vkfallback-test
 # The strategy vector is shared by the tunnel and rc/tool (see desync.go).
 tunnel-test:
 	cmp tunnel/testdata/strategies.json ../rc/tool/testdata/strategies.json
-	docker run --rm --platform linux/amd64 -v $(CURDIR)/tunnel:/src -w /src -v tunnel-gomod:/go/pkg/mod $(GO_IMAGE) \
+	docker run --rm --platform linux/amd64 -v $(CURDIR)/tunnel:/src/tunnel -v $(CURDIR)/shared:/src/shared:ro \
+		-w /src/tunnel -v tunnel-gomod:/go/pkg/mod $(GO_IMAGE) \
 		sh -c 'go mod verify && go mod tidy -diff && go vet ./... && go test -race ./...'
 
 shared-test:
