@@ -1,0 +1,14 @@
+# One process per user: `make up NAME=<name>`, each its own compose project.
+# Nothing listens: signaling and media are outbound only.
+services:
+  olcrtc:
+    image: vkserver-olcrtc:${ARCH:-arm64}
+    # Bounded, not "always": each restart is a new join to VK, and a loop of them
+    # brings captchas. After a reboot, `make up` again.
+    restart: on-failure:5
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+    volumes:
+      - ./run/${NAME:?}.yaml:/config.yaml:ro

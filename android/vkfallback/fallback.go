@@ -62,6 +62,8 @@ type timing struct {
 	restartGap  time.Duration // the least time between a start and a restart for the network
 	joinBudget  int           // joins allowed inside joinWindow, whatever became of them
 	joinWindow  time.Duration
+	dayBudget   int // the same over dayWindow
+	dayWindow   time.Duration
 	retryBase   time.Duration
 	retryMax    time.Duration
 	captchaBase time.Duration
@@ -79,6 +81,8 @@ var defaultTiming = timing{
 	restartGap:  30 * time.Second,
 	joinBudget:  6,
 	joinWindow:  time.Hour,
+	dayBudget:   24,
+	dayWindow:   24 * time.Hour,
 	retryBase:   15 * time.Second,
 	retryMax:    5 * time.Minute,
 	captchaBase: time.Minute,
@@ -134,6 +138,9 @@ type fallback struct {
 	notBefore   time.Time
 	captchaHold bool   // notBefore came from a captcha
 	reason      string // why the last start or call failed
+	budgetTold  bool   // the host heard this Enable's refusal for the budget
+	maxJoins    int    // lowers dayBudget when above 0
+	statePath   string // the ledger; empty: joins live in memory only
 
 	networkDown bool
 	netEventAt  time.Time
@@ -146,7 +153,9 @@ type fallback struct {
 }
 
 func newFallback(eng engine) *fallback {
-	f := &fallback{eng: eng, t: defaultTiming, now: time.Now}
+	// Round(0) drops the monotonic reading: it stops in suspend, and an hour's
+	// window would last all night. Only VK's clock counts here.
+	f := &fallback{eng: eng, t: defaultTiming, now: func() time.Time { return time.Now().Round(0) }}
 	f.base = f.now()
 	eng.SetSessionHandler(f.sessionOpened)
 	return f
@@ -175,6 +184,12 @@ func (f *fallback) setDNS(servers string) error {
 	return nil
 }
 
+func (f *fallback) setMaxJoins(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.maxJoins = n
+}
+
 func (f *fallback) enable(p Protector, h Host) error {
 	if p == nil {
 		return errNoProtector
@@ -192,6 +207,7 @@ func (f *fallback) enable(p Protector, h Host) error {
 	f.host = h
 	f.enabledAt = f.now()
 	f.helped = false
+	f.budgetTold = false
 	shared.Register(f)
 	return nil
 }
@@ -285,6 +301,15 @@ func (f *fallback) acquire() (*run, error) {
 		return nil, errBackoff
 	case f.budgetSpentLocked():
 		f.reason = reasonBudget
+		// Without this the UI keeps promising a call that is refused for up to
+		// the window. Once: apps retry often. On its own goroutine: mu is held.
+		if !f.budgetTold {
+			f.budgetTold = true
+			go func() {
+				defer f.guard("budget event", nil)
+				f.emit(eventConnect, resultFail, reasonBudget, 0, 0)
+			}()
+		}
 		return nil, errBudget
 	}
 	// Only here and on traffic: dials that keep failing must not hold a call
@@ -298,7 +323,9 @@ func (f *fallback) startLocked() *run {
 	f.cur = r
 	f.lastStart = r.startedAt
 	f.joins = append(f.joins, r.startedAt)
+	f.saveLedgerLocked()
 	f.resume = false
+	f.budgetTold = false
 	go f.connect(r)
 	return r
 }
@@ -306,9 +333,34 @@ func (f *fallback) startLocked() *run {
 // budgetSpentLocked bounds what the pauses cannot: a call that works and then
 // dies, a network that keeps clearing them, rejoins inside olcrtc.
 func (f *fallback) budgetSpentLocked() bool {
-	cutoff := f.now().Add(-f.t.joinWindow)
+	now := f.now()
+	f.pruneJoinsLocked(now)
+	hour := now.Add(-f.t.joinWindow)
+	inHour := 0
+	for _, t := range f.joins {
+		if t.After(hour) {
+			inHour++
+		}
+	}
+	day := f.t.dayBudget
+	if f.maxJoins > 0 {
+		day = min(day, f.maxJoins)
+	}
+	return inHour >= f.t.joinBudget || len(f.joins) >= day
+}
+
+// pruneJoinsLocked keeps the longest window. A join from the future means the
+// clock went back: VK still saw it, so it counts as made now. Dropped, it would
+// refill the caps; kept as is, it would hold the window shut for as long as the
+// clock moved.
+func (f *fallback) pruneJoinsLocked(now time.Time) {
+	cutoff := now.Add(-f.t.dayWindow)
 	f.joins = slices.DeleteFunc(f.joins, func(t time.Time) bool { return !t.After(cutoff) })
-	return len(f.joins) >= f.t.joinBudget
+	for i, t := range f.joins {
+		if t.After(now) {
+			f.joins[i] = now
+		}
+	}
 }
 
 // sessionOpened hears a session open inside olcrtc, under its reconnect lock:
@@ -325,6 +377,7 @@ func (f *fallback) sessionOpened() {
 		return
 	}
 	f.joins = append(f.joins, f.now())
+	f.saveLedgerLocked()
 	if r == nil || !f.budgetSpentLocked() {
 		return
 	}
@@ -336,6 +389,7 @@ func (f *fallback) sessionOpened() {
 		off = f.offEventLocked(offError)
 	}
 	go func() {
+		defer f.guard("stop at the budget", nil)
 		f.stopEngine()
 		off()
 	}()
@@ -367,6 +421,7 @@ func (f *fallback) dialed(r *run) bool {
 }
 
 func (f *fallback) connect(r *run) {
+	defer f.guard("connect", r)
 	err := f.startEngine(r)
 	if err == nil {
 		err = f.eng.WaitReady(int(f.t.connect.Milliseconds()))
@@ -498,6 +553,7 @@ func (f *fallback) failedLocked(step string) {
 	f.notBefore = f.now().Add(wait)
 	f.captchaHold = step == stepCaptcha
 	f.reason = step
+	f.saveLedgerLocked()
 }
 
 // offEventLocked resets the counters and returns the event, to send outside mu.
@@ -537,6 +593,7 @@ func (f *fallback) networkEvent(up bool) {
 }
 
 func (f *fallback) networkSettled() {
+	defer f.guard("network change", nil)
 	f.mu.Lock()
 	r := f.cur
 	switch {
@@ -557,21 +614,28 @@ func (f *fallback) networkSettled() {
 		f.mu.Unlock()
 		return
 	}
-	up := r != nil && !r.readyAt.IsZero()
 	if r != nil {
 		f.dropLocked(r)
 	}
 	f.resume = false
+	// A call worked and none replaces it, this one or the one NetworkLost stopped.
+	offIfUp := func(detail string) func() {
+		if f.activeSince.IsZero() {
+			return func() {}
+		}
+		return f.offEventLocked(detail)
+	}
 	off := func() {}
 	// A start here is the same join a Dial would make, so it obeys the same
 	// limits; and with nothing to carry, the next Dial can make it.
 	switch {
-	case f.now().Before(f.notBefore), f.isIdle():
+	case f.now().Before(f.notBefore):
+		off = offIfUp(offError)
+	case f.isIdle():
+		off = offIfUp(offIdle)
 	case f.budgetSpentLocked():
 		f.reason = reasonBudget
-		if up {
-			off = f.offEventLocked(offError)
-		}
+		off = offIfUp(offError)
 	default:
 		f.startLocked()
 	}

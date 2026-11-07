@@ -162,7 +162,7 @@ func debugTemplate(t *testing.T, eps ...endpoint) string {
     "daily_quota_mb": {"defaultValue": {"useInAppDefault": true}, "conditionalValues": {"build_debug": {"value": "1024"}}, "valueType": "NUMBER"},
     "yt_strategies": {"defaultValue": {"value": "[]"}, "conditionalValues": {"build_debug": {"value": "[{\"id\":\"none\",\"spec\":\"\"}]"}}, "valueType": "STRING"},
     "dial_event_bp": {"defaultValue": {"value": "0"}, "conditionalValues": {"build_debug": {"value": "25"}}, "valueType": "NUMBER"},
-    "turn_fallback": {"defaultValue": {"value": "false"}, "conditionalValues": {"build_debug": {"value": "true"}, "rollout": {"value": "true"}}, "valueType": "BOOLEAN"}
+    "vk_fallback": {"defaultValue": {"value": "false"}, "conditionalValues": {"build_debug": {"value": "true"}, "rollout": {"value": "true"}}, "valueType": "BOOLEAN"}
   }
 }`, blob)
 }
@@ -199,7 +199,7 @@ func TestPromoteWhenAllWork(t *testing.T) {
 			t.Errorf("%s: default %q, debug %q", k, d, dbg)
 		}
 	}
-	checkTurnFallbackUntouched(t, got)
+	checkVKFallbackUntouched(t, got)
 	if _, ok := got.condition(debugCondition); !ok {
 		t.Error("condition dropped")
 	}
@@ -225,27 +225,27 @@ func TestPromoteWhenAllWork(t *testing.T) {
 	}
 }
 
-// turn_fallback as debugTemplate has it: on in debug and in a console rollout,
+// vk_fallback as debugTemplate has it: on in debug and in a console rollout,
 // off by default.
-func checkTurnFallbackUntouched(t *testing.T, got template) {
+func checkVKFallbackUntouched(t *testing.T, got template) {
 	t.Helper()
 	for cond, want := range map[string]string{"": "false", debugCondition: "true", "rollout": "true"} {
-		if v, ok := got.value("turn_fallback", cond); !ok || v != want {
-			t.Errorf("turn_fallback[%s] = %q, %v; want %q", cond, v, ok, want)
+		if v, ok := got.value("vk_fallback", cond); !ok || v != want {
+			t.Errorf("vk_fallback[%s] = %q, %v; want %q", cond, v, ok, want)
 		}
 	}
 }
 
-// turn_fallback differing from build_debug is no reason to publish, and its
+// vk_fallback differing from build_debug is no reason to publish, and its
 // absence no reason to refuse.
-func TestPromoteLeavesTurnFallbackAlone(t *testing.T) {
+func TestPromoteLeavesVKFallbackAlone(t *testing.T) {
 	ep := endpoint{Host: "a.example", IP: "203.0.113.1", Port: 443, Path: "/app/test1", ID: "a"}
 	f, rc := newFake(t, debugTemplate(t, ep))
 	tm, etag, _ := rc.get()
 	if err := promote(rc, tm, etag, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	checkTurnFallbackUntouched(t, template(f.put))
+	checkVKFallbackUntouched(t, template(f.put))
 
 	f.calls = nil
 	tm, etag, _ = rc.get()
@@ -259,12 +259,12 @@ func TestPromoteLeavesTurnFallbackAlone(t *testing.T) {
 
 	f, rc = newFake(t, debugTemplate(t, ep))
 	tm, etag, _ = rc.get()
-	delete(tm["parameters"].(map[string]any), "turn_fallback")
+	delete(tm["parameters"].(map[string]any), "vk_fallback")
 	if err := promote(rc, tm, etag, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if p := template(f.put).findParam("turn_fallback"); p != nil {
-		t.Errorf("turn_fallback appeared: %v", p)
+	if p := template(f.put).findParam("vk_fallback"); p != nil {
+		t.Errorf("vk_fallback appeared: %v", p)
 	}
 }
 

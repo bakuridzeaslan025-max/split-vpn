@@ -102,7 +102,7 @@ func newFake(t *testing.T, tmpl string) (*fakeRC, *rcClient) {
 func boolPtr(b bool) *bool { return &b }
 
 var testConfig = config{MinVersion: 110, LatestVersion: 114, UpdateURL: "https://o.github.io/r/",
-	APKURL: releasesPrefix + "latest/download/split-vpn.apk", DailyQuotaMB: 1024, DialEventBP: 25, TurnFallback: boolPtr(true),
+	APKURL: releasesPrefix + "latest/download/split-vpn.apk", DailyQuotaMB: 1024, DialEventBP: 25, VKFallback: boolPtr(true),
 	YTStrategies: json.RawMessage(`[ {"id": "rec2", "spec": "rec=host+1,midsld"},
 	{"id": "none", "spec": ""} ]`)}
 
@@ -112,7 +112,7 @@ const consoleTemplate = `{
   "conditions": [{"name": "ru_only", "expression": "device.country in ['ru']"}],
   "parameters": {
     "endpoints": {"defaultValue": {"value": "DEFAULT"}, "conditionalValues": {"ru_only": {"value": "RU"}}, "valueType": "STRING"},
-    "turn_fallback": {"defaultValue": {"value": "false"}, "conditionalValues": {"ru_only": {"value": "true"}}, "valueType": "BOOLEAN"},
+    "vk_fallback": {"defaultValue": {"value": "false"}, "conditionalValues": {"ru_only": {"value": "true"}}, "valueType": "BOOLEAN"},
     "unrelated": {"defaultValue": {"value": "x"}}
   },
   "parameterGroups": {"versions": {"description": "d", "parameters": {"min_version": {"defaultValue": {"value": "100"}, "valueType": "NUMBER"}}}},
@@ -166,9 +166,9 @@ func TestPush(t *testing.T) {
 	check("apk_url", debugCondition, testConfig.APKURL)
 	check("daily_quota_mb", debugCondition, "1024")
 	check("dial_event_bp", debugCondition, "25")
-	check("turn_fallback", debugCondition, "true")
-	check("turn_fallback", "ru_only", "true")
-	check("turn_fallback", "", "false")
+	check("vk_fallback", debugCondition, "true")
+	check("vk_fallback", "ru_only", "true")
+	check("vk_fallback", "", "false")
 	check("yt_strategies", debugCondition, `[{"id":"rec2","spec":"rec=host+1,midsld"},{"id":"none","spec":""}]`)
 	check("unrelated", "", "x")
 	if _, dup := got["parameters"].(map[string]any)["min_version"]; dup {
@@ -318,31 +318,31 @@ func TestConfig(t *testing.T) {
 		if !strings.Contains(s, "dial_event_bp") {
 			s = strings.TrimSuffix(s, "}") + `,"dial_event_bp":0}`
 		}
-		if !strings.Contains(s, "turn_fallback") {
-			s = strings.TrimSuffix(s, "}") + `,"turn_fallback":false}`
+		if !strings.Contains(s, "vk_fallback") {
+			s = strings.TrimSuffix(s, "}") + `,"vk_fallback":false}`
 		}
 		return loadRaw(s)
 	}
-	const base = `{"min_version":114,"latest_version":115,"update_url":"https://o.github.io/r/","daily_quota_mb":2048,"dial_event_bp":0,"turn_fallback":false`
+	const base = `{"min_version":114,"latest_version":115,"update_url":"https://o.github.io/r/","daily_quota_mb":2048,"dial_event_bp":0,"vk_fallback":false`
 	for _, bp := range []string{"0", "1", "10000"} {
 		if err := load(`{"min_version":114,"latest_version":115,"update_url":"https://o.github.io/r/","daily_quota_mb":2048,"dial_event_bp":` + bp + `}`); err != nil {
 			t.Errorf("dial_event_bp %s: %v", bp, err)
 		}
 	}
 	for _, bp := range []string{"", `,"dial_event_bp":-1`, `,"dial_event_bp":10001`, `,"dial_event_bp":0.5`, `,"dial_event_bp":"1"`, `,"dial_event_bp":null`} {
-		if loadRaw(`{"min_version":114,"latest_version":115,"update_url":"https://o.github.io/r/","daily_quota_mb":2048,"turn_fallback":false,"yt_strategies":[]`+bp+"}") == nil {
+		if loadRaw(`{"min_version":114,"latest_version":115,"update_url":"https://o.github.io/r/","daily_quota_mb":2048,"vk_fallback":false,"yt_strategies":[]`+bp+"}") == nil {
 			t.Errorf("dial_event_bp %q: accepted", bp)
 		}
 	}
 	const noFlag = `{"min_version":114,"latest_version":115,"update_url":"https://o.github.io/r/","daily_quota_mb":2048,"dial_event_bp":0,"yt_strategies":[]`
-	for _, tf := range []string{`,"turn_fallback":true`, `,"turn_fallback":false`} {
+	for _, tf := range []string{`,"vk_fallback":true`, `,"vk_fallback":false`} {
 		if err := loadRaw(noFlag + tf + "}"); err != nil {
-			t.Errorf("turn_fallback %q: %v", tf, err)
+			t.Errorf("vk_fallback %q: %v", tf, err)
 		}
 	}
-	for _, tf := range []string{"", `,"turn_fallback":null`, `,"turn_fallback":"true"`, `,"turn_fallback":1`} {
+	for _, tf := range []string{"", `,"vk_fallback":null`, `,"vk_fallback":"true"`, `,"vk_fallback":1`} {
 		if loadRaw(noFlag+tf+"}") == nil {
-			t.Errorf("turn_fallback %q: accepted", tf)
+			t.Errorf("vk_fallback %q: accepted", tf)
 		}
 	}
 	if err := loadRaw(base + `,"yt_strategies":[{"id":"rec2","spec":"rec=host+1,midsld;cut=host+1,midsld"}]}`); err != nil {

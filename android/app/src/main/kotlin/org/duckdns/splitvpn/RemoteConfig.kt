@@ -3,8 +3,8 @@ package org.duckdns.splitvpn
 import android.content.Context
 
 /** Remote Config keys as fetched. */
-/** [dailyQuotaMb], [ytStrategies]: null when RC has no such key. [dialEventBp], [turnFallback]: already [RemoteConfig]'s parse's. */
-internal data class RcValues(val endpoints: String, val minVersion: Long, val latestVersion: Long, val updateUrl: String, val dailyQuotaMb: Long? = null, val ytStrategies: String? = null, val apkUrl: String = "", val dialEventBp: Int = 0, val turnFallback: Boolean = false)
+/** [dailyQuotaMb], [ytStrategies]: null when RC has no such key. [dialEventBp], [vkFallback]: already [RemoteConfig]'s parse's. */
+internal data class RcValues(val endpoints: String, val minVersion: Long, val latestVersion: Long, val updateUrl: String, val dailyQuotaMb: Long? = null, val ytStrategies: String? = null, val apkUrl: String = "", val dialEventBp: Int = 0, val vkFallback: Boolean = false)
 
 /**
  * The versions part of Remote Config; the UI gets it in VpnClient's snapshot.
@@ -37,7 +37,7 @@ internal object RemoteConfig {
     const val KEY_APK_URL = "rc.apk_url"
     const val KEY_YT_STRATEGIES = "rc.yt_strategies"
     const val KEY_DIAL_EVENT_BP = "rc.dial_event_bp"
-    const val KEY_TURN_FALLBACK = "rc.turn_fallback"
+    const val KEY_VK_FALLBACK = "rc.vk_fallback"
     private const val KEY_DROPPED = "rc.dropped_endpoints"
     // Two checks of one value, each with its own memory: one key would
     // make them report each other's value as new, by turns.
@@ -66,11 +66,11 @@ internal object RemoteConfig {
     fun dialEventBp(ctx: Context): Int =
         ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).getInt(KEY_DIAL_EVENT_BP, 0)
 
-    /** turn_fallback: the VK call channel. Off for anything but "true": no key, a typo in the console. */
-    fun parseTurnFallback(raw: String?) = raw?.trim() == "true"
+    /** vk_fallback: the VK call channel. Off for anything but "true": no key, a typo in the console. */
+    fun parseVkFallback(raw: String?) = raw?.trim() == "true"
 
-    fun turnFallback(ctx: Context): Boolean =
-        ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).getBoolean(KEY_TURN_FALLBACK, false)
+    fun vkFallback(ctx: Context): Boolean =
+        ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).getBoolean(KEY_VK_FALLBACK, false)
 
     /**
      * RC serves a broken blob on every fetch until someone publishes a fixed
@@ -93,7 +93,7 @@ internal object RemoteConfig {
                 .putString(KEY_UPDATE_URL, v.updateUrl)
                 .putString(KEY_APK_URL, v.apkUrl)
                 .putInt(KEY_DIAL_EVENT_BP, v.dialEventBp)
-                .putBoolean(KEY_TURN_FALLBACK, v.turnFallback)
+                .putBoolean(KEY_VK_FALLBACK, v.vkFallback)
                 .apply()
             Quota.setLimitMb(ctx, v.dailyQuotaMb)
             // Each entry is Go's to judge (it drops the broken ones); a value

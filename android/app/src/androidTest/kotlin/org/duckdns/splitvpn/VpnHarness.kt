@@ -30,12 +30,13 @@ class VpnHarness {
     @Volatile var state = VpnState.DISCONNECTED
     @Volatile var error: String? = null
     @Volatile var waiting: Waiting? = null
+    @Volatile var fallback: Fallback? = null
     val log = CopyOnWriteArrayList<String>()
 
     @Volatile private var synced = false
 
-    private val client = VpnClient(ctx) { s, e, l, _, w, _, _, _, _ ->
-        state = s; error = e; waiting = w; synced = true
+    private val client = VpnClient(ctx) { s, e, l, _, w, _, _, _, f ->
+        state = s; error = e; waiting = w; fallback = f; synced = true
         log.clear(); log.addAll(l)
     }
 
@@ -100,13 +101,20 @@ class VpnHarness {
      * [quotaReset]: today's count starts from zero.
      * [fromUi] false: a start as boot's or the resume on create, without the services
      * (the service takes the last run's); [services] are ignored then.
+     * [fallbackRoom], [fallbackKey], [fallbackForce], [fallbackMaxJoins]: the VK channel's debug
+     * extras. Always sent: the service keeps them in prefs across runs, and what a real VK test left
+     * there would send every other test's outage to real VK.
      */
-    fun start(vararg services: String, forgetCred: Boolean = false, rcList: String? = null, quotaMb: Long? = null, quotaReset: Boolean = false, direct: Boolean? = null, fromUi: Boolean = true) {
+    fun start(vararg services: String, forgetCred: Boolean = false, rcList: String? = null, quotaMb: Long? = null, quotaReset: Boolean = false, direct: Boolean? = null, fromUi: Boolean = true, fallbackRoom: String = "", fallbackKey: String = "", fallbackForce: Boolean = false, fallbackMaxJoins: Int = 0) {
         val i = Intent(ctx, TunnelVpnService::class.java).setAction(TunnelVpnService.ACTION_START)
         if (fromUi) i.putStringArrayListExtra(TunnelVpnService.EXTRA_SERVICES, arrayListOf(*services))
         direct?.let { i.putExtra(TunnelVpnService.EXTRA_DIRECT, it) }
         quotaMb?.let { i.putExtra(TunnelVpnService.EXTRA_QUOTA_MB, it) }
         if (quotaReset) i.putExtra(TunnelVpnService.EXTRA_QUOTA_RESET, true)
+        i.putExtra(TunnelVpnService.EXTRA_FALLBACK_ROOM, fallbackRoom)
+        i.putExtra(TunnelVpnService.EXTRA_FALLBACK_KEY, fallbackKey)
+        i.putExtra(TunnelVpnService.EXTRA_FALLBACK_FORCE, fallbackForce)
+        i.putExtra(TunnelVpnService.EXTRA_FALLBACK_MAX_JOINS, fallbackMaxJoins)
         if (endpoint != null) {
             if (rcList != null) i.putExtra(TunnelVpnService.EXTRA_RC_ENDPOINTS, rcList)
             else i.putExtra(TunnelVpnService.EXTRA_ENDPOINT, endpoint)
@@ -141,6 +149,22 @@ class VpnHarness {
             val status = s.getInputStream().bufferedReader().readLine()
             assertTrue("control: $status", status?.contains(" 200 ") == true)
         }
+    }
+
+    /** The CONNECTs testenv/socks.py saw since `make up`. */
+    fun socksLog(): List<String> {
+        val (host, port) = control!!.split(":")
+        java.net.Socket(host, port.toInt()).use { s ->
+            s.soTimeout = 30_000
+            s.getOutputStream().write("GET /socks/log HTTP/1.0\r\n\r\n".toByteArray())
+            return s.getInputStream().bufferedReader().readLines().dropWhile { it.isNotEmpty() }.drop(1)
+        }
+    }
+
+    fun awaitFallback(timeoutMs: Long, want: (Fallback?) -> Boolean) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (!want(fallback) && System.currentTimeMillis() < deadline) Thread.sleep(100)
+        assertTrue("fallback=$fallback waiting=$waiting state=$state log=$log\n${fileLog()}", want(fallback))
     }
 
     fun awaitWaiting(want: Waiting?, timeoutMs: Long) {

@@ -167,7 +167,7 @@ class FallbackTest {
         dns(7, "192.0.2.53", "192.0.2.54")
         assertEquals(emptyList<String>(), calls())
         verdict(true)
-        assertEquals(listOf("fallbackConfigure", "fallbackSetDns:192.0.2.53 192.0.2.54", "fallbackEnable"), calls())
+        assertEquals(listOf("fallbackConfigure", "fallbackSetStateDir", "fallbackSetMaxJoins:0", "fallbackSetDns:192.0.2.53 192.0.2.54", "fallbackEnable"), calls())
         assertEquals(room to key, be.fallbackRoom)
         assertEquals(Fallback.READY, TunnelState.fallback)
     }
@@ -441,6 +441,31 @@ class FallbackTest {
     }
 
     @Test
+    fun quotaStopHasItsOwnReason() {
+        channelOn()
+        be.used = Quota.limit(app) + 1
+        be.startedHost!!.quotaExceeded()
+        ShadowLooper.idleMainLooper()
+        val deadline = System.currentTimeMillis() + 10_000
+        while (TunnelState.state != VpnState.ERROR && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20)
+            ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS)
+        }
+        awaitServiceThreads()
+        assertEquals("fallbackDisable:quota", calls().last())
+    }
+
+    @Test
+    fun maxJoinsReachesGoBeforeEnable() {
+        start(intent().putExtra(TunnelVpnService.EXTRA_FALLBACK_MAX_JOINS, 3))
+        online()
+        settle()
+        verdict(true)
+        val c = calls()
+        assertTrue(c.toString(), c.indexOf("fallbackSetMaxJoins:3") in 0 until c.indexOf("fallbackEnable"))
+    }
+
+    @Test
     fun stopWithNoChannelOnDoesNotTouchIt() {
         start()
         online()
@@ -523,21 +548,21 @@ class FallbackTest {
         settle()
         verdict(true)
         assertEquals(0, enabledCount())
-        be.config = RcValues("", 0, 0, "", turnFallback = true)
+        be.config = RcValues("", 0, 0, "", vkFallback = true)
         fetchAgain()
         assertEquals(1, enabledCount())
-        assertTrue(RemoteConfig.turnFallback(app))
+        assertTrue(RemoteConfig.vkFallback(app))
     }
 
     @Test
     fun flagOffFromAFetchDisables() {
-        be.config = RcValues("", 0, 0, "", turnFallback = true)
+        be.config = RcValues("", 0, 0, "", vkFallback = true)
         start(intent(force = false))
         online()
         settle()
         verdict(true)
         assertEquals(1, enabledCount())
-        be.config = RcValues("", 0, 0, "", turnFallback = false)
+        be.config = RcValues("", 0, 0, "", vkFallback = false)
         fetchAgain()
         assertEquals("fallbackDisable:flag_off", calls().last())
         assertNull(TunnelState.fallback)
@@ -545,18 +570,18 @@ class FallbackTest {
 
     @Test
     fun aFailedFetchKeepsTheLastFlag() {
-        be.config = RcValues("", 0, 0, "", turnFallback = true)
+        be.config = RcValues("", 0, 0, "", vkFallback = true)
         start(intent(force = false))
         be.configError = Exception("offline")
         fetchAgain()
-        assertTrue(RemoteConfig.turnFallback(app))
+        assertTrue(RemoteConfig.vkFallback(app))
     }
 
     @Test
     fun theFlagParses() {
-        assertTrue(RemoteConfig.parseTurnFallback("true"))
-        assertTrue(RemoteConfig.parseTurnFallback(" true\n"))
-        for (raw in listOf(null, "", "false", "1", "TRUE", "yes")) assertFalse(raw.toString(), RemoteConfig.parseTurnFallback(raw))
+        assertTrue(RemoteConfig.parseVkFallback("true"))
+        assertTrue(RemoteConfig.parseVkFallback(" true\n"))
+        for (raw in listOf(null, "", "false", "1", "TRUE", "yes")) assertFalse(raw.toString(), RemoteConfig.parseVkFallback(raw))
     }
 
     @Test
@@ -641,7 +666,7 @@ class FallbackTest {
         online()
         settle()
         verdict(true)
-        assertEquals(listOf("fallbackConfigure", "fallbackSetDns:", "fallbackNetworkChanged", "fallbackEnable"), calls())
+        assertEquals(listOf("fallbackConfigure", "fallbackSetStateDir", "fallbackSetMaxJoins:0", "fallbackSetDns:", "fallbackNetworkChanged", "fallbackEnable"), calls())
     }
 
     @Test
@@ -654,7 +679,7 @@ class FallbackTest {
         dns(7, "192.0.2.53")
         dns(7, "192.0.2.54", "2001:db8::1")
         assertEquals(
-            listOf("fallbackConfigure", "fallbackSetDns:192.0.2.53", "fallbackEnable", "fallbackSetDns:192.0.2.54 ${InetAddress.getByName("2001:db8::1").hostAddress}"),
+            listOf("fallbackConfigure", "fallbackSetStateDir", "fallbackSetMaxJoins:0", "fallbackSetDns:192.0.2.53", "fallbackEnable", "fallbackSetDns:192.0.2.54 ${InetAddress.getByName("2001:db8::1").hostAddress}"),
             calls(),
         )
     }

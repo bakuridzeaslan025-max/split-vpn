@@ -52,3 +52,7 @@ android/app/google-services.json
 
 # Private docs, separate repo
 private/
+
+# VK transport test server binaries
+vktransport/vkt-server
+vktransport/vkt-server-darwin

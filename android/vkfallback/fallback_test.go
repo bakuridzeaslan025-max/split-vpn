@@ -2,12 +2,17 @@ package vkfallback
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -907,6 +912,36 @@ func TestJoinBudgetCoversCallsThatWork(t *testing.T) {
 	}
 }
 
+// With no event the UI would go on saying the channel connects on demand.
+func TestBudgetRefusalIsToldOncePerEnable(t *testing.T) {
+	r := newRig(t)
+	r.f.t.joinWindow = 10 * r.f.t.idle
+	useJoins(t, r, r.f.t.joinBudget)
+	refused := func() int {
+		n := 0
+		for _, e := range r.host.named(eventConnect) {
+			if e.result == resultFail && e.step == reasonBudget {
+				n++
+			}
+		}
+		return n
+	}
+	for range 3 {
+		if err := dialErr(r.f); !errors.Is(err, errBudget) {
+			t.Fatalf("dial: %v", err)
+		}
+	}
+	eventually(t, "the refusal", func() bool { return refused() == 1 })
+	r.f.disable("relay_back")
+	if err := r.f.enable(allowAll{}, r.host); err != nil {
+		t.Fatal(err)
+	}
+	if err := dialErr(r.f); !errors.Is(err, errBudget) {
+		t.Fatalf("dial after Enable: %v", err)
+	}
+	eventually(t, "the refusal after Enable", func() bool { return refused() == 2 })
+}
+
 func TestJoinBudgetWindowSlides(t *testing.T) {
 	r := newRig(t)
 	r.f.t.joinWindow = 10 * r.f.t.idle
@@ -924,6 +959,8 @@ func TestJoinBudgetWindowSlides(t *testing.T) {
 
 func TestSessionOpensCountAsJoinsAndSpendStopsTheCall(t *testing.T) {
 	r := newRig(t)
+	dir := t.TempDir()
+	r.f.setStateDir(dir)
 	conn := dial(t, r.f)
 	if _, err := conn.Write([]byte("x")); err != nil {
 		t.Fatal(err)
@@ -939,6 +976,17 @@ func TestSessionOpensCountAsJoinsAndSpendStopsTheCall(t *testing.T) {
 	}
 	if _, stops := r.eng.counts(); stops != 0 {
 		t.Fatalf("stopped at 5 joins: %d", stops)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ledgerFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved ledger
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved.Joins) != 5 {
+		t.Fatalf("rejoins in the ledger: %d of 5 joins", len(saved.Joins))
 	}
 	r.eng.session()
 	eventually(t, "stop", func() bool { _, stops := r.eng.counts(); return stops == 1 })
@@ -1283,5 +1331,253 @@ func TestMegabytesRoundUp(t *testing.T) {
 		if got := megabytes(in); got != want {
 			t.Errorf("megabytes(%d) = %d, want %d", in, got, want)
 		}
+	}
+}
+
+func newLedgerRig(t *testing.T, clock *fakeClock, dir string) (*fallback, *fakeEngine) {
+	t.Helper()
+	eng := &fakeEngine{}
+	f := newFallback(eng)
+	f.now = clock.now
+	f.base = clock.now()
+	f.t.watch = 2 * time.Millisecond
+	f.setStateDir(dir)
+	if err := f.configure("https://vk.ru/call/join/x", "00", 30); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.setDNS("10.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.enable(allowAll{}, &fakeHost{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		f.disable("user")
+		shared.Register(nil)
+	})
+	return f, eng
+}
+
+func writeLedger(t *testing.T, dir string, l ledger) {
+	t.Helper()
+	if err := writeAtomic(filepath.Join(dir, ledgerFile), l); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLedgerSurvivesARestart(t *testing.T) {
+	dir := t.TempDir()
+	clock := &fakeClock{t: time.Unix(100_000, 0)}
+	f, eng := newLedgerRig(t, clock, dir)
+	f.setMaxJoins(2)
+	dial(t, f)
+	wantStarts(t, eng, 1)
+	f.disable("user")
+	shared.Register(nil)
+
+	second, eng2 := newLedgerRig(t, clock, dir)
+	second.setMaxJoins(2)
+	dial(t, second)
+	wantStarts(t, eng2, 1)
+	second.disable("user")
+	shared.Register(nil)
+
+	third, eng3 := newLedgerRig(t, clock, dir)
+	third.setMaxJoins(2)
+	if err := dialErr(third); !errors.Is(err, errBudget) {
+		t.Fatalf("third process: %v", err)
+	}
+	if starts, _ := eng3.counts(); starts != 0 {
+		t.Fatalf("starts = %d", starts)
+	}
+}
+
+func TestLedgerCorruptOrMissingIsEmpty(t *testing.T) {
+	for name, content := range map[string]string{"garbage": "{not json", "wrong type": `{"joins":"x"}`, "empty": ""} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, ledgerFile), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			f, eng := newLedgerRig(t, &fakeClock{t: time.Unix(100_000, 0)}, dir)
+			dial(t, f)
+			wantStarts(t, eng, 1)
+		})
+	}
+	f, eng := newLedgerRig(t, &fakeClock{t: time.Unix(100_000, 0)}, filepath.Join(t.TempDir(), "absent"))
+	dial(t, f)
+	wantStarts(t, eng, 1)
+}
+
+func TestDayCapHoldsWhenTheHourAllows(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Unix(1_000_000, 0)
+	var joins []int64
+	for i := range defaultTiming.dayBudget {
+		joins = append(joins, now.Add(-time.Duration(i+2)*time.Hour/2).UnixMilli())
+	}
+	writeLedger(t, dir, ledger{Joins: joins})
+	clock := &fakeClock{t: now}
+	f, eng := newLedgerRig(t, clock, dir)
+	if err := dialErr(f); !errors.Is(err, errBudget) {
+		t.Fatalf("at the day cap: %v", err)
+	}
+	if got := f.State(); got.Phase != shared.Error || got.Reason != reasonBudget {
+		t.Fatalf("State = %+v", got)
+	}
+	// The oldest was 12.5 h ago, so it leaves the window 11.5 h from now.
+	clock.advance(11*time.Hour + 31*time.Minute)
+	dial(t, f)
+	wantStarts(t, eng, 1)
+}
+
+func TestFutureJoinsCountAsMadeNow(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Unix(1_000_000, 0)
+	var joins []int64
+	for i := range defaultTiming.joinBudget {
+		joins = append(joins, now.Add(time.Duration(i+1)*time.Hour).UnixMilli())
+	}
+	writeLedger(t, dir, ledger{Joins: joins})
+	clock := &fakeClock{t: now}
+	f, eng := newLedgerRig(t, clock, dir)
+	if err := dialErr(f); !errors.Is(err, errBudget) {
+		t.Fatalf("a clock moved back refilled the budget: %v", err)
+	}
+	// One window from now, not from the dates they carried.
+	clock.advance(f.t.joinWindow)
+	dial(t, f)
+	wantStarts(t, eng, 1)
+}
+
+func TestFarFutureCaptchaPauseIsDropped(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Unix(1_000_000, 0)
+	writeLedger(t, dir, ledger{CaptchaUntil: now.Add(defaultTiming.captchaMax + time.Hour).UnixMilli(), CaptchaFailures: 3})
+	f, eng := newLedgerRig(t, &fakeClock{t: now}, dir)
+	dial(t, f)
+	wantStarts(t, eng, 1)
+}
+
+func TestCaptchaPauseSurvivesARestart(t *testing.T) {
+	dir := t.TempDir()
+	clock := &fakeClock{t: time.Unix(1_000_000, 0)}
+	f, eng := newLedgerRig(t, clock, dir)
+	eng.mu.Lock()
+	eng.readyErr = func(int) error { return errors.New("vkcalls: x: api error 14 (captcha)") }
+	eng.mu.Unlock()
+	if err := dialErr(f); err == nil {
+		t.Fatal("dial through a captcha")
+	}
+	eventually(t, "the pause", func() bool { return errors.Is(dialErr(f), errBackoff) })
+	f.disable("user")
+	shared.Register(nil)
+
+	second, eng2 := newLedgerRig(t, clock, dir)
+	if err := dialErr(second); !errors.Is(err, errBackoff) {
+		t.Fatalf("after the restart: %v", err)
+	}
+	second.mu.Lock()
+	failures, hold := second.failures, second.captchaHold
+	second.mu.Unlock()
+	if failures != 1 || !hold {
+		t.Fatalf("failures = %d, hold = %v", failures, hold)
+	}
+	clock.advance(second.t.captchaBase)
+	dial(t, second)
+	wantStarts(t, eng2, 1)
+}
+
+func TestDefaultClockHasNoMonotonicReading(t *testing.T) {
+	f := newFallback(&fakeEngine{})
+	if s := f.now().String(); strings.Contains(s, "m=") {
+		t.Fatalf("now = %s", s)
+	}
+}
+
+type panicEngine struct {
+	*fakeEngine
+	wait, running atomic.Bool
+}
+
+func (e *panicEngine) WaitReady(ms int) error {
+	if e.wait.Load() {
+		panic("boom in WaitReady")
+	}
+	return e.fakeEngine.WaitReady(ms)
+}
+
+func (e *panicEngine) IsRunning() bool {
+	if e.running.Load() {
+		panic("boom in IsRunning")
+	}
+	return e.fakeEngine.IsRunning()
+}
+
+func panicRig(t *testing.T) (*fallback, *panicEngine, *fakeHost) {
+	t.Helper()
+	eng := &panicEngine{fakeEngine: &fakeEngine{}}
+	f := newFallback(eng)
+	f.t.watch = 2 * time.Millisecond
+	host := &fakeHost{}
+	if err := errors.Join(f.configure("https://vk.ru/call/join/x", "00", 30), f.setDNS("10.0.0.1"), f.enable(allowAll{}, host)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		f.disable("user")
+		shared.Register(nil)
+	})
+	return f, eng, host
+}
+
+func TestPanicInAStartFailsTheRun(t *testing.T) {
+	f, eng, host := panicRig(t)
+	eng.wait.Store(true)
+	if err := dialErr(f); !errors.Is(err, errPanic) {
+		t.Fatalf("dial: %v", err)
+	}
+	eventually(t, "fallback_connect", func() bool { return len(host.named(eventConnect)) == 1 })
+	if e := host.named(eventConnect)[0]; e.result != resultFail || e.step != stepTransport {
+		t.Fatalf("fallback_connect = %+v", e)
+	}
+	eventually(t, "the stop", func() bool { return !eng.fakeEngine.IsRunning() })
+	if err := dialErr(f); !errors.Is(err, errBackoff) {
+		t.Fatalf("next dial: %v", err)
+	}
+}
+
+func TestPanicInARunningCallEndsIt(t *testing.T) {
+	f, eng, host := panicRig(t)
+	dial(t, f)
+	eng.running.Store(true)
+	eventually(t, "fallback_off", func() bool { return len(host.named(eventOff)) == 1 })
+	if off := host.named(eventOff)[0]; off.step != offError {
+		t.Fatalf("fallback_off = %+v", off)
+	}
+	eng.running.Store(false)
+	if got := f.State(); got.Phase != shared.Error {
+		t.Fatalf("State = %+v", got)
+	}
+}
+
+func TestNetworkChangeEndingACallIsFallbackOff(t *testing.T) {
+	for name, tc := range map[string]struct {
+		prepare func(*rig)
+		detail  string
+	}{
+		"idle":  {func(r *rig) { r.clock.advance(r.f.t.idle) }, offIdle},
+		"pause": {func(r *rig) { r.f.mu.Lock(); r.f.notBefore = r.clock.now().Add(time.Hour); r.f.captchaHold = true; r.f.mu.Unlock() }, offError},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			r.f.t.watch = time.Hour
+			dial(t, r.f)
+			tc.prepare(r)
+			r.f.networkEvent(true)
+			eventually(t, "fallback_off", func() bool { return len(r.host.named(eventOff)) == 1 })
+			if off := r.host.named(eventOff)[0]; off.step != tc.detail {
+				t.Fatalf("fallback_off = %+v", off)
+			}
+		})
 	}
 }

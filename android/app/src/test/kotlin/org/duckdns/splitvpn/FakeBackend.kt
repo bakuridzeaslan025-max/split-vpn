@@ -146,6 +146,8 @@ internal class FakeBackend : Backend {
     val fallbackThreads = CopyOnWriteArrayList<Thread>()
     private fun fallback(call: String) { fallbackThreads += Thread.currentThread(); events += call }
     override fun fallbackConfigure(room: String, keyHex: String) { fallback("fallbackConfigure"); fallbackRoom = room to keyHex }
+    override fun fallbackSetStateDir(dir: String) = fallback("fallbackSetStateDir")
+    override fun fallbackSetMaxJoins(n: Int) = fallback("fallbackSetMaxJoins:$n")
     override fun fallbackSetDns(servers: String) = fallback("fallbackSetDns:$servers")
     override fun fallbackEnable(p: vkfallback.Protector, h: vkfallback.Host) {
         fallback("fallbackEnable")

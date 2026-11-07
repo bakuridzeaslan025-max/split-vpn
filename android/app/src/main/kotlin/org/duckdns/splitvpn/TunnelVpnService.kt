@@ -96,6 +96,10 @@ internal interface Backend {
     fun setAnalytics(ctx: Context, on: Boolean)
     /** The VK call channel. All of it runs on [TunnelVpnService]'s one thread for it, never on the main one. */
     fun fallbackConfigure(room: String, keyHex: String)
+    /** Where the join ledger lives. Before [fallbackEnable]. */
+    fun fallbackSetStateDir(dir: String)
+    /** Lowers the cap on joins per 24 h; 0 keeps it. */
+    fun fallbackSetMaxJoins(n: Int)
     fun fallbackSetDns(servers: String)
     fun fallbackEnable(p: vkfallback.Protector, h: vkfallback.Host)
     /** Leaves the call: up to seconds. [detail] is fallback_off's reason. */
@@ -148,7 +152,7 @@ internal object GoBackend : Backend {
         val quota = rc.getValue("daily_quota_mb").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString()?.trim()?.toLongOrNull()
         val yt = rc.getValue("yt_strategies").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString()
         val bp = RemoteConfig.parseDialEventBp(rc.getValue("dial_event_bp").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString())
-        val fallback = RemoteConfig.parseTurnFallback(rc.getValue("turn_fallback").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString())
+        val fallback = RemoteConfig.parseVkFallback(rc.getValue("vk_fallback").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString())
         return RcValues(rc.getString("endpoints"), rc.getLong("min_version"), rc.getLong("latest_version"), rc.getString("update_url"), quota, yt, rc.getString("apk_url"), bp, fallback)
     }
     override fun setQuota(used: Long, limit: Long) = tunnel.Tunnel.setQuota(used, limit)
@@ -164,6 +168,8 @@ internal object GoBackend : Backend {
     override fun setAnalytics(ctx: Context, on: Boolean) = Analytics.setCollection(ctx, on)
     // Frame rate 0: vkfallback's default.
     override fun fallbackConfigure(room: String, keyHex: String) = vkfallback.Vkfallback.configure(room, keyHex, 0)
+    override fun fallbackSetStateDir(dir: String) = vkfallback.Vkfallback.setStateDir(dir)
+    override fun fallbackSetMaxJoins(n: Int) = vkfallback.Vkfallback.setMaxJoins(n.toLong())
     override fun fallbackSetDns(servers: String) = vkfallback.Vkfallback.setDNS(servers)
     override fun fallbackEnable(p: vkfallback.Protector, h: vkfallback.Host) = vkfallback.Vkfallback.enable(p, h)
     override fun fallbackDisable(detail: String) = vkfallback.Vkfallback.disable(detail)
@@ -237,20 +243,23 @@ class TunnelVpnService : VpnService() {
         // without this extra turns it off again.
         const val EXTRA_ANALYTICS = "analytics"
         // Debug builds: the VK channel's room link and key until stages 5-6
-        // deliver them, and turn_fallback forced on. They stay in prefs for the
+        // deliver them, and vk_fallback forced on. They stay in prefs for the
         // STARTs without them; an empty value takes them back. The service is
         // not exported: adb gives them to MainActivity, which passes them on tap.
         const val EXTRA_FALLBACK_ROOM = "fallback_room"
         const val EXTRA_FALLBACK_KEY = "fallback_key"
         const val EXTRA_FALLBACK_FORCE = "fallback_force"
+        const val EXTRA_FALLBACK_MAX_JOINS = "fallback_max_joins"
         private const val KEY_FALLBACK_ROOM = "fallback_room.test"
         private const val KEY_FALLBACK_KEY = "fallback_key.test"
         private const val KEY_FALLBACK_FORCE = "fallback_force.test"
+        private const val KEY_FALLBACK_MAX_JOINS = "fallback_max_joins.test"
 
         internal fun copyFallbackExtras(from: Intent?, to: Intent) {
             from?.getStringExtra(EXTRA_FALLBACK_ROOM)?.let { to.putExtra(EXTRA_FALLBACK_ROOM, it) }
             from?.getStringExtra(EXTRA_FALLBACK_KEY)?.let { to.putExtra(EXTRA_FALLBACK_KEY, it) }
             if (from?.hasExtra(EXTRA_FALLBACK_FORCE) == true) to.putExtra(EXTRA_FALLBACK_FORCE, from.getBooleanExtra(EXTRA_FALLBACK_FORCE, false))
+            if (from?.hasExtra(EXTRA_FALLBACK_MAX_JOINS) == true) to.putExtra(EXTRA_FALLBACK_MAX_JOINS, from.getIntExtra(EXTRA_FALLBACK_MAX_JOINS, 0))
         }
 
         // vkfallback is one per process, and order matters: Enable after
@@ -588,11 +597,12 @@ class TunnelVpnService : VpnService() {
     }.onFailure { AppLog.e("test hooks", it) }
 
     private fun fallbackHooks(intent: Intent?) {
-        if (intent == null || listOf(EXTRA_FALLBACK_ROOM, EXTRA_FALLBACK_KEY, EXTRA_FALLBACK_FORCE).none(intent::hasExtra)) return
+        if (intent == null || listOf(EXTRA_FALLBACK_ROOM, EXTRA_FALLBACK_KEY, EXTRA_FALLBACK_FORCE, EXTRA_FALLBACK_MAX_JOINS).none(intent::hasExtra)) return
         vpnPrefs.edit().apply {
             intent.getStringExtra(EXTRA_FALLBACK_ROOM)?.let { putString(KEY_FALLBACK_ROOM, it) }
             intent.getStringExtra(EXTRA_FALLBACK_KEY)?.let { putString(KEY_FALLBACK_KEY, it) }
             if (intent.hasExtra(EXTRA_FALLBACK_FORCE)) putBoolean(KEY_FALLBACK_FORCE, intent.getBooleanExtra(EXTRA_FALLBACK_FORCE, false))
+            if (intent.hasExtra(EXTRA_FALLBACK_MAX_JOINS)) putInt(KEY_FALLBACK_MAX_JOINS, intent.getIntExtra(EXTRA_FALLBACK_MAX_JOINS, 0))
         }.apply()
         mainHandler.post {
             // Posted: the START this came with clears the log. MainActivity is
@@ -766,7 +776,7 @@ class TunnelVpnService : VpnService() {
     // elapsedRealtime of the relay going down, for fallback_on; 0 while it is up.
     @Volatile private var relayDownAt = 0L
 
-    private val fallbackAllowed get() = RemoteConfig.turnFallback(this) || BuildConfig.DEBUG && vpnPrefs.getBoolean(KEY_FALLBACK_FORCE, false)
+    private val fallbackAllowed get() = RemoteConfig.vkFallback(this) || BuildConfig.DEBUG && vpnPrefs.getBoolean(KEY_FALLBACK_FORCE, false)
 
     // Until stages 5-6 only debug builds have a room; none is no error, the channel just stays off.
     private fun fallbackRoom(): Pair<String, String>? {
@@ -819,12 +829,15 @@ class TunnelVpnService : VpnService() {
         if (!allowed) return
         val downFor = relayDownAt.takeIf { it > 0 }?.let { now - it } ?: 0
         val dns = defaultDns?.second.orEmpty().joinToString(" ")
+        val maxJoins = if (BuildConfig.DEBUG) vpnPrefs.getInt(KEY_FALLBACK_MAX_JOINS, 0) else 0
         AppLog.i("fallback: on, relay down for ${downFor / 1000} s")
         fallbackState(Fallback.READY)
         TunnelState.log("Сервер недоступен, включаю запасной канал через VK")
         fallbackTask {
             try {
                 backend.fallbackConfigure(room, key)
+                backend.fallbackSetStateDir(filesDir.path)
+                backend.fallbackSetMaxJoins(maxJoins)
                 backend.fallbackSetDns(dns)
                 if (fallbackLostTold) backend.fallbackNetworkChanged()
                 fallbackLostTold = false
@@ -859,7 +872,7 @@ class TunnelVpnService : VpnService() {
         return fallbackTask { backend.fallbackDisable(detail) }
     }
 
-    // Main thread only. turn_fallback changed.
+    // Main thread only. vk_fallback changed.
     private fun onFallbackFlag() {
         if (fallbackAllowed) considerFallback() else disableFallback("flag_off")
     }
@@ -1961,7 +1974,7 @@ class TunnelVpnService : VpnService() {
             }
             // Not before: a dial still on its way could spend a VK join. Waits, or the
             // process may go with the service in the middle of leaving the call.
-            runCatching { disableFallback(if (error != null) "error" else "user")?.get(10, TimeUnit.SECONDS) }
+            runCatching { disableFallback(when (error) { null -> "user"; ERR_QUOTA -> "quota"; else -> "error" })?.get(10, TimeUnit.SECONDS) }
             AppLog.i("stopTunnel done")
             relayDown = false
             relayDownAt = 0

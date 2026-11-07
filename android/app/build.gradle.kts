@@ -1,6 +1,7 @@
 import java.net.InetAddress
 import java.util.Base64
 import java.util.Properties
+import java.util.zip.ZipFile
 
 plugins {
     id("com.android.application")
@@ -32,8 +33,18 @@ if (localProps.getProperty("vpn.path") != null) {
 // Checked when a release build runs, not at configuration: a debug build
 // configures the release variant too.
 val noEndpoints = endpointsBlob.isEmpty()
+val tunnelAar = file("libs/tunnel.aar")
 tasks.matching { it.name == "preReleaseBuild" }.configureEach {
     doFirst { if (noEndpoints) throw GradleException("release without endpoints: set rc.key and vds.endpoints in local.properties") }
+    // make tunnel TUNNEL_TAGS=vkfake leaves a stand-in for olcrtc in libs/. The string is fake.go's.
+    doFirst {
+        ZipFile(tunnelAar).use { aar ->
+            for (so in aar.entries().asSequence().filter { it.name.endsWith("/libgojni.so") }) {
+                if ("vkfake: start" in String(aar.getInputStream(so).readBytes(), Charsets.ISO_8859_1))
+                    throw GradleException("release with a vkfake AAR: run make tunnel without TUNNEL_TAGS")
+            }
+        }
+    }
 }
 // Direct YouTube's strategies for an app that has never fetched Remote
 // Config (offline fresh install, RC blocked): yt_strategies from

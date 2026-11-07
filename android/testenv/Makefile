@@ -2,6 +2,7 @@
 # once, then compose up with a fresh batch of one-shot invite codes.
 OPENSSL = docker run --rm -v $(CURDIR)/certs:/certs alpine/openssl
 CONTROL_PORT = 9099
+SOCKS_PORT = 1081
 
 .PHONY: up down invites
 
@@ -10,10 +11,13 @@ up: certs/server.crt .env invites
 	docker compose restart nginx
 	@pkill -f "control.py $(CONTROL_PORT)" 2>/dev/null || true
 	@nohup python3 control.py $(CONTROL_PORT) >/dev/null 2>&1 &
+	@pkill -f "socks.py $(SOCKS_PORT)" 2>/dev/null || true
+	@nohup python3 socks.py $(SOCKS_PORT) data/socks.log >/dev/null 2>&1 &
 	@sleep 2; docker compose ps
 
 down:
 	@pkill -f "control.py $(CONTROL_PORT)" 2>/dev/null || true
+	@pkill -f "socks.py $(SOCKS_PORT)" 2>/dev/null || true
 	docker compose down
 
 # The harness takes one per start(), the relay burns one per registration.

@@ -1,0 +1,15 @@
+# Rendered by `make config` into run/<name>.yaml.
+mode: srv
+auth:
+  provider: vkcalls
+room:
+  id: "@ROOM@"
+crypto:
+  key: "@KEY@"
+net:
+  transport: vp8channel
+  dns: "8.8.8.8:53"
+# As the client's in android/vkfallback/olcrtc.go.
+vp8:
+  fps: 30
+  batch_size: 64

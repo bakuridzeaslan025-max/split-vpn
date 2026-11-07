@@ -14,7 +14,8 @@ type Protector interface {
 // Host hears the analytics events only Go can see. One method carries them all;
 // a parameter an event does not have is empty or 0.
 //
-//	fallback_connect  result ok|fail, step auth|captcha|transport on fail, ms to ready
+//	fallback_connect  result ok|fail, step auth|captcha|transport on fail, ms to ready;
+//	                  step join_budget when a start was refused, once until the next start or Enable
 //	fallback_helped   ms since Enable; fires once per Enable
 //	fallback_off      step is the reason: idle|error, or what was given to Disable;
 //	                  result ok|fail, whether any Dial succeeded since Enable;
@@ -26,7 +27,9 @@ type Host interface {
 	Event(name, result, step string, ms, mb int64)
 }
 
-var instance = sync.OnceValue(func() *fallback { return newFallback(newOlcrtc()) })
+var newEngine = func() engine { return newOlcrtc() }
+
+var instance = sync.OnceValue(func() *fallback { return newFallback(newEngine()) })
 
 // Configure sets the personal room link, the 64 hex character tunnel key and
 // the VP8 frame rate (0 for the default). A running call keeps what it started
@@ -42,6 +45,18 @@ func Configure(room, keyHex string, fps int) error {
 // a network may not know its resolvers yet.
 func SetDNS(servers string) error {
 	return instance().setDNS(servers)
+}
+
+// SetStateDir names the directory of the join ledger, which survives the
+// process. Call it before Enable: until then joins are counted in memory only.
+func SetStateDir(dir string) {
+	instance().setStateDir(dir)
+}
+
+// SetMaxJoins lowers the cap on joins per 24 hours; 0 or more than the cap leaves
+// it. Debug builds only, for a hard limit on a real test.
+func SetMaxJoins(n int) {
+	instance().setMaxJoins(n)
 }
 
 // Enable makes the channel available to tunnel. The call itself starts on the

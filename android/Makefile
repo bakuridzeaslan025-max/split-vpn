@@ -21,6 +21,10 @@ docker-image:
 # verify there: it fails with "missing ziphash" on tunnel, whose module path has
 # no dot. android/ also holds the signing key and rc-sa.json: mount only the
 # modules.
+#
+# TUNNEL_TAGS: more build tags, comma-separated. vkfake swaps olcrtc for a stand-in
+# (vkfallback/fake.go) for the emulator test: rebuild without it before anything else.
+comma := ,
 tunnel: docker-image
 	mkdir -p app/libs
 	RC_KEY=$$(sed -n 's/^rc\.key[[:space:]]*=[[:space:]]*//p' local.properties 2>/dev/null | tr -d ' \r'); \
@@ -35,7 +39,7 @@ tunnel: docker-image
 			if [ -n "$$RC_KEY" ]; then \
 				printf "package tunnel\n\nfunc init() { endpointsKey = []byte{%s} }\n" "$$(echo $$RC_KEY | sed "s/../0x&,/g")" > ../tunnel/key_gen.go; fi; \
 			(cd ../tunnel && go mod verify) && (cd ../vkfallback && go mod verify) && go mod tidy -diff && \
-			gomobile bind -target=android/arm64 -androidapi 26 -tags olcrtc_lean,olcrtc_vkcalls \
+			gomobile bind -target=android/arm64 -androidapi 26 -tags olcrtc_lean,olcrtc_vkcalls$(if $(TUNNEL_TAGS),$(comma)$(TUNNEL_TAGS)) \
 				-ldflags "-checklinkname=0 -extldflags=-Wl,-z,max-page-size=16384" -o ../tunnel/tunnel.aar tunnel splitvpn.local/vkfallback'
 	mv tunnel/tunnel.aar app/libs/tunnel.aar
 
@@ -58,11 +62,13 @@ shared-test:
 # cpu.all=off: x/crypto's AVX2 assembler fails under Rosetta, and this binary
 # links it (see private/plans/vk-fallback.md, stage 0).
 VKFALLBACK_FLAGS := -tags=olcrtc_lean,olcrtc_vkcalls -ldflags=-checklinkname=0
+VKFAKE_FLAGS := -tags=olcrtc_lean,olcrtc_vkcalls,vkfake -ldflags=-checklinkname=0
 vkfallback-test:
 	docker run --rm --platform linux/amd64 -e GODEBUG=cpu.all=off \
 		-v $(CURDIR)/shared:/src/shared:ro -v $(CURDIR)/vkfallback:/src/vkfallback:ro \
 		-w /src/vkfallback -v tunnel-gomod:/go/pkg/mod $(GO_IMAGE) \
-		sh -c 'go mod verify && go mod tidy -diff && go vet $(VKFALLBACK_FLAGS) ./... && go test -race $(VKFALLBACK_FLAGS) ./...'
+		sh -c 'go mod verify && go mod tidy -diff && go vet $(VKFALLBACK_FLAGS) ./... && go test -race $(VKFALLBACK_FLAGS) ./... && \
+			go vet $(VKFAKE_FLAGS) ./... && go test -race $(VKFAKE_FLAGS) -run TestFake ./...'
 
 # Instrumented: real TUN, emulator only (consent tap, svc wifi).
 # Against the local stand (testenv/): relay + nginx in Docker on the host,
@@ -158,6 +164,8 @@ need_tag = $(if $(shell echo '$(TAG)' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$'),,$
 clean-tree:
 	@test -z "$$(git status --porcelain)" || { git status --short; echo "commit or stash first"; exit 1; }
 
+# override: from the environment or the command line, a tag must not reach a release.
+release-local: override TUNNEL_TAGS :=
 release-local: clean-tree tunnel
 	$(if $(APKSIGNER),,$(error no build-tools/*/apksigner under $(SDK_DIR)))./gradlew assembleRelease
 	mkdir -p build

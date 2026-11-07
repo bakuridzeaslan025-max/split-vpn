@@ -9,13 +9,13 @@ permissions:
 
 jobs:
   go:
-    name: Go tests (tunnel, rc/tool, relay)
+    name: Go tests (tunnel, shared, vkfallback, rc/tool, relay)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: make -C android tunnel-test rc-test adblock-test
+      - run: make -C android tunnel-test rc-test adblock-test shared-test vkfallback-test
       - run: make -C relay test
 
   android:
