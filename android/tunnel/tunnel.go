@@ -121,13 +121,21 @@ func httpRoundTrip(c net.Conn, req string) (*http.Response, *bufio.Reader, error
 }
 
 // upgrade does the v3 handshake on c: 101 means the credential is accepted.
-func upgrade(c net.Conn, ep *relayTarget, cred []byte) (*bufio.Reader, error) {
+// Like crypto/tls's handshake it closes c if ctx ends meanwhile and returns
+// ctx's error, so a caller giving up is not counted as an outage. Past the
+// handshake c is the caller's: a later cancel does not touch it.
+func upgrade(ctx context.Context, c net.Conn, ep *relayTarget, cred []byte) (*bufio.Reader, error) {
 	req := "GET " + ep.path + " HTTP/1.1\r\nHost: " + ep.sni + "\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n" +
 		browserHeaders(ep.sni) +
 		"Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: " + wsKey() + "\r\n" +
 		"Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n" +
 		"Sec-WebSocket-Protocol: " + hex.EncodeToString(cred) + "\r\n\r\n"
+	stop := context.AfterFunc(ctx, func() { c.Close() })
 	res, br, err := httpRoundTrip(c, req)
+	// false: the close has begun, even if the reply got here first.
+	if !stop() {
+		return nil, ctx.Err()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -277,10 +285,10 @@ func Start(tunFd int, vpnAddr string, sni string, path string, id string, cred [
 	health.newNetwork()
 	wake := health.setHost(host)
 	gen := health.generation()
-	if err := probeRelay(cred); errors.Is(err, ErrCredRejected) {
+	if err := startProbe(gen, relayEP.Load(), cred); errors.Is(err, ErrCredRejected) {
 		return err
 	} else if err != nil {
-		health.unreachableAtStart()
+		health.unreachableAtStart(gen)
 	} else {
 		health.accepted()
 		health.ok(gen)
@@ -337,20 +345,100 @@ func probeRelay(cred []byte) error {
 	return err
 }
 
+// startProbeAt: when each of Start's handshakes begins if none has answered
+// yet. A var for tests.
+var startProbeAt = []time.Duration{0, 2 * time.Second, 5 * time.Second}
+
+// startProbe is Start's look at the relay, all of it within handshakeTimeout.
+// One handshake is a poor witness (a lost hello is common on phones) and a
+// false verdict costs a VK join, so a silent one gets company and a failed one
+// a successor at once. The first answer ends it, a 404 included; a healthy
+// start costs one handshake. It waits for the attempts it cancels: a failure
+// landing after the caller's health.ok would read as a new outage.
+func startProbe(gen uint64, ep *relayTarget, cred []byte) error {
+	t0 := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), handshakeTimeout)
+	defer cancel()
+	type attempt struct {
+		n     int
+		c     net.Conn
+		stage string
+		err   error
+	}
+	results := make(chan attempt, len(startProbeAt))
+	timer := time.NewTimer(handshakeTimeout)
+	defer timer.Stop()
+	started, running := 0, 0
+	launch := func() {
+		if started == len(startProbeAt) || ctx.Err() != nil {
+			return
+		}
+		started++
+		running++
+		go func(n int) {
+			defer guard("start probe")
+			r := attempt{n: n, err: errors.New("panic")}
+			defer func() { results <- r }()
+			r.c, _, r.stage, r.err = relayHandshakeStage(ctx, gen, ep, cred)
+		}(started)
+		if started < len(startProbeAt) {
+			timer.Reset(time.Until(t0.Add(startProbeAt[started])))
+		}
+	}
+	launch()
+	var err error
+	var fails []string
+	for running > 0 {
+		select {
+		case <-timer.C:
+			launch()
+		case r := <-results:
+			running--
+			if err = r.err; err != nil && !errors.Is(err, ErrCredRejected) {
+				fails = append(fails, dialResult(r.stage, err))
+				launch()
+				continue
+			}
+			cancel()
+			if err == nil {
+				r.c.Close()
+				if started > 1 {
+					log.Printf("relay: start probe ok: attempt %d of %d won in %s", r.n, started, time.Since(t0).Round(100*time.Millisecond))
+				}
+			}
+			for ; running > 0; running-- {
+				if l := <-results; l.err == nil {
+					l.c.Close()
+				}
+			}
+			return err
+		}
+	}
+	log.Printf("relay: start probe failed in %s, %d attempts: %s", time.Since(t0).Round(100*time.Millisecond), started, strings.Join(fails, ", "))
+	return err
+}
+
 // relayHandshake is TLS to the VDS and the upgrade, for app sessions and
 // probes alike: the health record of a failed upgrade and the DialEvent
 // are made here. gen and ep are the caller's, read together: a SetEndpoint
 // meanwhile changes neither the address dialed nor whose event it is.
 func relayHandshake(ctx context.Context, gen uint64, ep *relayTarget, cred []byte) (net.Conn, *bufio.Reader, error) {
+	c, br, _, err := relayHandshakeStage(ctx, gen, ep, cred)
+	return c, br, err
+}
+
+// relayHandshakeStage is relayHandshake that also names the stage it ended
+// at, for dialResult.
+func relayHandshakeStage(ctx context.Context, gen uint64, ep *relayTarget, cred []byte) (net.Conn, *bufio.Reader, string, error) {
 	t0 := time.Now()
 	c, stage, err := dialTLSStage(ctx, gen, ep.addr, ep.sni)
 	if err == nil {
 		stage = "upgrade"
 		c.SetDeadline(time.Now().Add(handshakeTimeout))
 		var br *bufio.Reader
-		if br, err = upgrade(c, ep, cred); err == nil {
+		if br, err = upgrade(ctx, c, ep, cred); err == nil {
 			dialEvent(gen, ep, stage, nil, t0)
-			return c, br, nil
+			return c, br, stage, nil
 		}
 		c.Close()
 		// TLS passing and the upgrade dying is an outage too (DPI after the
@@ -360,7 +448,7 @@ func relayHandshake(ctx context.Context, gen uint64, ep *relayTarget, cred []byt
 		}
 	}
 	dialEvent(gen, ep, stage, err, t0)
-	return nil, nil, err
+	return nil, nil, stage, err
 }
 
 // dialBP: the share of handshakes the host hears of, in basis points.

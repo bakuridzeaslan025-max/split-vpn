@@ -358,7 +358,7 @@ func TestProber_ProbesNewNetworkAtOnce(t *testing.T) {
 	h, _, _ := testHealth(t)
 	host := &chanHost{down: make(chan bool, 4)}
 	wake := h.setHost(host)
-	h.unreachableAtStart()
+	h.unreachableAtStart(h.generation())
 	if !<-host.down {
 		t.Fatal("no RelayDown(true)")
 	}
@@ -411,7 +411,7 @@ func TestProber_CredRejectedEndsOutage(t *testing.T) {
 	h, _, _ := testHealth(t)
 	host := &chanHost{down: make(chan bool, 4)}
 	wake := h.setHost(host)
-	h.unreachableAtStart()
+	h.unreachableAtStart(h.generation())
 	<-host.down
 	stop := make(chan struct{})
 	defer close(stop)
@@ -437,7 +437,7 @@ func TestProber_LastRelayOKOnlyOn101(t *testing.T) {
 		h, _, _ := testHealth(t)
 		host := &chanHost{down: make(chan bool, 4)}
 		wake := h.setHost(host)
-		h.unreachableAtStart()
+		h.unreachableAtStart(h.generation())
 		<-host.down
 		probed := make(chan struct{}, 4)
 		stop := make(chan struct{})
@@ -470,7 +470,7 @@ func TestProber_LastRelayOKOnlyOn101(t *testing.T) {
 func TestProber_StoppedDoesNotProbe(t *testing.T) {
 	h, _, _ := testHealth(t)
 	wake := h.setHost(&chanHost{down: make(chan bool, 4)})
-	h.unreachableAtStart()
+	h.unreachableAtStart(h.generation())
 	var probes atomic.Int32
 	stop := make(chan struct{})
 	close(stop)
@@ -494,7 +494,7 @@ func switched(t *testing.T, h *relayHealth, probe func() error) <-chan bool {
 	fastVerdict(t)
 	host := &chanHost{down: make(chan bool, 4)}
 	wake := h.setHost(host)
-	h.unreachableAtStart()
+	h.unreachableAtStart(h.generation())
 	<-host.down
 	h.newEndpoint(false)
 	if h.allow() != nil || h.down() {
@@ -548,7 +548,7 @@ func TestProber_OldProbeVerdictDropped(t *testing.T) {
 		fastVerdict(t)
 		host := &chanHost{down: make(chan bool, 4)}
 		wake := h.setHost(host)
-		h.unreachableAtStart()
+		h.unreachableAtStart(h.generation())
 		<-host.down
 		started, release := make(chan struct{}), make(chan struct{})
 		var probes atomic.Int32
@@ -615,7 +615,7 @@ func TestProber_SuspectEndpointRefusesUntilAProbeGetsThrough(t *testing.T) {
 	fastVerdict(t)
 	host := &chanHost{down: make(chan bool, 4)}
 	wake := h.setHost(host)
-	h.unreachableAtStart()
+	h.unreachableAtStart(h.generation())
 	<-host.down
 	h.newEndpoint(true)
 	if !errors.Is(h.allow(), errRelayDown) {
@@ -649,7 +649,7 @@ func TestProber_DeadNewEndpointProbeCadence(t *testing.T) {
 			fastVerdict(t)
 			host := &chanHost{down: make(chan bool, 4)}
 			wake := h.setHost(host)
-			h.unreachableAtStart()
+			h.unreachableAtStart(h.generation())
 			<-host.down
 			h.newEndpoint(suspect)
 			var mu sync.Mutex

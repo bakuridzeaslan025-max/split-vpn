@@ -169,9 +169,14 @@ func LastRelayOK() int64 { return health.lastOK.Load() }
 
 // unreachableAtStart: the tunnel comes up anyway and heals itself, like
 // after any outage, instead of failing the start and waiting for a tap.
-func (h *relayHealth) unreachableAtStart() {
+// A network changed during the probe is not charged: with no verdict yet,
+// the prober probes the new one at once.
+func (h *relayHealth) unreachableAtStart(gen uint64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if gen != h.gen {
+		return
+	}
 	h.unreachableLocked("at start, tunnel up anyway")
 }
 
