@@ -26,6 +26,30 @@ func TestLineWriter_SplitsAndBuffersPartialLines(t *testing.T) {
 	}
 }
 
+func TestLineWriter_MasksOlcrtcPrivateStrings(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"failover cycle=1 starting room=https://vk.ru/call/join/AbC-d_1",
+			"failover cycle=1 starting room=https://vk.ru/call/join/<room>"},
+		{`supervisor: profile "https://vk.com/call/join/secret": run public client: api error 14 (Captcha needed)`,
+			`supervisor: profile "https://vk.com/call/join/<room>": run public client: api error 14 (Captcha needed)`},
+		{"a https://x.test/CALL/JOIN/one then https://y.test/call/join/two?hash=z end",
+			"a https://x.test/call/join/<room> then https://y.test/call/join/<room>?hash=z end"},
+		{"body vk_join_link=https%3A%2F%2Fvk.ru%2Fcall%2Fjoin%2Fsecret&v=5",
+			"body vk_join_link=https%3A%2F%2Fvk.ru%2Fcall/join/<room>&v=5"},
+		{"sid=7 tunnel to example.com:443", "sid=7 tunnel to <dest>"},
+		{"sni a.test → 1.2.3.4 relay done: eof, down 1 KB, up 1 KB in 1s",
+			"sni a.test → 1.2.3.4 relay done: eof, down 1 KB, up 1 KB in 1s"},
+		{"call/join without an id", "call/join without an id"},
+	} {
+		out := &sliceLogger{}
+		w := &lineWriter{out: out}
+		w.Write([]byte(tc.in + "\n"))
+		if len(out.lines) != 1 || out.lines[0] != tc.want {
+			t.Errorf("%q:\n got %q\nwant %q", tc.in, out.lines, tc.want)
+		}
+	}
+}
+
 func TestSetLogger_NilKeepsDefault(t *testing.T) {
 	setLogger(nil) // must not panic or change output
 }

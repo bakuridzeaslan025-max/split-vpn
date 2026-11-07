@@ -1,4 +1,4 @@
-.PHONY: tunnel apk docker-image test tunnel-test shared-test itest
+.PHONY: tunnel apk docker-image test tunnel-test shared-test vkfallback-test itest
 
 DOCKER_IMAGE := tunnel-builder
 DOCKER_TAG := latest
@@ -31,7 +31,7 @@ tunnel: docker-image
 			go mod verify && gomobile bind -target=android/arm64 -androidapi 26 -ldflags "-extldflags=-Wl,-z,max-page-size=16384" -o tunnel.aar .'
 	mv tunnel/tunnel.aar app/libs/tunnel.aar
 
-test: rc-test adblock-test tunnel-test shared-test
+test: rc-test adblock-test tunnel-test shared-test vkfallback-test
 	./gradlew testDebugUnitTest -q
 
 # The strategy vector is shared by the tunnel and rc/tool (see desync.go).
@@ -43,6 +43,17 @@ tunnel-test:
 shared-test:
 	docker run --rm --platform linux/amd64 -v $(CURDIR)/shared:/src:ro -w /src $(GO_IMAGE) \
 		sh -c 'go mod tidy -diff && go vet ./... && go test -race ./...'
+
+# Links the real olcrtc under the same flags as the AAR, but never starts it.
+# android/ also holds the signing key and rc-sa.json: mount only the two modules.
+# cpu.all=off: x/crypto's AVX2 assembler fails under Rosetta, and this binary
+# links it (see private/plans/vk-fallback.md, stage 0).
+VKFALLBACK_FLAGS := -tags=olcrtc_lean,olcrtc_vkcalls -ldflags=-checklinkname=0
+vkfallback-test:
+	docker run --rm --platform linux/amd64 -e GODEBUG=cpu.all=off \
+		-v $(CURDIR)/shared:/src/shared:ro -v $(CURDIR)/vkfallback:/src/vkfallback:ro \
+		-w /src/vkfallback -v tunnel-gomod:/go/pkg/mod $(GO_IMAGE) \
+		sh -c 'go mod verify && go mod tidy -diff && go vet $(VKFALLBACK_FLAGS) ./... && go test -race $(VKFALLBACK_FLAGS) ./...'
 
 # Instrumented: real TUN, emulator only (consent tap, svc wifi).
 # Against the local stand (testenv/): relay + nginx in Docker on the host,

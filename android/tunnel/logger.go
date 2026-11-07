@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -98,8 +99,23 @@ func (w *lineWriter) Write(p []byte) (int, error) {
 			return len(p), nil
 		}
 		line := string(w.buf.Next(i + 1))
-		w.out.Log(line[:len(line)-1])
+		w.out.Log(maskPrivate(line[:len(line)-1]))
 	}
+}
+
+// olcrtc logs through the same process-wide log, and it cannot be given a
+// writer of its own: mobile.SetLogWriter would replace this one. Its lines end
+// up in the log file and in Crashlytics breadcrumbs. The room link is the key
+// to the user's personal room, and a line naming a destination does not start
+// with one of the prefixes Crash.kt keeps off the wire.
+var (
+	roomLink  = regexp.MustCompile(`(?i)call(/|%2f)join(/|%2f)[^\s"'&?#<>]+`)
+	socksDest = regexp.MustCompile(`^(sid=\d+ tunnel to )\S+`)
+)
+
+func maskPrivate(line string) string {
+	line = roomLink.ReplaceAllString(line, "call/join/<room>")
+	return socksDest.ReplaceAllString(line, "${1}<dest>")
 }
 
 func setLogger(l Logger) {
