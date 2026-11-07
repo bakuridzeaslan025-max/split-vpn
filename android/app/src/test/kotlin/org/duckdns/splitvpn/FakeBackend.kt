@@ -22,10 +22,12 @@ internal class FakeBackend : Backend {
     var registerResult: ByteArray? = null
     var registerError: Throwable? = null
     val registered = CopyOnWriteArrayList<Pair<Int, ByteArray>>()
+    val registeredAddrs = CopyOnWriteArrayList<String>()
     var startedWith: ByteArray? = null
     var startedDomains: String? = null
     var startedSni: String? = null
     var startedId: String? = null
+    val startedEndpoints = CopyOnWriteArrayList<TunnelVpnService.Endpoint>()
 
     val establishedExtra = CopyOnWriteArrayList<List<Route>>()
     var startedHost: tunnel.Host? = null
@@ -46,6 +48,7 @@ internal class FakeBackend : Backend {
 
     override fun start(fd: ParcelFileDescriptor, ep: TunnelVpnService.Endpoint, cred: ByteArray, domains: String, routes: String, cacheFile: String, desyncFile: String, host: tunnel.Host, logger: tunnel.Logger) {
         val sni = ep.host
+        startedEndpoints += ep
         startedId = ep.id
         startedDomains = domains
         startedAdBlock = adBlock
@@ -160,6 +163,7 @@ internal class FakeBackend : Backend {
     override fun fallbackNetworkLost() = fallback("fallbackNetworkLost")
     override fun register(addr: String, sni: String, path: String, kind: Int, proof: ByteArray): ByteArray {
         registered += kind to proof
+        registeredAddrs += addr
         registerError?.let { throw it }
         return registerResult ?: throw IllegalStateException("no registerResult")
     }

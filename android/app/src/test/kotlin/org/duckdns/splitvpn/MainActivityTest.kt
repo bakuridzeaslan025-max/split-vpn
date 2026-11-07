@@ -382,25 +382,25 @@ class MainActivityTest {
         TunnelState.set(VpnState.CONNECTED)
         TunnelState.setWaiting(Waiting.NO_SERVER)
         ShadowLooper.idleMainLooper()
-        assertFalse(banner.text.contains("VK"))
+        assertFalse(banner.text.contains("запасной"))
 
         TunnelState.setFallback(Fallback.READY)
         ShadowLooper.idleMainLooper()
         assertEquals("Сервер недоступен", chip.text.toString())
-        assertTrue(banner.text.contains("Включён запасной канал через VK"))
+        assertTrue(banner.text.contains("Включён запасной канал"))
         assertTrue(banner.text.contains("батарея"))
 
         TunnelState.setFallback(Fallback.WORKING)
         ShadowLooper.idleMainLooper()
-        assertEquals("Канал через VK", chip.text.toString())
-        assertTrue(banner.text.contains("трафик идёт через канал VK"))
+        assertEquals("Запасной канал", chip.text.toString())
+        assertTrue(banner.text.contains("трафик идёт через запасной канал"))
         assertTrue(banner.text.contains("Батарея садится быстрее"))
         assertEquals(View.GONE, a.findViewById<View>(R.id.errorAction).visibility)
 
         TunnelState.setFallback(Fallback.FAILED)
         ShadowLooper.idleMainLooper()
         assertEquals("Сервер недоступен", chip.text.toString())
-        assertTrue(banner.text.contains("канал через VK пока не подключился"))
+        assertTrue(banner.text.contains("запасной канал пока не подключился"))
 
         TunnelState.setFallback(Fallback.WORKING)
         TunnelState.setWaiting(Waiting.NO_NETWORK)
@@ -430,6 +430,39 @@ class MainActivityTest {
         assertEquals("https://vk.ru/call/join/x", sent.getStringExtra(TunnelVpnService.EXTRA_FALLBACK_ROOM))
         assertEquals("ab", sent.getStringExtra(TunnelVpnService.EXTRA_FALLBACK_KEY))
         assertTrue(sent.getBooleanExtra(TunnelVpnService.EXTRA_FALLBACK_FORCE, false))
+    }
+
+    // The tap that applies it on a running tunnel is the one exception to "the toggle stops".
+    @Test
+    fun relayDeadOnARunningTunnelTakesOneTapAndTheNextOneStops() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        val a = launch(intent = Intent(app, MainActivity::class.java).putExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, false))
+        TunnelState.set(VpnState.CONNECTED)
+        ShadowLooper.idleMainLooper()
+        shadowOf(app).clearStartedServices()
+        a.findViewById<View>(R.id.toggleButton).performClick()
+        val sent = shadowOf(app).nextStartedService!!
+        assertEquals(TunnelVpnService.ACTION_START, sent.action)
+        assertTrue(sent.hasExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD))
+        assertFalse(sent.getBooleanExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, true))
+        a.findViewById<View>(R.id.toggleButton).performClick()
+        assertEquals(TunnelVpnService.ACTION_STOP, shadowOf(app).nextStartedService?.action)
+    }
+
+    // A start that brought it uses it up too, or the tap meant as a stop would not stop.
+    @Test
+    fun relayDeadBroughtByAStartDoesNotHoldTheNextTap() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        val a = launch(intent = Intent(app, MainActivity::class.java).putExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, true))
+        org.robolectric.shadows.ShadowVpnService.setPrepareResult(null)
+        shadowOf(app).grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS)
+        shadowOf(app).clearStartedServices()
+        a.findViewById<View>(R.id.toggleButton).performClick()
+        assertTrue(shadowOf(app).nextStartedService!!.getBooleanExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, false))
+        TunnelState.set(VpnState.CONNECTED)
+        ShadowLooper.idleMainLooper()
+        a.findViewById<View>(R.id.toggleButton).performClick()
+        assertEquals(TunnelVpnService.ACTION_STOP, shadowOf(app).nextStartedService?.action)
     }
 
     @Test

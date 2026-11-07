@@ -144,8 +144,8 @@ class FallbackChannelTest {
             assertTrue("nothing at the SOCKS5 server", seen.any { it.endsWith(":443") })
             assertEquals(Waiting.NO_SERVER, vpn.waiting)
             assertEquals(VpnState.CONNECTED, vpn.state)
-            shot("1_working", "трафик идёт через канал VK")
-            shotShade("1_working_shade", "Канал через VK · батарея садится быстрее")
+            shot("1_working", "трафик идёт через запасной канал")
+            shotShade("1_working_shade", "Запасной канал · батарея садится быстрее")
         }
     }
 
@@ -186,7 +186,7 @@ class FallbackChannelTest {
         assertEquals("back on the relay: nothing goes to SOCKS5", atOff, vpn.socksLog().size)
         ActivityScenario.launch(MainActivity::class.java).use {
             shot("2_back", "Выключить")
-            assertFalse("VK still on the screen", vpn.device.hasObject(By.textContains("VK")))
+            assertFalse("the channel still on the screen", vpn.device.hasObject(By.textContains("апасной канал")))
             shotShade("2_back_shade", "VPN включён")
         }
     }
@@ -236,7 +236,7 @@ class FallbackChannelTest {
             vpn.trafficUntil(url, until = { vpn.fallback == Fallback.FAILED }, timeoutMs = 60_000)
             vpn.awaitFallback(1_000) { it == Fallback.FAILED }
             assertEquals(VpnState.CONNECTED, vpn.state)
-            shot("3_failed", "канал через VK пока не подключился")
+            shot("3_failed", "запасной канал пока не подключился")
             shotShade("3_failed_shade", "Split VPN")
         }
     }
@@ -265,7 +265,7 @@ class FallbackChannelTest {
             val lines = logLines().drop(logMark)
             assertTrue(vpn.fileLog(), lines.any { "join budget spent" in it })
             assertTrue(vpn.fileLog(), lines.none { "vkfake: start" in it })
-            shot("3_budget_spent", "канал через VK пока не подключился")
+            shot("3_budget_spent", "запасной канал пока не подключился")
         }
         assertEquals("a refused join reached SOCKS5", emptyList<String>(), connectsSince(before))
     }
@@ -291,6 +291,87 @@ class FallbackChannelTest {
         assertFalse("the room stayed", "fake-socks" in now || key in now)
         assertTrue("the force stayed", "name=\"fallback_force.test\" value=\"false\"" in now)
         assertTrue("the cap stayed", "name=\"fallback_max_joins.test\" value=\"0\"" in now)
+    }
+
+    private fun awaitLogLine(what: String, since: Int, timeoutMs: Long = 15_000): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (logLines().drop(since).any { what in it }) return true
+            Thread.sleep(200)
+        }
+        return false
+    }
+
+    // The emulator has only the stand's credential, so this goes over the stand. The relay stays
+    // up all along: only the hook can be what makes Go see an outage.
+    @Test
+    fun relayDeadIsAnOutageAndFalseBringsTheRelayBack() {
+        val before = vpn.socksLog().size
+        vpn.start("telegram")
+        vpn.awaitState(VpnState.CONNECTED)
+        vpn.stop()
+        vpn.awaitStopped()
+        logMark = logLines().size
+        vpn.start("telegram", fallbackRoom = room, fallbackKey = key, fallbackForce = true, fallbackRelayDead = true)
+        vpn.awaitState(VpnState.CONNECTED)
+        vpn.awaitWaiting(Waiting.NO_SERVER, 30_000)
+        assertTrue(vpn.log.toString(), vpn.log.any { "Сервер отключён для отладки" in it })
+        assertTrue(vpn.fileLog(), logLines().drop(logMark).any { "unreachable at start" in it })
+        vpn.awaitFallback(settle) { it != null }
+        vpn.headEventually(url, 60_000)
+        vpn.awaitFallback(10_000) { it == Fallback.WORKING }
+        assertTrue("nothing at the SOCKS5 server", connectsSince(before).any { it.endsWith(":443") })
+        assertEquals(Waiting.NO_SERVER, vpn.waiting)
+
+        val pid = vpnPid()
+        val starts = logLines().count { "Go tunnel started" in it }
+        val up = System.currentTimeMillis()
+        val mark = logLines().size
+        vpn.start("telegram", fallbackRoom = room, fallbackKey = key, fallbackForce = true, fallbackRelayDead = false)
+        vpn.awaitFallback(60_000) { it == null }
+        Log.i("FALLBACK", "off ${System.currentTimeMillis() - up} ms after the hook went off")
+        vpn.awaitWaiting(null, 10_000)
+        assertEquals(VpnState.CONNECTED, vpn.state)
+        assertTrue(vpn.fileLog(), awaitLogLine("fallback_off", mark))
+        assertTrue(vpn.fileLog(), logLines().drop(mark).any { "fallback_off" in it && "relay_back" in it })
+        assertEquals("the process survived", pid, vpnPid())
+        assertEquals("the tunnel did not restart", starts, logLines().count { "Go tunnel started" in it })
+        val atOff = vpn.socksLog().size
+        vpn.headEventually(url)
+        assertEquals("back on the relay: nothing goes to SOCKS5", atOff, vpn.socksLog().size)
+
+        val prefs = File(vpn.ctx.dataDir, "shared_prefs/${TunnelVpnService.PREFS}.xml")
+        val settled = System.currentTimeMillis() + 5_000
+        while ("name=\"fallback_relay_dead.test\" value=\"false\"" !in prefs.readText() && System.currentTimeMillis() < settled) Thread.sleep(100)
+        assertTrue("name=\"fallback_relay_dead.test\" value=\"false\"" in prefs.readText())
+        assertFalse("the dead address in prefs", "192.0.2.1" in prefs.readText() || "relay-dead" in prefs.readText())
+        val known = File(vpn.ctx.filesDir, Endpoints.KNOWN_FILE)
+        assertFalse("the dead address in the known file", known.exists() && ("192.0.2.1" in known.readText() || "relay-dead" in known.readText()))
+    }
+
+    // The real activity and a real tap. True only: its START has no stand extras, so with false
+    // this tap would send the emulator to the production endpoints.
+    @Test
+    fun relayDeadTapOnARunningTunnelKeepsItAndTheNextTapStops() {
+        vpn.start("telegram")
+        vpn.awaitState(VpnState.CONNECTED)
+        vpn.stop()
+        vpn.awaitStopped()
+        vpn.start("telegram", fallbackRelayDead = true)
+        vpn.awaitState(VpnState.CONNECTED)
+        val pid = vpnPid()
+        val component = "org.newvpn/org.duckdns.splitvpn.MainActivity"
+        val first = vpn.device.executeShellCommand("am start --activity-clear-task -n $component --ez fallback_relay_dead true")
+        assertTrue(first, "Warning" !in first)
+        val toggle = vpn.device.wait(Until.findObject(By.res("org.newvpn", "toggleButton")), 10_000)
+        assertTrue("no toggle", toggle != null)
+        val mark = logLines().size
+        toggle.click()
+        assertTrue(vpn.fileLog(), awaitLogLine("startTunnel: busy", mark))
+        assertEquals(VpnState.CONNECTED, vpn.state)
+        assertEquals("the process survived", pid, vpnPid())
+        toggle.click()
+        vpn.awaitStopped()
     }
 
     @Test
@@ -375,7 +456,7 @@ class FallbackChannelTest {
             vpn.headEventually(url, 120_000)
             assertTrue(connectsSince(back).isNotEmpty())
             vpn.awaitFallback(60_000) { it == Fallback.WORKING }
-            shot("5_working_again", "трафик идёт через канал VK")
+            shot("5_working_again", "трафик идёт через запасной канал")
         }
         Log.i("FALLBACK", "after no network: fallback=${vpn.fallback} starts=${starts()} socks=${connectsSince(before).size}")
         assertEquals(VpnState.CONNECTED, vpn.state)

@@ -346,7 +346,7 @@ class FallbackTest {
         verdict(true)
         assertEquals(emptyList<String>(), calls())
         assertNull(TunnelState.fallback)
-        assertFalse(TunnelState.logLines().any { "VK" in it })
+        assertFalse(TunnelState.logLines().any { "запасной" in it.lowercase() })
     }
 
     @Test
@@ -402,14 +402,14 @@ class FallbackTest {
     @Test
     fun aRoomFromAnIntentShowsInTheJournalWithoutTheLink() {
         start()
-        assertEquals(1, TunnelState.logLines().count { "Комната VK задана" in it })
+        assertEquals(1, TunnelState.logLines().count { "Комната задана" in it })
         assertFalse(TunnelState.logLines().any { "testroom" in it })
     }
 
     @Test
     fun noJournalLineWithoutARoomInTheIntent() {
         start(intent(room = null, key = null))
-        assertFalse(TunnelState.logLines().any { "Комната VK" in it })
+        assertFalse(TunnelState.logLines().any { "Комната" in it })
     }
 
     // ---- off
@@ -727,7 +727,7 @@ class FallbackTest {
         channelOn()
         calls()
         go("fallback_connect", "ok", ms = 900)
-        assertEquals("Канал через VK · батарея садится быстрее", notificationText())
+        assertEquals("Запасной канал · батарея садится быстрее", notificationText())
         go("fallback_off", "ok", "idle")
         assertEquals("Сервер недоступен · подключится автоматически", notificationText())
     }
@@ -804,5 +804,278 @@ class FallbackTest {
         calls()
         assertFalse(TunnelState.logLines().any { "testroom" in it })
         assertFalse(AppLog.files(app).any { "testroom" in it.readText() })
+    }
+
+    @Test
+    fun theJournalAndTheNotificationNeverNameVk() {
+        channelOn()
+        go("fallback_connect", "ok", ms = 900)
+        assertFalse(notificationText().orEmpty().contains("VK"))
+        verdict(false)
+        calls()
+        assertFalse(TunnelState.logLines().toString(), TunnelState.logLines().any { "VK" in it })
+    }
+
+    // ---- fallback_relay_dead
+
+    private val dead = TunnelVpnService.Endpoint("relay-dead.invalid", "192.0.2.1", 443, "/relay-dead")
+    private val deadLine = "Сервер отключён для отладки"
+    private val listJson = """[{"host":"a.example.org","ip":"203.0.113.10","port":443,"path":"/app/aaaa1"},{"host":"b.example.net","ip":"198.51.100.7","port":8443,"path":"/app/bbbb2"}]"""
+    private val knownFile get() = java.io.File(app.filesDir, Endpoints.KNOWN_FILE)
+
+    private fun deadIntent(on: Boolean = true) = intent().putExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, on)
+
+    // As MainActivity sends it to a running tunnel: no other extras, the start itself is skipped.
+    private fun flip(on: Boolean) {
+        svc.onStartCommand(
+            Intent(TunnelVpnService.ACTION_START)
+                .putStringArrayListExtra(TunnelVpnService.EXTRA_SERVICES, arrayListOf("telegram"))
+                .putExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, on),
+            0, 3,
+        )
+        ShadowLooper.idleMainLooper()
+    }
+
+    private fun assertNothingDeadPersisted() {
+        assertFalse("known file", knownFile.exists() && "192.0.2.1" in knownFile.readText())
+        assertFalse("known in memory", Endpoints.known.contains(dead))
+        assertFalse("cache", Endpoints.cached(app).orEmpty().contains(dead))
+        assertTrue("working", Endpoints.working(app) != dead)
+        val leaks = prefs.all.filterValues { "192.0.2.1" in it.toString() || "relay-dead" in it.toString() }
+        assertEquals(emptyMap<String, Any?>(), leaks)
+    }
+
+    private fun connectingError(i: Intent): String? {
+        svc.onStartCommand(i, 0, 1)
+        val deadline = System.currentTimeMillis() + 10_000
+        while (TunnelState.state != VpnState.ERROR && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20)
+            ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS)
+        }
+        assertEquals(VpnState.ERROR, TunnelState.state)
+        return TunnelState.lastError
+    }
+
+    private fun internet() {
+        val cm = app.getSystemService(ConnectivityManager::class.java)
+        val caps = ShadowNetworkCapabilities.newInstance()
+        shadowOf(caps).addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        shadowOf(caps).addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        shadowOf(cm).setNetworkCapabilities(cm.activeNetwork, caps)
+    }
+
+    @Test
+    fun relayDeadUsesTheDeadEndpointAndTheProductionCredential() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        be.endpoints = listOf(a, b)
+        val real = Credentials.load(app)!!
+        Credentials.save(app, fakeCred(System.currentTimeMillis() / 1000 + 5 * 86400, kind = 9), test = true)
+        be.relayDownAtStart = true
+        start(deadIntent())
+        assertEquals(listOf(dead), be.startedEndpoints.toList())
+        assertTrue(real.contentEquals(be.startedWith))
+        assertEquals(0, be.registered.size)
+        assertTrue("the fetch of RC goes on", be.fetches.get() > 0)
+        assertEquals(1, TunnelState.logLines().count { deadLine in it })
+
+        online()
+        settle()
+        assertEquals("a real outage to the channel", 1, enabledCount())
+        assertEquals(Waiting.NO_SERVER, TunnelState.waiting)
+        // Rounds and new networks: nothing to go to.
+        verdict(true)
+        ShadowLooper.idleMainLooper(TunnelVpnService.ROUND_PAUSE_MS * 2, TimeUnit.MILLISECONDS)
+        netCallback()!!.onAvailable(net(8))
+        ShadowLooper.idleMainLooper(TunnelVpnService.NEW_NETWORK_SWITCH_MS, TimeUnit.MILLISECONDS)
+        assertEquals(emptyList<TunnelVpnService.Endpoint>(), be.endpointsSet.toList())
+        assertNothingDeadPersisted()
+    }
+
+    @Test
+    fun aNewListWhileDeadIsCachedButNotDialed() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        be.endpoints = listOf(a)
+        Endpoints.attach(app)
+        be.relayDownAtStart = true
+        start(deadIntent())
+        online()
+        settle()
+        be.config = RcValues("blob:$listJson", 0, 0, "")
+        fetchAgain()
+        assertEquals(emptyList<TunnelVpnService.Endpoint>(), be.endpointsSet.toList())
+        assertEquals(listOf(a, b), Endpoints.cached(app))
+        assertTrue(Endpoints.known.containsAll(listOf(a, b)))
+        assertNothingDeadPersisted()
+        // And it is what comes back.
+        flip(false)
+        assertEquals(listOf(a), be.endpointsSet.toList())
+    }
+
+    @Test
+    fun aVerdictOfUpLandingOnTheDeadEndpointIsNotWorking() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        be.endpoints = listOf(a)
+        start(deadIntent())
+        verdict(false)
+        assertNull(Endpoints.working(app))
+        assertNothingDeadPersisted()
+    }
+
+    @Test
+    fun turningOffBringsTheRealEndpointBackAndTheChannelGoesOff() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        be.endpoints = listOf(a, b)
+        Endpoints.setWorking(app, b)
+        be.relayDownAtStart = true
+        start(deadIntent())
+        online()
+        settle()
+        assertEquals(1, enabledCount())
+
+        flip(false)
+        assertEquals("the last that worked", listOf(b), be.endpointsSet.toList())
+        assertEquals(listOf(true), be.suspects.toList())
+        assertEquals("no restart", 1, be.events.count { it == "start" })
+        assertEquals(0, be.events.count { it == "stop" })
+        assertEquals(VpnState.CONNECTED, TunnelState.state)
+        assertEquals("not before the relay says so", 0, calls().count { it.startsWith("fallbackDisable") })
+
+        verdict(false)
+        assertEquals("fallbackDisable:relay_back", calls().last())
+        assertNull(TunnelState.fallback)
+        assertNull(TunnelState.waiting)
+        assertEquals(b, Endpoints.working(app))
+        assertNothingDeadPersisted()
+        assertEquals(1, TunnelState.logLines().count { "Сервер снова включён" in it })
+    }
+
+    @Test
+    fun turningOffWithNothingWorkingGoesToTheFirst() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        be.endpoints = listOf(a, b)
+        start(deadIntent())
+        flip(false)
+        assertEquals(listOf(a), be.endpointsSet.toList())
+    }
+
+    @Test
+    fun turningOnSwitchesARunningTunnelWithoutARestart() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        be.endpoints = listOf(a)
+        start()
+        online()
+        settle()
+        flip(true)
+        assertEquals(listOf(dead), be.endpointsSet.toList())
+        assertEquals(1, be.events.count { it == "start" })
+        assertEquals(1, TunnelState.logLines().count { deadLine in it })
+        verdict(true)
+        assertEquals(1, enabledCount())
+        assertNothingDeadPersisted()
+        // Told again: no second switch.
+        flip(true)
+        assertEquals(1, be.endpointsSet.size)
+    }
+
+    @Test
+    fun itOutlivesTheStartThatBroughtItAndGoesWithFalse() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        be.endpoints = listOf(a)
+        start(deadIntent())
+        stop()
+        be.fetches.set(0)
+        start(Intent(TunnelVpnService.ACTION_START).putStringArrayListExtra(TunnelVpnService.EXTRA_SERVICES, arrayListOf("telegram")))
+        assertEquals(dead, be.startedEndpoints.last())
+        assertEquals(1, TunnelState.logLines().count { deadLine in it })
+        stop()
+        be.fetches.set(0)
+        start(deadIntent(false))
+        assertEquals(a, be.startedEndpoints.last())
+        assertEquals(0, TunnelState.logLines().count { deadLine in it })
+    }
+
+    @Test
+    fun aRebuildStaysOnTheDeadEndpoint() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        RouteCache.file(app).delete()
+        be.endpoints = listOf(a)
+        start(deadIntent().putStringArrayListExtra(TunnelVpnService.EXTRA_SERVICES, arrayListOf("twitter")))
+        online()
+        rebuild()
+        val deadline = System.currentTimeMillis() + 10_000
+        while (be.startedEndpoints.size < 2 && System.currentTimeMillis() < deadline) Thread.sleep(20)
+        awaitServiceThreads()
+        ShadowLooper.idleMainLooper()
+        RouteCache.file(app).delete()
+        assertEquals(listOf(dead, dead), be.startedEndpoints.toList())
+    }
+
+    @Test
+    fun anExpiredCredentialFailsAsTodayWithoutDialingTheRealOnes() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        be.endpoints = listOf(a, b)
+        internet()
+        Credentials.save(app, fakeCred(System.currentTimeMillis() / 1000 - 60))
+        be.token = "tok".toByteArray()
+        be.registerError = Exception("relay unreachable: i/o timeout")
+        assertEquals(TunnelVpnService.ERR_NO_SERVER, connectingError(deadIntent()))
+        assertEquals(listOf(dead.addr), be.registeredAddrs.toList())
+        assertEquals(0, be.startedEndpoints.size)
+    }
+
+    @Test
+    fun noCredentialAndNoIntegrityAsksForACodeAsToday() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        internet()
+        Credentials.clear(app)
+        assertEquals(TunnelVpnService.ERR_NEED_CODE, connectingError(deadIntent()))
+        assertEquals(emptyList<String>(), be.registeredAddrs.toList())
+    }
+
+    @Test
+    fun aCredentialCloseToExpiryTriesTheDeadEndpointOnlyAndStillWorks() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        be.endpoints = listOf(a, b)
+        val cred = fakeCred(System.currentTimeMillis() / 1000 + 3600)
+        Credentials.save(app, cred)
+        be.token = "tok".toByteArray()
+        be.registerError = Exception("relay unreachable: i/o timeout")
+        start(deadIntent())
+        assertEquals(listOf(dead.addr), be.registeredAddrs.toList())
+        assertTrue(cred.contentEquals(be.startedWith))
+        assertEquals(listOf(dead), be.startedEndpoints.toList())
+    }
+
+    // How the emulator exercises it: the stand's credential, and off goes to the stand.
+    @Test
+    fun overTheStandItFallsBackToTheStand() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        val stand = "stand|test.local|10.0.2.2|8443|/app/test"
+        val standCred = fakeCred(System.currentTimeMillis() / 1000 + 5 * 86400, kind = 9)
+        Credentials.save(app, standCred, test = true)
+        be.relayDownAtStart = true
+        start(deadIntent().putExtra(TunnelVpnService.EXTRA_ENDPOINT, stand))
+        assertEquals(listOf(dead), be.startedEndpoints.toList())
+        assertTrue(standCred.contentEquals(be.startedWith))
+        svc.onStartCommand(deadIntent(false).putExtra(TunnelVpnService.EXTRA_ENDPOINT, stand), 0, 3)
+        ShadowLooper.idleMainLooper()
+        assertEquals(listOf(TunnelVpnService.Endpoint("test.local", "10.0.2.2", 8443, "/app/test")), be.endpointsSet.toList())
+        // A plain START would drop the stand, so nothing here may do without the extra.
+        assertEquals(1, be.startedEndpoints.size)
+    }
+
+    // Only `testReleaseUnitTest --tests '*FallbackTest.aReleaseBuild*'` runs this: BuildConfig.DEBUG is false there.
+    @Test
+    fun aReleaseBuildIgnoresTheExtraAndThePref() {
+        org.junit.Assume.assumeFalse(BuildConfig.DEBUG)
+        be.endpoints = listOf(a)
+        prefs.edit().putBoolean("fallback_relay_dead.test", true).commit()
+        start(deadIntent())
+        assertEquals(listOf(a), be.startedEndpoints.toList())
+        assertFalse(TunnelState.logLines().any { deadLine in it })
+        verdict(true)
+        verdict(false)
+        assertEquals(a, Endpoints.working(app))
+        assertEquals(emptyList<TunnelVpnService.Endpoint>(), be.endpointsSet.toList())
     }
 }

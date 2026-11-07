@@ -250,16 +250,22 @@ class TunnelVpnService : VpnService() {
         const val EXTRA_FALLBACK_KEY = "fallback_key"
         const val EXTRA_FALLBACK_FORCE = "fallback_force"
         const val EXTRA_FALLBACK_MAX_JOINS = "fallback_max_joins"
+        // Debug builds: the relay looks dead on a phone, where nothing else can
+        // fake an outage on LTE. Kept like the others; false brings the real
+        // endpoint back without a restart.
+        const val EXTRA_FALLBACK_RELAY_DEAD = "fallback_relay_dead"
         private const val KEY_FALLBACK_ROOM = "fallback_room.test"
         private const val KEY_FALLBACK_KEY = "fallback_key.test"
         private const val KEY_FALLBACK_FORCE = "fallback_force.test"
         private const val KEY_FALLBACK_MAX_JOINS = "fallback_max_joins.test"
+        private const val KEY_FALLBACK_RELAY_DEAD = "fallback_relay_dead.test"
 
         internal fun copyFallbackExtras(from: Intent?, to: Intent) {
             from?.getStringExtra(EXTRA_FALLBACK_ROOM)?.let { to.putExtra(EXTRA_FALLBACK_ROOM, it) }
             from?.getStringExtra(EXTRA_FALLBACK_KEY)?.let { to.putExtra(EXTRA_FALLBACK_KEY, it) }
             if (from?.hasExtra(EXTRA_FALLBACK_FORCE) == true) to.putExtra(EXTRA_FALLBACK_FORCE, from.getBooleanExtra(EXTRA_FALLBACK_FORCE, false))
             if (from?.hasExtra(EXTRA_FALLBACK_MAX_JOINS) == true) to.putExtra(EXTRA_FALLBACK_MAX_JOINS, from.getIntExtra(EXTRA_FALLBACK_MAX_JOINS, 0))
+            if (from?.hasExtra(EXTRA_FALLBACK_RELAY_DEAD) == true) to.putExtra(EXTRA_FALLBACK_RELAY_DEAD, from.getBooleanExtra(EXTRA_FALLBACK_RELAY_DEAD, false))
         }
 
         // vkfallback is one per process, and order matters: Enable after
@@ -374,6 +380,8 @@ class TunnelVpnService : VpnService() {
         // the connection breaks. One more try is enough.
         internal var PROBE_RETRY_MS = 1_000L
         private const val WHY_NEW_LIST = "new list"
+        private const val WHY_RELAY_DEAD = "relay dead flag"
+        private const val RELAY_DEAD_LINE = "Сервер отключён для отладки"
         // vpn_failed's detail for a TUN refused for want of the VPN permission.
         private const val PERM = "perm"
         internal const val CHANNEL_ID = "vpn_channel"
@@ -436,8 +444,13 @@ class TunnelVpnService : VpnService() {
 
     @Volatile private var testEndpoint: Endpoint? = null
     @Volatile private var testRc = false
+    private val relayDead get() = BuildConfig.DEBUG && vpnPrefs.getBoolean(KEY_FALLBACK_RELAY_DEAD, false)
+    // TEST-NET, so Go sees a real outage. Only ever in [endpoints] and [current]: the
+    // cache, the known file and `working` keep the real ones for when it goes off.
+    // A function: with its callers behind BuildConfig.DEBUG, R8 drops it from release.
+    private fun deadEndpoint() = Endpoint("relay-dead.invalid", "192.0.2.1", 443, "/relay-dead", "dead")
     // Never the real defaults under a test list: the emulator must not dial the VDS.
-    private val endpoints get() = testEndpoint?.let { listOf(it) } ?: Endpoints.cached(this, testRc) ?: if (testRc) emptyList() else backend.endpoints()
+    private val endpoints get() = if (relayDead) listOf(deadEndpoint()) else testEndpoint?.let { listOf(it) } ?: Endpoints.cached(this, testRc) ?: if (testRc) emptyList() else backend.endpoints()
     // What the running tunnel talks to; null while none runs.
     @Volatile private var current: Endpoint? = null
 
@@ -597,19 +610,32 @@ class TunnelVpnService : VpnService() {
     }.onFailure { AppLog.e("test hooks", it) }
 
     private fun fallbackHooks(intent: Intent?) {
-        if (intent == null || listOf(EXTRA_FALLBACK_ROOM, EXTRA_FALLBACK_KEY, EXTRA_FALLBACK_FORCE, EXTRA_FALLBACK_MAX_JOINS).none(intent::hasExtra)) return
+        if (intent == null || listOf(EXTRA_FALLBACK_ROOM, EXTRA_FALLBACK_KEY, EXTRA_FALLBACK_FORCE, EXTRA_FALLBACK_MAX_JOINS, EXTRA_FALLBACK_RELAY_DEAD).none(intent::hasExtra)) return
+        val wasDead = relayDead
         vpnPrefs.edit().apply {
             intent.getStringExtra(EXTRA_FALLBACK_ROOM)?.let { putString(KEY_FALLBACK_ROOM, it) }
             intent.getStringExtra(EXTRA_FALLBACK_KEY)?.let { putString(KEY_FALLBACK_KEY, it) }
             if (intent.hasExtra(EXTRA_FALLBACK_FORCE)) putBoolean(KEY_FALLBACK_FORCE, intent.getBooleanExtra(EXTRA_FALLBACK_FORCE, false))
             if (intent.hasExtra(EXTRA_FALLBACK_MAX_JOINS)) putInt(KEY_FALLBACK_MAX_JOINS, intent.getIntExtra(EXTRA_FALLBACK_MAX_JOINS, 0))
+            if (intent.hasExtra(EXTRA_FALLBACK_RELAY_DEAD)) putBoolean(KEY_FALLBACK_RELAY_DEAD, intent.getBooleanExtra(EXTRA_FALLBACK_RELAY_DEAD, false))
         }.apply()
         mainHandler.post {
             // Posted: the START this came with clears the log. MainActivity is
             // exported, so a room planted by another app shows here.
-            if (!intent.getStringExtra(EXTRA_FALLBACK_ROOM).isNullOrEmpty()) TunnelState.log("Комната VK задана из интента, только для отладки")
+            if (!intent.getStringExtra(EXTRA_FALLBACK_ROOM).isNullOrEmpty()) TunnelState.log("Комната задана из интента, только для отладки")
             onFallbackFlag()
+            if (relayDead != wasDead) onRelayDeadFlag()
         }
+    }
+
+    // Main thread only. A tunnel not up yet is put right by onNewList once it is.
+    private fun onRelayDeadFlag() {
+        val list = endpoints
+        val target = Endpoints.working(this, testRc)?.takeIf { it in list } ?: list.firstOrNull() ?: return
+        if (target == current) return
+        resetRound()
+        resetBackoff()
+        switchEndpoint(target, WHY_RELAY_DEAD)
     }
 
     private fun pushAll() {
@@ -756,7 +782,7 @@ class TunnelVpnService : VpnService() {
             if (fallbackOn) when {
                 name == "fallback_connect" && result == "ok" -> {
                     fallbackState(Fallback.WORKING)
-                    TunnelState.log("Запасной канал через VK подключён")
+                    TunnelState.log("Запасной канал подключён")
                 }
                 name == "fallback_connect" -> fallbackState(Fallback.FAILED)
                 name == "fallback_off" && step == "idle" -> fallbackState(Fallback.READY)
@@ -832,7 +858,7 @@ class TunnelVpnService : VpnService() {
         val maxJoins = if (BuildConfig.DEBUG) vpnPrefs.getInt(KEY_FALLBACK_MAX_JOINS, 0) else 0
         AppLog.i("fallback: on, relay down for ${downFor / 1000} s")
         fallbackState(Fallback.READY)
-        TunnelState.log("Сервер недоступен, включаю запасной канал через VK")
+        TunnelState.log("Сервер недоступен, включаю запасной канал")
         fallbackTask {
             try {
                 backend.fallbackConfigure(room, key)
@@ -868,7 +894,7 @@ class TunnelVpnService : VpnService() {
         if (!takeFallback()) return null
         AppLog.i("fallback: off ($detail)")
         fallbackState(null)
-        if (TunnelState.state == VpnState.CONNECTED) TunnelState.log("Запасной канал через VK выключен")
+        if (TunnelState.state == VpnState.CONNECTED) TunnelState.log("Запасной канал выключен")
         return fallbackTask { backend.fallbackDisable(detail) }
     }
 
@@ -1035,6 +1061,8 @@ class TunnelVpnService : VpnService() {
         checkDay()
         checkActive()
         val ep = current ?: return
+        // A verdict still on its way from the real one may land right after the switch.
+        if (BuildConfig.DEBUG && ep == deadEndpoint()) return
         if (testEndpoint == null && ep != Endpoints.working(this, testRc)) Endpoints.setWorking(this, ep, testRc)
     }
 
@@ -1073,6 +1101,7 @@ class TunnelVpnService : VpnService() {
         TunnelState.log(
             when {
                 why == WHY_NEW_LIST -> "Получен новый список серверов"
+                BuildConfig.DEBUG && why == WHY_RELAY_DEAD -> if (relayDead) RELAY_DEAD_LINE else "Сервер снова включён, проверяю связь"
                 n == 1 -> "Сервер недоступен, возвращаюсь на основной"
                 else -> "Сервер недоступен, переключаюсь на резервный ($n из ${list.size})"
             },
@@ -1367,6 +1396,7 @@ class TunnelVpnService : VpnService() {
         // quota notice stays past the quota check, a refusal there keeps it.
         getSystemService(NotificationManager::class.java).cancel(PERM_NOTIFICATION_ID)
         AppLog.i("startTunnel services=$serviceIds adblock=$adBlock direct=$direct")
+        if (relayDead) TunnelState.log(RELAY_DEAD_LINE)
         // Before any fail: the SDK stamps it on every event after it. Its
         // share among the active also tells when the ad list starts to
         // block the hosts Analytics sends to.
@@ -2036,7 +2066,7 @@ class TunnelVpnService : VpnService() {
                 when {
                     retryOnNetwork != null -> "Нет сети · подключится автоматически"
                     TunnelState.waiting == Waiting.NO_NETWORK -> "Нет сети · подключится автоматически"
-                    TunnelState.waiting == Waiting.NO_SERVER && TunnelState.fallback == Fallback.WORKING -> "Канал через VK · батарея садится быстрее"
+                    TunnelState.waiting == Waiting.NO_SERVER && TunnelState.fallback == Fallback.WORKING -> "Запасной канал · батарея садится быстрее"
                     TunnelState.waiting == Waiting.NO_SERVER -> "Сервер недоступен · подключится автоматически"
                     else -> "VPN включён"
                 }

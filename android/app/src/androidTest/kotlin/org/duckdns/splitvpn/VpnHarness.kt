@@ -101,11 +101,11 @@ class VpnHarness {
      * [quotaReset]: today's count starts from zero.
      * [fromUi] false: a start as boot's or the resume on create, without the services
      * (the service takes the last run's); [services] are ignored then.
-     * [fallbackRoom], [fallbackKey], [fallbackForce], [fallbackMaxJoins]: the VK channel's debug
+     * [fallbackRoom], [fallbackKey], [fallbackForce], [fallbackMaxJoins], [fallbackRelayDead]: the VK channel's debug
      * extras. Always sent: the service keeps them in prefs across runs, and what a real VK test left
      * there would send every other test's outage to real VK.
      */
-    fun start(vararg services: String, forgetCred: Boolean = false, rcList: String? = null, quotaMb: Long? = null, quotaReset: Boolean = false, direct: Boolean? = null, fromUi: Boolean = true, fallbackRoom: String = "", fallbackKey: String = "", fallbackForce: Boolean = false, fallbackMaxJoins: Int = 0) {
+    fun start(vararg services: String, forgetCred: Boolean = false, rcList: String? = null, quotaMb: Long? = null, quotaReset: Boolean = false, direct: Boolean? = null, fromUi: Boolean = true, fallbackRoom: String = "", fallbackKey: String = "", fallbackForce: Boolean = false, fallbackMaxJoins: Int = 0, fallbackRelayDead: Boolean = false) {
         val i = Intent(ctx, TunnelVpnService::class.java).setAction(TunnelVpnService.ACTION_START)
         if (fromUi) i.putStringArrayListExtra(TunnelVpnService.EXTRA_SERVICES, arrayListOf(*services))
         direct?.let { i.putExtra(TunnelVpnService.EXTRA_DIRECT, it) }
@@ -115,6 +115,7 @@ class VpnHarness {
         i.putExtra(TunnelVpnService.EXTRA_FALLBACK_KEY, fallbackKey)
         i.putExtra(TunnelVpnService.EXTRA_FALLBACK_FORCE, fallbackForce)
         i.putExtra(TunnelVpnService.EXTRA_FALLBACK_MAX_JOINS, fallbackMaxJoins)
+        i.putExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, fallbackRelayDead)
         if (endpoint != null) {
             if (rcList != null) i.putExtra(TunnelVpnService.EXTRA_RC_ENDPOINTS, rcList)
             else i.putExtra(TunnelVpnService.EXTRA_ENDPOINT, endpoint)
