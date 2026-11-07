@@ -825,16 +825,14 @@ class FallbackTest {
 
     private fun deadIntent(on: Boolean = true) = intent().putExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, on)
 
-    // As MainActivity sends it to a running tunnel: no other extras, the start itself is skipped.
-    private fun flip(on: Boolean) {
-        svc.onStartCommand(
-            Intent(TunnelVpnService.ACTION_START)
-                .putStringArrayListExtra(TunnelVpnService.EXTRA_SERVICES, arrayListOf("telegram"))
-                .putExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, on),
-            0, 3,
-        )
+    // As MainActivity sends it: over the binding, no START.
+    private fun config(extras: android.os.Bundle) {
+        android.os.Messenger(svc.onBind(Intent(TunnelVpnService.ACTION_BIND))!!)
+            .send(android.os.Message.obtain(null, VpnClient.MSG_FALLBACK_EXTRAS).apply { data = extras })
         ShadowLooper.idleMainLooper()
     }
+
+    private fun flip(on: Boolean) = config(android.os.Bundle().apply { putBoolean(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, on) })
 
     private fun assertNothingDeadPersisted() {
         assertFalse("known file", knownFile.exists() && "192.0.2.1" in knownFile.readText())
@@ -1046,7 +1044,53 @@ class FallbackTest {
         assertEquals(listOf(dead), be.startedEndpoints.toList())
     }
 
-    // How the emulator exercises it: the stand's credential, and off goes to the stand.
+    // Nothing runs: saved for the next start, and the service was only ever bound.
+    @Test
+    fun onAStoppedTunnelTheMessageOnlySaves() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        be.endpoints = listOf(a)
+        config(android.os.Bundle().apply {
+            putString(TunnelVpnService.EXTRA_FALLBACK_ROOM, room)
+            putString(TunnelVpnService.EXTRA_FALLBACK_KEY, key)
+            putBoolean(TunnelVpnService.EXTRA_FALLBACK_FORCE, true)
+            putBoolean(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, true)
+        })
+        assertEquals(VpnState.DISCONNECTED, TunnelState.state)
+        assertFalse("wanted", prefs.getBoolean(TunnelVpnService.KEY_WANTED, false))
+        assertEquals(emptyList<TunnelVpnService.Endpoint>(), be.startedEndpoints.toList())
+        assertEquals(emptyList<TunnelVpnService.Endpoint>(), be.endpointsSet.toList())
+        assertNull("no foreground", shadowOf(svc).lastForegroundNotification)
+        assertEquals(0, be.fetches.get())
+        assertEquals(TunnelState.logLines().toString(), 1, TunnelState.logLines().count { "Настройки отладки" in it })
+        assertFalse(TunnelState.logLines().any { "testroom" in it || key in it })
+
+        start(Intent(TunnelVpnService.ACTION_START).putStringArrayListExtra(TunnelVpnService.EXTRA_SERVICES, arrayListOf("telegram")))
+        assertEquals(listOf(dead), be.startedEndpoints.toList())
+        assertEquals(1, TunnelState.logLines().count { deadLine in it })
+        assertEquals(1, TunnelState.logLines().count { "Комната задана" in it })
+    }
+
+    @Test
+    fun theSameValuesAgainSayNothing() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        flip(true)
+        TunnelState.clearLog()
+        flip(true)
+        assertEquals(emptyList<String>(), TunnelState.logLines())
+    }
+
+    @Test
+    fun theMessageNeverStopsARunningTunnel() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        start(deadIntent())
+        flip(false)
+        flip(true)
+        assertEquals(VpnState.CONNECTED, TunnelState.state)
+        assertEquals(0, be.events.count { it == "stop" })
+        assertEquals(1, be.events.count { it == "start" })
+    }
+
+        // How the emulator exercises it: the stand's credential, and off goes to the stand.
     @Test
     fun overTheStandItFallsBackToTheStand() {
         org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
@@ -1064,7 +1108,20 @@ class FallbackTest {
         assertEquals(1, be.startedEndpoints.size)
     }
 
-    // Only `testReleaseUnitTest --tests '*FallbackTest.aReleaseBuild*'` runs this: BuildConfig.DEBUG is false there.
+    // Only `testReleaseUnitTest --tests '*FallbackTest.aReleaseBuild*'` runs this.
+    @Test
+    fun aReleaseBuildIgnoresTheMessage() {
+        org.junit.Assume.assumeFalse(BuildConfig.DEBUG)
+        be.endpoints = listOf(a)
+        config(android.os.Bundle().apply {
+            putString(TunnelVpnService.EXTRA_FALLBACK_ROOM, room)
+            putBoolean(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, true)
+        })
+        assertFalse(prefs.all.keys.toString(), prefs.all.keys.any { it.startsWith("fallback_") })
+        assertEquals(emptyList<String>(), TunnelState.logLines())
+    }
+
+    // The same; a stray pref or extra counts for nothing.
     @Test
     fun aReleaseBuildIgnoresTheExtraAndThePref() {
         org.junit.Assume.assumeFalse(BuildConfig.DEBUG)

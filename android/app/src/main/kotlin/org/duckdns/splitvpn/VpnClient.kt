@@ -31,6 +31,7 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
         const val MSG_UNREGISTER = 2
         const val MSG_SNAPSHOT = 3
         const val MSG_LOG = 4
+        const val MSG_FALLBACK_EXTRAS = 5
         const val KEY_STATE = "state"
         const val KEY_ERROR = "error"
         const val KEY_LOG = "log"
@@ -69,6 +70,8 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
     }
 
     private var service: Messenger? = null
+    // onCreate and onNewIntent can come before onStart binds.
+    private val pendingExtras = mutableListOf<Bundle>()
     private val incoming = Messenger(Handler(Looper.getMainLooper()) { msg ->
         if (msg.what == MSG_SNAPSHOT) {
             onSnapshot(
@@ -89,6 +92,8 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
     private val conn = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             service = Messenger(binder).also { send(it, MSG_REGISTER) }
+            pendingExtras.forEach(::sendFallbackExtras)
+            pendingExtras.clear()
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
@@ -115,6 +120,21 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
         val to = service ?: return
         try {
             to.send(Message.obtain(null, MSG_LOG).apply { data = Bundle().apply { putString(KEY_LINE, line) } })
+        } catch (_: RemoteException) {
+        }
+    }
+
+    /**
+     * Debug builds. Over the binding and not by startService: that throws for an app the system
+     * counts as in the background, and would leave a started service behind on a stopped tunnel.
+     */
+    fun sendFallbackExtras(extras: Bundle) {
+        val to = service ?: run {
+            pendingExtras += extras
+            return
+        }
+        try {
+            to.send(Message.obtain(null, MSG_FALLBACK_EXTRAS).apply { data = extras })
         } catch (_: RemoteException) {
         }
     }

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Without it `am start -n` on an open screen only brings it forward: no onNewIntent, and the fallback extras are lost. -->
+        <activity
+            android:name="org.duckdns.splitvpn.MainActivity"
+            android:launchMode="singleTop" />
+    </application>
+</manifest>

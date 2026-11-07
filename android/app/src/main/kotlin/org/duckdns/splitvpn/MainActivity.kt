@@ -251,8 +251,7 @@ class MainActivity : Activity() {
             when (state) {
                 VpnState.DISCONNECTED -> startVpn()
                 VpnState.ERROR -> if (offlineRetry) stopVpn() else startVpn()
-                // Debug: fallback_relay_dead switches a running tunnel, this one tap does not stop it.
-                VpnState.CONNECTED -> if (BuildConfig.DEBUG && intent?.hasExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD) == true) launchService() else stopVpn()
+                VpnState.CONNECTED -> stopVpn()
                 VpnState.CONNECTING, VpnState.DISCONNECTING -> Unit
             }
         }
@@ -286,11 +285,20 @@ class MainActivity : Activity() {
         showTab(savedInstanceState?.getString(KEY_TAB) ?: "vpn")
         render()
         if (savedInstanceState == null) onUpdateIntent(intent)
+        if (BuildConfig.DEBUG && savedInstanceState == null) sendFallbackExtras(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         onUpdateIntent(intent)
+        if (BuildConfig.DEBUG) sendFallbackExtras(intent)
+    }
+
+    // Recents relaunches with the intent that first opened the task, extras and all:
+    // removing them here does not reach the system's copy.
+    private fun sendFallbackExtras(from: Intent?) {
+        if (from == null || from.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
+        TunnelVpnService.takeFallbackExtras(from)?.let(vpn::sendFallbackExtras)
     }
 
     private fun onUpdateIntent(intent: Intent?) {
@@ -561,7 +569,7 @@ class MainActivity : Activity() {
             else if (waiting == Waiting.NO_NETWORK) "Нет интернета. VPN включён и заработает сам, когда сеть появится — ничего делать не нужно."
             else when (fallback) {
                 Fallback.WORKING -> "Сервер не отвечает, поэтому трафик идёт через запасной канал. Батарея садится быстрее обычного. Когда сервер вернётся, VPN переключится сам."
-                Fallback.READY -> "Сервер не отвечает. Включён запасной канал: он подключится, когда приложениям понадобится сеть. Пока он работает, батарея садится быстрее."
+                Fallback.READY -> "Сервер не отвечает. Включён запасной канал. Пока он работает, батарея садится быстрее."
                 Fallback.FAILED -> "Сервер не отвечает, и запасной канал пока не подключился. VPN включён и попробует снова сам, ничего делать не нужно."
                 null -> "Сервер пока не отвечает — возможно, его блокирует оператор. VPN включён и подключится сам, ничего делать не нужно."
             }
@@ -1005,10 +1013,6 @@ class MainActivity : Activity() {
             putExtra(TunnelVpnService.EXTRA_ADBLOCK, prefs.getBoolean(KEY_ADBLOCK, false))
             putExtra(TunnelVpnService.EXTRA_DIRECT, prefs.getBoolean(KEY_DIRECT, true))
             invite?.let { putExtra(TunnelVpnService.EXTRA_INVITE, it) }
-        }
-        if (BuildConfig.DEBUG) {
-            TunnelVpnService.copyFallbackExtras(getIntent(), intent)
-            getIntent()?.removeExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD)
         }
         startForegroundService(intent)
     }

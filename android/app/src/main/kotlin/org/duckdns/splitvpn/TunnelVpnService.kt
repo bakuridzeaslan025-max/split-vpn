@@ -15,6 +15,7 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -245,7 +246,7 @@ class TunnelVpnService : VpnService() {
         // Debug builds: the VK channel's room link and key until stages 5-6
         // deliver them, and vk_fallback forced on. They stay in prefs for the
         // STARTs without them; an empty value takes them back. The service is
-        // not exported: adb gives them to MainActivity, which passes them on tap.
+        // not exported: adb gives them to MainActivity, which passes them on at once.
         const val EXTRA_FALLBACK_ROOM = "fallback_room"
         const val EXTRA_FALLBACK_KEY = "fallback_key"
         const val EXTRA_FALLBACK_FORCE = "fallback_force"
@@ -260,12 +261,19 @@ class TunnelVpnService : VpnService() {
         private const val KEY_FALLBACK_MAX_JOINS = "fallback_max_joins.test"
         private const val KEY_FALLBACK_RELAY_DEAD = "fallback_relay_dead.test"
 
-        internal fun copyFallbackExtras(from: Intent?, to: Intent) {
-            from?.getStringExtra(EXTRA_FALLBACK_ROOM)?.let { to.putExtra(EXTRA_FALLBACK_ROOM, it) }
-            from?.getStringExtra(EXTRA_FALLBACK_KEY)?.let { to.putExtra(EXTRA_FALLBACK_KEY, it) }
-            if (from?.hasExtra(EXTRA_FALLBACK_FORCE) == true) to.putExtra(EXTRA_FALLBACK_FORCE, from.getBooleanExtra(EXTRA_FALLBACK_FORCE, false))
-            if (from?.hasExtra(EXTRA_FALLBACK_MAX_JOINS) == true) to.putExtra(EXTRA_FALLBACK_MAX_JOINS, from.getIntExtra(EXTRA_FALLBACK_MAX_JOINS, 0))
-            if (from?.hasExtra(EXTRA_FALLBACK_RELAY_DEAD) == true) to.putExtra(EXTRA_FALLBACK_RELAY_DEAD, from.getBooleanExtra(EXTRA_FALLBACK_RELAY_DEAD, false))
+        // A function: a list in a field would keep the names in the release dex.
+        private fun fallbackExtraNames() = listOf(EXTRA_FALLBACK_ROOM, EXTRA_FALLBACK_KEY, EXTRA_FALLBACK_FORCE, EXTRA_FALLBACK_MAX_JOINS, EXTRA_FALLBACK_RELAY_DEAD)
+
+        /** What [from] brought for [fallbackHooks], null if nothing; gone from it afterwards. */
+        internal fun takeFallbackExtras(from: Intent): Bundle? {
+            val out = Bundle()
+            from.getStringExtra(EXTRA_FALLBACK_ROOM)?.let { out.putString(EXTRA_FALLBACK_ROOM, it) }
+            from.getStringExtra(EXTRA_FALLBACK_KEY)?.let { out.putString(EXTRA_FALLBACK_KEY, it) }
+            if (from.hasExtra(EXTRA_FALLBACK_FORCE)) out.putBoolean(EXTRA_FALLBACK_FORCE, from.getBooleanExtra(EXTRA_FALLBACK_FORCE, false))
+            if (from.hasExtra(EXTRA_FALLBACK_MAX_JOINS)) out.putInt(EXTRA_FALLBACK_MAX_JOINS, from.getIntExtra(EXTRA_FALLBACK_MAX_JOINS, 0))
+            if (from.hasExtra(EXTRA_FALLBACK_RELAY_DEAD)) out.putBoolean(EXTRA_FALLBACK_RELAY_DEAD, from.getBooleanExtra(EXTRA_FALLBACK_RELAY_DEAD, false))
+            fallbackExtraNames().forEach(from::removeExtra)
+            return out.takeUnless { it.isEmpty }
         }
 
         // vkfallback is one per process, and order matters: Enable after
@@ -499,6 +507,8 @@ class TunnelVpnService : VpnService() {
             }
             VpnClient.MSG_UNREGISTER -> msg.replyTo?.let { clients -= it }
             VpnClient.MSG_LOG -> msg.data.getString(VpnClient.KEY_LINE)?.let { AppLog.i("ui: $it") }
+            // Saves and applies, never starts or stops: on a stopped tunnel the service is only bound.
+            VpnClient.MSG_FALLBACK_EXTRAS -> if (BuildConfig.DEBUG) fallbackHooks(msg.data)
         }
         true
     })
@@ -600,7 +610,7 @@ class TunnelVpnService : VpnService() {
         if (testStand && intent?.getBooleanExtra(EXTRA_FORGET_CRED, false) == true) Credentials.clear(this, test = true)
         if (intent?.hasExtra(EXTRA_QUOTA_MB) == true) Quota.setLimitMb(this, intent.getLongExtra(EXTRA_QUOTA_MB, Quota.DEFAULT_MB))
         if (intent?.getBooleanExtra(EXTRA_QUOTA_RESET, false) == true) Quota.save(this, 0, Quota.today())
-        fallbackHooks(intent)
+        fallbackHooks(intent?.extras)
         if (testRc) {
             // Each test starts from its list's first, whatever worked in the last one.
             Endpoints.setWorking(this, null, test = true)
@@ -609,24 +619,27 @@ class TunnelVpnService : VpnService() {
         }
     }.onFailure { AppLog.e("test hooks", it) }
 
-    private fun fallbackHooks(intent: Intent?) {
-        if (intent == null || listOf(EXTRA_FALLBACK_ROOM, EXTRA_FALLBACK_KEY, EXTRA_FALLBACK_FORCE, EXTRA_FALLBACK_MAX_JOINS, EXTRA_FALLBACK_RELAY_DEAD).none(intent::hasExtra)) return
+    private fun fallbackHooks(extras: Bundle?) {
+        if (extras == null || fallbackExtraNames().none(extras::containsKey)) return
         val wasDead = relayDead
+        val before = fallbackPrefs()
         vpnPrefs.edit().apply {
-            intent.getStringExtra(EXTRA_FALLBACK_ROOM)?.let { putString(KEY_FALLBACK_ROOM, it) }
-            intent.getStringExtra(EXTRA_FALLBACK_KEY)?.let { putString(KEY_FALLBACK_KEY, it) }
-            if (intent.hasExtra(EXTRA_FALLBACK_FORCE)) putBoolean(KEY_FALLBACK_FORCE, intent.getBooleanExtra(EXTRA_FALLBACK_FORCE, false))
-            if (intent.hasExtra(EXTRA_FALLBACK_MAX_JOINS)) putInt(KEY_FALLBACK_MAX_JOINS, intent.getIntExtra(EXTRA_FALLBACK_MAX_JOINS, 0))
-            if (intent.hasExtra(EXTRA_FALLBACK_RELAY_DEAD)) putBoolean(KEY_FALLBACK_RELAY_DEAD, intent.getBooleanExtra(EXTRA_FALLBACK_RELAY_DEAD, false))
+            extras.getString(EXTRA_FALLBACK_ROOM)?.let { putString(KEY_FALLBACK_ROOM, it) }
+            extras.getString(EXTRA_FALLBACK_KEY)?.let { putString(KEY_FALLBACK_KEY, it) }
+            if (extras.containsKey(EXTRA_FALLBACK_FORCE)) putBoolean(KEY_FALLBACK_FORCE, extras.getBoolean(EXTRA_FALLBACK_FORCE))
+            if (extras.containsKey(EXTRA_FALLBACK_MAX_JOINS)) putInt(KEY_FALLBACK_MAX_JOINS, extras.getInt(EXTRA_FALLBACK_MAX_JOINS))
+            if (extras.containsKey(EXTRA_FALLBACK_RELAY_DEAD)) putBoolean(KEY_FALLBACK_RELAY_DEAD, extras.getBoolean(EXTRA_FALLBACK_RELAY_DEAD))
         }.apply()
+        val changed = fallbackPrefs() != before
         mainHandler.post {
-            // Posted: the START this came with clears the log. MainActivity is
-            // exported, so a room planted by another app shows here.
-            if (!intent.getStringExtra(EXTRA_FALLBACK_ROOM).isNullOrEmpty()) TunnelState.log("Комната задана из интента, только для отладки")
+            // Posted: a START this came with clears the log. Says that, not what: the values are secrets.
+            if (changed) TunnelState.log("Настройки отладки заданы из интента")
             onFallbackFlag()
             if (relayDead != wasDead) onRelayDeadFlag()
         }
     }
+
+    private fun fallbackPrefs() = vpnPrefs.all.filterKeys { it.startsWith("fallback_") }
 
     // Main thread only. A tunnel not up yet is put right by onNewList once it is.
     private fun onRelayDeadFlag() {
@@ -1416,6 +1429,8 @@ class TunnelVpnService : VpnService() {
         getSystemService(NotificationManager::class.java).cancel(PERM_NOTIFICATION_ID)
         AppLog.i("startTunnel services=$serviceIds adblock=$adBlock direct=$direct")
         if (relayDead) TunnelState.log(RELAY_DEAD_LINE)
+        // On every start: MainActivity is exported, so a room planted by another app shows here.
+        if (BuildConfig.DEBUG && fallbackRoom() != null) TunnelState.log("Комната задана из интента, только для отладки")
         // Before any fail: the SDK stamps it on every event after it. Its
         // share among the active also tells when the ad list starts to
         // block the hosts Analytics sends to.

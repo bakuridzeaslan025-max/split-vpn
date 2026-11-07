@@ -414,55 +414,110 @@ class MainActivityTest {
         assertEquals(View.GONE, a.findViewById<View>(R.id.errorBox).visibility)
     }
 
+    private val vpnPrefs get() = app.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE)
+    private fun main() = Intent(app, MainActivity::class.java)
+    private fun fallbackExtras() = main()
+        .putExtra(TunnelVpnService.EXTRA_FALLBACK_ROOM, "https://vk.ru/call/join/x")
+        .putExtra(TunnelVpnService.EXTRA_FALLBACK_KEY, "ab")
+        .putExtra(TunnelVpnService.EXTRA_FALLBACK_FORCE, true)
+        .putExtra(TunnelVpnService.EXTRA_FALLBACK_MAX_JOINS, 3)
+        .putExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, true)
+
     // The service is not exported: adb can only reach it through the activity.
     @Test
-    fun debugFallbackExtrasGoToTheService() {
-        val a = launch(intent = Intent(app, MainActivity::class.java)
-            .putExtra(TunnelVpnService.EXTRA_FALLBACK_ROOM, "https://vk.ru/call/join/x")
-            .putExtra(TunnelVpnService.EXTRA_FALLBACK_KEY, "ab")
-            .putExtra(TunnelVpnService.EXTRA_FALLBACK_FORCE, true))
+    fun debugFallbackExtrasGoToTheServiceWithoutATap() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        shadowOf(app).clearStartedServices()
+        val a = launch(intent = fallbackExtras())
+        assertEquals("https://vk.ru/call/join/x", vpnPrefs.getString("fallback_room.test", null))
+        assertEquals("ab", vpnPrefs.getString("fallback_key.test", null))
+        assertTrue(vpnPrefs.getBoolean("fallback_force.test", false))
+        assertEquals(3, vpnPrefs.getInt("fallback_max_joins.test", 0))
+        assertTrue(vpnPrefs.getBoolean("fallback_relay_dead.test", false))
+        // Robolectric lists the binding among them; a START or a STOP would be a real one.
+        val sent = generateSequence { shadowOf(app).nextStartedService }.map { it.action }.toList()
+        assertEquals(emptyList<String>(), sent - TunnelVpnService.ACTION_BIND)
+        assertEquals(VpnState.DISCONNECTED, TunnelState.state)
+        assertFalse("cleared once sent", a.intent.hasExtra(TunnelVpnService.EXTRA_FALLBACK_ROOM))
+        assertFalse(a.intent.hasExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD))
+    }
+
+    @Test
+    fun aNewIntentBringsThemTooAndAnEmptyValueTakesThemBack() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        launch()
+        assertFalse(vpnPrefs.contains("fallback_room.test"))
+        activity!!.newIntent(fallbackExtras())
+        ShadowLooper.idleMainLooper()
+        assertEquals("ab", vpnPrefs.getString("fallback_key.test", null))
+        activity!!.newIntent(main().putExtra(TunnelVpnService.EXTRA_FALLBACK_ROOM, "").putExtra(TunnelVpnService.EXTRA_FALLBACK_KEY, "").putExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, false))
+        ShadowLooper.idleMainLooper()
+        assertEquals("", vpnPrefs.getString("fallback_room.test", null))
+        assertEquals("", vpnPrefs.getString("fallback_key.test", null))
+        assertFalse(vpnPrefs.getBoolean("fallback_relay_dead.test", true))
+    }
+
+    // Before onStart binds: onCreate has no service to talk to yet.
+    @Test
+    fun extrasFromOnCreateWaitForTheBinding() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        val controller = Robolectric.buildActivity(MainActivity::class.java, fallbackExtras()).create()
+        activity = controller
+        ShadowLooper.idleMainLooper()
+        assertFalse(vpnPrefs.contains("fallback_room.test"))
+        controller.start().postCreate(null).resume().visible()
+        ShadowLooper.idleMainLooper()
+        assertEquals("ab", vpnPrefs.getString("fallback_key.test", null))
+    }
+
+    // Rotation and process death: the system hands the first intent back, whatever was removed from it.
+    @Test
+    fun aRecreatedActivityDoesNotApplyThemAgain() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        val controller = Robolectric.buildActivity(MainActivity::class.java, fallbackExtras()).setup(android.os.Bundle())
+        activity = controller
+        ShadowLooper.idleMainLooper()
+        assertFalse(vpnPrefs.contains("fallback_room.test"))
+    }
+
+    @Test
+    fun recentsDoesNotApplyThemAgain() {
+        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
+        launch(intent = fallbackExtras().addFlags(Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY))
+        assertFalse(vpnPrefs.contains("fallback_room.test"))
+    }
+
+    @Test
+    fun theToggleStopsWhateverTheActivityWasOpenedWith() {
+        val a = launch(intent = main().putExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, false))
+        TunnelState.set(VpnState.CONNECTED)
+        ShadowLooper.idleMainLooper()
+        shadowOf(app).clearStartedServices()
+        a.findViewById<View>(R.id.toggleButton).performClick()
+        assertEquals(TunnelVpnService.ACTION_STOP, shadowOf(app).nextStartedService?.action)
+    }
+
+    @Test
+    fun theStartCarriesNoFallbackExtras() {
+        val a = launch(intent = fallbackExtras())
         org.robolectric.shadows.ShadowVpnService.setPrepareResult(null)
         shadowOf(app).grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS)
         shadowOf(app).clearStartedServices()
         a.findViewById<View>(R.id.toggleButton).performClick()
         val sent = shadowOf(app).nextStartedService!!
         assertEquals(TunnelVpnService.ACTION_START, sent.action)
-        assertEquals("https://vk.ru/call/join/x", sent.getStringExtra(TunnelVpnService.EXTRA_FALLBACK_ROOM))
-        assertEquals("ab", sent.getStringExtra(TunnelVpnService.EXTRA_FALLBACK_KEY))
-        assertTrue(sent.getBooleanExtra(TunnelVpnService.EXTRA_FALLBACK_FORCE, false))
+        assertFalse(sent.hasExtra(TunnelVpnService.EXTRA_FALLBACK_ROOM))
+        assertFalse(sent.hasExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD))
     }
 
-    // The tap that applies it on a running tunnel is the one exception to "the toggle stops".
+    // Only `testReleaseUnitTest --tests '*MainActivityTest.aReleaseBuild*'` runs this.
     @Test
-    fun relayDeadOnARunningTunnelTakesOneTapAndTheNextOneStops() {
-        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
-        val a = launch(intent = Intent(app, MainActivity::class.java).putExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, false))
-        TunnelState.set(VpnState.CONNECTED)
+    fun aReleaseBuildIgnoresFallbackExtras() {
+        org.junit.Assume.assumeFalse(BuildConfig.DEBUG)
+        launch(intent = fallbackExtras())
+        activity!!.newIntent(fallbackExtras())
         ShadowLooper.idleMainLooper()
-        shadowOf(app).clearStartedServices()
-        a.findViewById<View>(R.id.toggleButton).performClick()
-        val sent = shadowOf(app).nextStartedService!!
-        assertEquals(TunnelVpnService.ACTION_START, sent.action)
-        assertTrue(sent.hasExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD))
-        assertFalse(sent.getBooleanExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, true))
-        a.findViewById<View>(R.id.toggleButton).performClick()
-        assertEquals(TunnelVpnService.ACTION_STOP, shadowOf(app).nextStartedService?.action)
-    }
-
-    // A start that brought it uses it up too, or the tap meant as a stop would not stop.
-    @Test
-    fun relayDeadBroughtByAStartDoesNotHoldTheNextTap() {
-        org.junit.Assume.assumeTrue(BuildConfig.DEBUG)
-        val a = launch(intent = Intent(app, MainActivity::class.java).putExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, true))
-        org.robolectric.shadows.ShadowVpnService.setPrepareResult(null)
-        shadowOf(app).grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS)
-        shadowOf(app).clearStartedServices()
-        a.findViewById<View>(R.id.toggleButton).performClick()
-        assertTrue(shadowOf(app).nextStartedService!!.getBooleanExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, false))
-        TunnelState.set(VpnState.CONNECTED)
-        ShadowLooper.idleMainLooper()
-        a.findViewById<View>(R.id.toggleButton).performClick()
-        assertEquals(TunnelVpnService.ACTION_STOP, shadowOf(app).nextStartedService?.action)
+        assertFalse(vpnPrefs.all.keys.toString(), vpnPrefs.all.keys.any { it.startsWith("fallback_") })
     }
 
     @Test

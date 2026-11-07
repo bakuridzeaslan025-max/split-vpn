@@ -349,27 +349,69 @@ class FallbackChannelTest {
         assertFalse("the dead address in the known file", known.exists() && ("192.0.2.1" in known.readText() || "relay-dead" in known.readText()))
     }
 
-    // The real activity and a real tap. True only: its START has no stand extras, so with false
-    // this tap would send the emulator to the production endpoints.
+    // The real activity and the real extras, no tap: the path a phone uses. They do not touch the
+    // stand's endpoint, so false comes back to the stand and not to production.
     @Test
-    fun relayDeadTapOnARunningTunnelKeepsItAndTheNextTapStops() {
+    fun relayDeadFromTheActivityAppliesWithoutATap() {
+        // SharedPreferences moves the file aside while :vpn writes it: for a moment there is none.
+        val prefs = File(vpn.ctx.dataDir, "shared_prefs/${TunnelVpnService.PREFS}.xml")
+        fun prefsText(): String {
+            repeat(50) {
+                runCatching { return prefs.readText() }
+                Thread.sleep(100)
+            }
+            return prefs.readText()
+        }
+        fun deadIs(v: Boolean) = "name=\"fallback_relay_dead.test\" value=\"$v\"" in prefsText()
+        fun awaitDead(v: Boolean) {
+            val deadline = System.currentTimeMillis() + 10_000
+            while (!deadIs(v) && System.currentTimeMillis() < deadline) Thread.sleep(100)
+            assertTrue("relay dead is not $v", deadIs(v))
+        }
+        fun open(dead: Boolean) = vpn.device.executeShellCommand("am start -n org.newvpn/org.duckdns.splitvpn.MainActivity --ez fallback_relay_dead $dead")
         vpn.start("telegram")
         vpn.awaitState(VpnState.CONNECTED)
         vpn.stop()
         vpn.awaitStopped()
-        vpn.start("telegram", fallbackRelayDead = true)
+        val service = "org.newvpn/org.duckdns.splitvpn.TunnelVpnService"
+
+        // Stopped: only saved, and nothing started.
+        open(true)
+        awaitDead(true)
+        assertEquals(VpnState.DISCONNECTED, vpn.state)
+        assertFalse("wanted", "name=\"wanted\" value=\"true\"" in prefsText())
+        vpn.awaitTunDown()
+        val dump = vpn.device.executeShellCommand("dumpsys activity services $service")
+        assertFalse("a started service: $dump", "startRequested=true" in dump)
+
+        // The next start uses it. Null: the harness must not overwrite what the activity set.
+        val mark = logLines().size
+        vpn.start("telegram", fallbackRoom = room, fallbackKey = key, fallbackForce = true, fallbackRelayDead = null)
         vpn.awaitState(VpnState.CONNECTED)
+        assertTrue(vpn.fileLog(), logLines().drop(mark).any { "Go tunnel started via relay-dead.invalid" in it })
+        vpn.awaitWaiting(Waiting.NO_SERVER, 30_000)
+        assertTrue(vpn.log.toString(), vpn.log.any { "Сервер отключён для отладки" in it })
+        vpn.awaitFallback(settle) { it != null }
+
+        // Running, the screen already open: onNewIntent, and no second tunnel.
         val pid = vpnPid()
-        val component = "org.newvpn/org.duckdns.splitvpn.MainActivity"
-        val first = vpn.device.executeShellCommand("am start --activity-clear-task -n $component --ez fallback_relay_dead true")
-        assertTrue(first, "Warning" !in first)
+        val starts = logLines().count { "Go tunnel started" in it }
+        val off = logLines().size
+        open(false)
+        vpn.awaitFallback(60_000) { it == null }
+        vpn.awaitWaiting(null, 10_000)
+        assertTrue(vpn.fileLog(), awaitLogLine("fallback_off", off))
+        assertTrue(vpn.fileLog(), logLines().drop(off).any { "fallback_off" in it && "relay_back" in it })
+        assertEquals("the process survived", pid, vpnPid())
+        assertEquals("the tunnel did not restart", starts, logLines().count { "Go tunnel started" in it })
+        assertEquals(VpnState.CONNECTED, vpn.state)
+        assertTrue(vpn.log.toString(), vpn.log.any { "Настройки отладки" in it })
+        assertFalse("the room in the journal", vpn.log.any { "fake-socks" in it || key in it })
+
+        // The button does what it says. Only ever on CONNECTED: a tap on a stopped tunnel would start without the stand.
         val toggle = vpn.device.wait(Until.findObject(By.res("org.newvpn", "toggleButton")), 10_000)
         assertTrue("no toggle", toggle != null)
-        val mark = logLines().size
-        toggle.click()
-        assertTrue(vpn.fileLog(), awaitLogLine("startTunnel: busy", mark))
         assertEquals(VpnState.CONNECTED, vpn.state)
-        assertEquals("the process survived", pid, vpnPid())
         toggle.click()
         vpn.awaitStopped()
     }

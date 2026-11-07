@@ -104,8 +104,9 @@ class VpnHarness {
      * [fallbackRoom], [fallbackKey], [fallbackForce], [fallbackMaxJoins], [fallbackRelayDead]: the VK channel's debug
      * extras. Always sent: the service keeps them in prefs across runs, and what a real VK test left
      * there would send every other test's outage to real VK.
+     * Null [fallbackRelayDead]: left as the activity set it.
      */
-    fun start(vararg services: String, forgetCred: Boolean = false, rcList: String? = null, quotaMb: Long? = null, quotaReset: Boolean = false, direct: Boolean? = null, fromUi: Boolean = true, fallbackRoom: String = "", fallbackKey: String = "", fallbackForce: Boolean = false, fallbackMaxJoins: Int = 0, fallbackRelayDead: Boolean = false) {
+    fun start(vararg services: String, forgetCred: Boolean = false, rcList: String? = null, quotaMb: Long? = null, quotaReset: Boolean = false, direct: Boolean? = null, fromUi: Boolean = true, fallbackRoom: String = "", fallbackKey: String = "", fallbackForce: Boolean = false, fallbackMaxJoins: Int = 0, fallbackRelayDead: Boolean? = false) {
         val i = Intent(ctx, TunnelVpnService::class.java).setAction(TunnelVpnService.ACTION_START)
         if (fromUi) i.putStringArrayListExtra(TunnelVpnService.EXTRA_SERVICES, arrayListOf(*services))
         direct?.let { i.putExtra(TunnelVpnService.EXTRA_DIRECT, it) }
@@ -115,7 +116,7 @@ class VpnHarness {
         i.putExtra(TunnelVpnService.EXTRA_FALLBACK_KEY, fallbackKey)
         i.putExtra(TunnelVpnService.EXTRA_FALLBACK_FORCE, fallbackForce)
         i.putExtra(TunnelVpnService.EXTRA_FALLBACK_MAX_JOINS, fallbackMaxJoins)
-        i.putExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, fallbackRelayDead)
+        fallbackRelayDead?.let { i.putExtra(TunnelVpnService.EXTRA_FALLBACK_RELAY_DEAD, it) }
         if (endpoint != null) {
             if (rcList != null) i.putExtra(TunnelVpnService.EXTRA_RC_ENDPOINTS, rcList)
             else i.putExtra(TunnelVpnService.EXTRA_ENDPOINT, endpoint)
