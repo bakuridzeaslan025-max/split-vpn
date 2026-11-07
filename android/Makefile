@@ -1,4 +1,4 @@
-.PHONY: tunnel apk docker-image test tunnel-test itest
+.PHONY: tunnel apk docker-image test tunnel-test shared-test itest
 
 DOCKER_IMAGE := tunnel-builder
 DOCKER_TAG := latest
@@ -31,7 +31,7 @@ tunnel: docker-image
 			go mod verify && gomobile bind -target=android/arm64 -androidapi 26 -ldflags "-extldflags=-Wl,-z,max-page-size=16384" -o tunnel.aar .'
 	mv tunnel/tunnel.aar app/libs/tunnel.aar
 
-test: rc-test adblock-test tunnel-test
+test: rc-test adblock-test tunnel-test shared-test
 	./gradlew testDebugUnitTest -q
 
 # The strategy vector is shared by the tunnel and rc/tool (see desync.go).
@@ -39,6 +39,10 @@ tunnel-test:
 	cmp tunnel/testdata/strategies.json ../rc/tool/testdata/strategies.json
 	docker run --rm --platform linux/amd64 -v $(CURDIR)/tunnel:/src -w /src -v tunnel-gomod:/go/pkg/mod $(GO_IMAGE) \
 		sh -c 'go mod verify && go mod tidy -diff && go vet ./... && go test -race ./...'
+
+shared-test:
+	docker run --rm --platform linux/amd64 -v $(CURDIR)/shared:/src:ro -w /src $(GO_IMAGE) \
+		sh -c 'go mod tidy -diff && go vet ./... && go test -race ./...'
 
 # Instrumented: real TUN, emulator only (consent tap, svc wifi).
 # Against the local stand (testenv/): relay + nginx in Docker on the host,
