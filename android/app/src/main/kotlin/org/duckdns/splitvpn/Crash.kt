@@ -24,6 +24,9 @@ import java.security.MessageDigest
  */
 object Crash {
     private val hex = Regex("""\b[0-9a-fA-F]{32,}\b""")
+    // The personal VK room: whoever has the link can join the call. Go masks it
+    // too (roomLink in tunnel/logger.go); this is for what does not pass there.
+    private val roomLink = Regex("""(?i)call(/|%2f)join(/|%2f)[^\s"'&?#<>]+""")
     private val ipv4 = Regex("""\b\d{1,3}(?:\.\d{1,3}){3}\b""")
     private val ipv6 = Regex("""(?<![\w:])(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}(?![\w:])""")
     // Go log lines that name the sites the user opened. They never leave the
@@ -140,7 +143,7 @@ object Crash {
     }
 
     /**
-     * Our servers and the credential only: what the local log file must not
+     * Our servers, the VK room and the credential only: what the local log file must not
      * hold either, since "share the log" sends it into some chat. The rest of
      * [redact] stays off the file: public addresses are what a log is read for.
      */
@@ -149,7 +152,7 @@ object Crash {
         for (ep in known) {
             out = out.replace(ep.path, "<path>").replace(ep.host, "<host>", ignoreCase = true).replace(ep.ip, "<ip>")
         }
-        return hex.replace(out, "<hex>")
+        return hex.replace(roomLink.replace(out, "call/join/<room>"), "<hex>")
     }
 
     /**

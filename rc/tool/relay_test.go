@@ -161,7 +161,8 @@ func debugTemplate(t *testing.T, eps ...endpoint) string {
     "apk_url": {"defaultValue": {"value": ""}, "conditionalValues": {"build_debug": {"value": "https://github.com/bakuridzeaslan025-max/split-vpn/releases/latest/download/split-vpn.apk"}}, "valueType": "STRING"},
     "daily_quota_mb": {"defaultValue": {"useInAppDefault": true}, "conditionalValues": {"build_debug": {"value": "1024"}}, "valueType": "NUMBER"},
     "yt_strategies": {"defaultValue": {"value": "[]"}, "conditionalValues": {"build_debug": {"value": "[{\"id\":\"none\",\"spec\":\"\"}]"}}, "valueType": "STRING"},
-    "dial_event_bp": {"defaultValue": {"value": "0"}, "conditionalValues": {"build_debug": {"value": "25"}}, "valueType": "NUMBER"}
+    "dial_event_bp": {"defaultValue": {"value": "0"}, "conditionalValues": {"build_debug": {"value": "25"}}, "valueType": "NUMBER"},
+    "turn_fallback": {"defaultValue": {"value": "false"}, "conditionalValues": {"build_debug": {"value": "true"}, "rollout": {"value": "true"}}, "valueType": "BOOLEAN"}
   }
 }`, blob)
 }
@@ -198,6 +199,7 @@ func TestPromoteWhenAllWork(t *testing.T) {
 			t.Errorf("%s: default %q, debug %q", k, d, dbg)
 		}
 	}
+	checkTurnFallbackUntouched(t, got)
 	if _, ok := got.condition(debugCondition); !ok {
 		t.Error("condition dropped")
 	}
@@ -220,6 +222,49 @@ func TestPromoteWhenAllWork(t *testing.T) {
 	}
 	if want := []string{"GET /rc"}; !reflect.DeepEqual(f.calls, want) || !strings.Contains(out.String(), "nothing to publish") {
 		t.Fatalf("calls %v\n%s", f.calls, out.String())
+	}
+}
+
+// turn_fallback as debugTemplate has it: on in debug and in a console rollout,
+// off by default.
+func checkTurnFallbackUntouched(t *testing.T, got template) {
+	t.Helper()
+	for cond, want := range map[string]string{"": "false", debugCondition: "true", "rollout": "true"} {
+		if v, ok := got.value("turn_fallback", cond); !ok || v != want {
+			t.Errorf("turn_fallback[%s] = %q, %v; want %q", cond, v, ok, want)
+		}
+	}
+}
+
+// turn_fallback differing from build_debug is no reason to publish, and its
+// absence no reason to refuse.
+func TestPromoteLeavesTurnFallbackAlone(t *testing.T) {
+	ep := endpoint{Host: "a.example", IP: "203.0.113.1", Port: 443, Path: "/app/test1", ID: "a"}
+	f, rc := newFake(t, debugTemplate(t, ep))
+	tm, etag, _ := rc.get()
+	if err := promote(rc, tm, etag, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	checkTurnFallbackUntouched(t, template(f.put))
+
+	f.calls = nil
+	tm, etag, _ = rc.get()
+	var out strings.Builder
+	if err := promote(rc, tm, etag, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "nothing to publish") || len(f.calls) != 1 {
+		t.Errorf("calls %v\n%s", f.calls, out.String())
+	}
+
+	f, rc = newFake(t, debugTemplate(t, ep))
+	tm, etag, _ = rc.get()
+	delete(tm["parameters"].(map[string]any), "turn_fallback")
+	if err := promote(rc, tm, etag, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if p := template(f.put).findParam("turn_fallback"); p != nil {
+		t.Errorf("turn_fallback appeared: %v", p)
 	}
 }
 

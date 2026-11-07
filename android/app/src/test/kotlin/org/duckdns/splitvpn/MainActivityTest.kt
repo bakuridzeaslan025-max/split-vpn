@@ -373,6 +373,65 @@ class MainActivityTest {
         assertEquals(TunnelVpnService.ACTION_STOP, shadowOf(app).nextStartedService?.action)
     }
 
+    // Each state of the VK channel explains itself next to "the server is down".
+    @Test
+    fun fallbackExplainsTheBanner() {
+        val a = launch()
+        val chip = a.findViewById<TextView>(R.id.statusText)
+        val banner = a.findViewById<TextView>(R.id.errorText)
+        TunnelState.set(VpnState.CONNECTED)
+        TunnelState.setWaiting(Waiting.NO_SERVER)
+        ShadowLooper.idleMainLooper()
+        assertFalse(banner.text.contains("VK"))
+
+        TunnelState.setFallback(Fallback.READY)
+        ShadowLooper.idleMainLooper()
+        assertEquals("Сервер недоступен", chip.text.toString())
+        assertTrue(banner.text.contains("Включён запасной канал через VK"))
+        assertTrue(banner.text.contains("батарея"))
+
+        TunnelState.setFallback(Fallback.WORKING)
+        ShadowLooper.idleMainLooper()
+        assertEquals("Канал через VK", chip.text.toString())
+        assertTrue(banner.text.contains("трафик идёт через канал VK"))
+        assertTrue(banner.text.contains("Батарея садится быстрее"))
+        assertEquals(View.GONE, a.findViewById<View>(R.id.errorAction).visibility)
+
+        TunnelState.setFallback(Fallback.FAILED)
+        ShadowLooper.idleMainLooper()
+        assertEquals("Сервер недоступен", chip.text.toString())
+        assertTrue(banner.text.contains("канал через VK пока не подключился"))
+
+        TunnelState.setFallback(Fallback.WORKING)
+        TunnelState.setWaiting(Waiting.NO_NETWORK)
+        ShadowLooper.idleMainLooper()
+        assertEquals("Нет сети", chip.text.toString())
+        assertTrue(banner.text.contains("Нет интернета"))
+
+        TunnelState.setFallback(null)
+        TunnelState.setWaiting(null)
+        ShadowLooper.idleMainLooper()
+        assertEquals(View.GONE, a.findViewById<View>(R.id.errorBox).visibility)
+    }
+
+    // The service is not exported: adb can only reach it through the activity.
+    @Test
+    fun debugFallbackExtrasGoToTheService() {
+        val a = launch(intent = Intent(app, MainActivity::class.java)
+            .putExtra(TunnelVpnService.EXTRA_FALLBACK_ROOM, "https://vk.ru/call/join/x")
+            .putExtra(TunnelVpnService.EXTRA_FALLBACK_KEY, "ab")
+            .putExtra(TunnelVpnService.EXTRA_FALLBACK_FORCE, true))
+        org.robolectric.shadows.ShadowVpnService.setPrepareResult(null)
+        shadowOf(app).grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS)
+        shadowOf(app).clearStartedServices()
+        a.findViewById<View>(R.id.toggleButton).performClick()
+        val sent = shadowOf(app).nextStartedService!!
+        assertEquals(TunnelVpnService.ACTION_START, sent.action)
+        assertEquals("https://vk.ru/call/join/x", sent.getStringExtra(TunnelVpnService.EXTRA_FALLBACK_ROOM))
+        assertEquals("ab", sent.getStringExtra(TunnelVpnService.EXTRA_FALLBACK_KEY))
+        assertTrue(sent.getBooleanExtra(TunnelVpnService.EXTRA_FALLBACK_FORCE, false))
+    }
+
     @Test
     fun waitingIsACalmBannerWithoutAction() {
         val a = launch()

@@ -153,6 +153,7 @@ class MainActivity : Activity() {
     private var usage: Usage? = null
     // Go's verdict on direct YouTube, see VpnClient.
     private var direct: String? = null
+    private var fallback: Fallback? = null
     private var started = false
     private var updating = false
     // Percent of the download, -1 while the size is unknown.
@@ -169,7 +170,7 @@ class MainActivity : Activity() {
     }
     private val midnight = Runnable { render() }
 
-    private val vpn = VpnClient(this) { st, err, lines, since, w, v, u, d ->
+    private val vpn = VpnClient(this) { st, err, lines, since, w, v, u, d, f ->
         if (st == VpnState.CONNECTED && state != VpnState.CONNECTED) {
             // The code is one-shot on the issuer: once we are in, forget it.
             invite = null
@@ -183,6 +184,7 @@ class MainActivity : Activity() {
         versions = v ?: versions
         usage = u ?: usage
         direct = d
+        fallback = f
         render()
         if (updateWhenKnown && v != null) {
             updateWhenKnown = false
@@ -526,6 +528,7 @@ class MainActivity : Activity() {
         } else null
         findViewById<TextView>(R.id.statusText).text = clock ?: when {
             waitingNow && (waiting == Waiting.NO_NETWORK || offlineRetry) -> "Нет сети"
+            waitingNow && fallback == Fallback.WORKING -> "Канал через VK"
             waitingNow -> "Сервер недоступен"
             busy -> "Подождите"
             else -> "Выключен"
@@ -555,7 +558,12 @@ class MainActivity : Activity() {
             action.visibility = View.GONE
             val msg = if (offlineRetry) "Нет интернета. VPN подключится сам, когда сеть появится — ничего делать не нужно."
             else if (waiting == Waiting.NO_NETWORK) "Нет интернета. VPN включён и заработает сам, когда сеть появится — ничего делать не нужно."
-            else "Сервер пока не отвечает — возможно, его блокирует оператор. VPN включён и подключится сам, ничего делать не нужно."
+            else when (fallback) {
+                Fallback.WORKING -> "Сервер не отвечает, поэтому трафик идёт через канал VK. Батарея садится быстрее обычного. Когда сервер вернётся, VPN переключится сам."
+                Fallback.READY -> "Сервер не отвечает. Включён запасной канал через VK: он подключится, когда приложениям понадобится сеть. Пока он работает, батарея садится быстрее."
+                Fallback.FAILED -> "Сервер не отвечает, и канал через VK пока не подключился. VPN включён и попробует снова сам, ничего делать не нужно."
+                null -> "Сервер пока не отвечает — возможно, его блокирует оператор. VPN включён и подключится сам, ничего делать не нужно."
+            }
             text.text = msg
             text.setTextColor(AMBER_INK)
             view.background = box(AMBER_BG, radius = 16f)
@@ -997,6 +1005,7 @@ class MainActivity : Activity() {
             putExtra(TunnelVpnService.EXTRA_DIRECT, prefs.getBoolean(KEY_DIRECT, true))
             invite?.let { putExtra(TunnelVpnService.EXTRA_INVITE, it) }
         }
+        if (BuildConfig.DEBUG) TunnelVpnService.copyFallbackExtras(getIntent(), intent)
         startForegroundService(intent)
     }
 }

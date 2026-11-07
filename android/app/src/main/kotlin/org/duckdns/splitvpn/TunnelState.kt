@@ -8,6 +8,9 @@ enum class VpnState { DISCONNECTED, CONNECTING, CONNECTED, DISCONNECTING, ERROR 
 /** CONNECTED, but the relay does not answer; the tunnel reconnects by itself. */
 enum class Waiting { NO_NETWORK, NO_SERVER }
 
+/** The VK call channel while it is on: no call now (the next dial starts one), in the call, or the last try failed. */
+enum class Fallback { READY, WORKING, FAILED }
+
 object TunnelState {
     @Volatile
     var state: VpnState = VpnState.DISCONNECTED
@@ -24,6 +27,10 @@ object TunnelState {
 
     @Volatile
     var waiting: Waiting? = null
+        private set
+
+    @Volatile
+    var fallback: Fallback? = null
         private set
 
     private val listeners = mutableSetOf<(VpnState, String?) -> Unit>()
@@ -68,7 +75,10 @@ object TunnelState {
     fun set(next: VpnState, error: String? = null) {
         if (next == VpnState.CONNECTED && state != VpnState.CONNECTED) connectedAt = android.os.SystemClock.elapsedRealtime()
         state = next
-        if (next != VpnState.CONNECTED) waiting = null
+        if (next != VpnState.CONNECTED) {
+            waiting = null
+            fallback = null
+        }
         Crash.state(next)
         if (next == VpnState.ERROR) lastError = error
         else if (next == VpnState.DISCONNECTED) lastError = null
@@ -82,6 +92,18 @@ object TunnelState {
     fun setWaiting(w: Waiting?): Boolean {
         if (w == waiting || state != VpnState.CONNECTED) return false
         waiting = w
+        val snapshot = listeners.toList()
+        val cur = state
+        val err = lastError
+        ui.post { snapshot.forEach { it(cur, err) } }
+        return true
+    }
+
+    /** False when nothing changed, or the tunnel is no longer CONNECTED. */
+    @Synchronized
+    fun setFallback(f: Fallback?): Boolean {
+        if (f == fallback || state != VpnState.CONNECTED) return false
+        fallback = f
         val snapshot = listeners.toList()
         val cur = state
         val err = lastError

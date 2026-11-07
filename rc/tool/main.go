@@ -44,6 +44,15 @@ type config struct {
 	// Basis points of relay handshakes the app reports as relay_dial:
 	// 10000 every one, 0 none.
 	DialEventBP int `json:"dial_event_bp"`
+	// The VK call channel for when no relay answers. A pointer so a missing
+	// key does not decode to false.
+	TurnFallback *bool `json:"turn_fallback"`
+}
+
+// turnFallback is turn_fallback as RC carries it. promote calls values with an
+// empty config, for the keys only.
+func (c config) turnFallback() string {
+	return strconv.FormatBool(c.TurnFallback != nil && *c.TurnFallback)
 }
 
 // ytValue is yt_strategies as RC carries it: a compact JSON string.
@@ -65,6 +74,8 @@ func (c config) validate() error {
 		return errors.New("config: daily_quota_mb is required, 0 or more (0 = no limit)")
 	case c.DialEventBP < 0 || c.DialEventBP > 10000:
 		return errors.New("config: dial_event_bp is required, 0..10000 (basis points of relay handshakes reported, 0 = none)")
+	case c.TurnFallback == nil:
+		return errors.New("config: turn_fallback is required, true or false")
 	}
 	// The download page the app opens in the browser.
 	if u, err := url.Parse(c.UpdateURL); err != nil || u.Scheme != "https" || u.Host == "" {
@@ -183,6 +194,7 @@ func values(c config, blob string) [][3]string {
 		{"daily_quota_mb", "NUMBER", strconv.Itoa(c.DailyQuotaMB)},
 		{"yt_strategies", "STRING", c.ytValue()},
 		{"dial_event_bp", "NUMBER", strconv.Itoa(c.DialEventBP)},
+		{"turn_fallback", "BOOLEAN", c.turnFallback()},
 	}
 }
 
@@ -207,8 +219,8 @@ func push(rc *rcClient, t template, etag string, appID string, c config, blob st
 	if err != nil {
 		return fmt.Errorf("publish: %w", err)
 	}
-	fmt.Fprintf(out, "published version %s: min_version %d, latest_version %d, update_url %s, apk_url %s, daily_quota_mb %d, yt_strategies %s, dial_event_bp %d, endpoints set (%s)\n",
-		ver, c.MinVersion, c.LatestVersion, c.UpdateURL, c.APKURL, c.DailyQuotaMB, c.ytValue(), c.DialEventBP, debugCondition)
+	fmt.Fprintf(out, "published version %s: min_version %d, latest_version %d, update_url %s, apk_url %s, daily_quota_mb %d, yt_strategies %s, dial_event_bp %d, turn_fallback %s, endpoints set (%s)\n",
+		ver, c.MinVersion, c.LatestVersion, c.UpdateURL, c.APKURL, c.DailyQuotaMB, c.ytValue(), c.DialEventBP, c.turnFallback(), debugCondition)
 	return nil
 }
 
@@ -218,6 +230,11 @@ func push(rc *rcClient, t template, etag string, appID string, c config, blob st
 func promote(rc *rcClient, t template, etag string, out io.Writer) error {
 	same := true
 	for _, v := range values(config{}, "") {
+		// Goes to release users through console conditions only: testing it in
+		// build_debug must not turn it on for everyone at the next promotion.
+		if v[0] == "turn_fallback" {
+			continue
+		}
 		s, ok := t.value(v[0], debugCondition)
 		if !ok {
 			return fmt.Errorf("%s: no %s value to promote, make rc-push first", v[0], debugCondition)

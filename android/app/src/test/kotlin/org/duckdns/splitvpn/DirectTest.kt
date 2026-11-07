@@ -223,7 +223,7 @@ class DirectTest {
         shadowOf(app).setComponentNameAndServiceForBindService(
             ComponentName(app, TunnelVpnService::class.java), svc.onBind(Intent(TunnelVpnService.ACTION_BIND))!!,
         )
-        val client = VpnClient(app) { _, _, _, _, _, _, _, d -> got += d }.also { it.bind() }
+        val client = VpnClient(app) { _, _, _, _, _, _, _, d, _ -> got += d }.also { it.bind() }
         start()
         be.startedHost!!.directVerdict("testing")
         ShadowLooper.idleMainLooper()

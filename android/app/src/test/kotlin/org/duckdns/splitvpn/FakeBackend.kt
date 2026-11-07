@@ -138,6 +138,24 @@ internal class FakeBackend : Backend {
     override fun event(ctx: Context, name: String, params: Map<String, Any>) { analytics += name to params }
     override fun userProperty(ctx: Context, name: String, value: String) { userProperties[name] = value }
     override fun setAnalytics(ctx: Context, on: Boolean) { analyticsOn = on }
+    @Volatile var fallbackRoom: Pair<String, String>? = null
+    @Volatile var fallbackHost: vkfallback.Host? = null
+    @Volatile var fallbackProtector: vkfallback.Protector? = null
+    @Volatile var fallbackEnableError: Throwable? = null
+    /** The threads vkfallback was called on. */
+    val fallbackThreads = CopyOnWriteArrayList<Thread>()
+    private fun fallback(call: String) { fallbackThreads += Thread.currentThread(); events += call }
+    override fun fallbackConfigure(room: String, keyHex: String) { fallback("fallbackConfigure"); fallbackRoom = room to keyHex }
+    override fun fallbackSetDns(servers: String) = fallback("fallbackSetDns:$servers")
+    override fun fallbackEnable(p: vkfallback.Protector, h: vkfallback.Host) {
+        fallback("fallbackEnable")
+        fallbackEnableError?.let { throw it }
+        fallbackProtector = p
+        fallbackHost = h
+    }
+    override fun fallbackDisable(detail: String) = fallback("fallbackDisable:$detail")
+    override fun fallbackNetworkChanged() = fallback("fallbackNetworkChanged")
+    override fun fallbackNetworkLost() = fallback("fallbackNetworkLost")
     override fun register(addr: String, sni: String, path: String, kind: Int, proof: ByteArray): ByteArray {
         registered += kind to proof
         registerError?.let { throw it }

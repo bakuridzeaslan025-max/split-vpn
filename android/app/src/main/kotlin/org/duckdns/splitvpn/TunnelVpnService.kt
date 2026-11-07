@@ -40,6 +40,7 @@ import java.security.SecureRandom
 import java.time.Instant
 import java.time.ZoneId
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -93,6 +94,14 @@ internal interface Backend {
     fun event(ctx: Context, name: String, params: Map<String, Any> = emptyMap())
     fun userProperty(ctx: Context, name: String, value: String)
     fun setAnalytics(ctx: Context, on: Boolean)
+    /** The VK call channel. All of it runs on [TunnelVpnService]'s one thread for it, never on the main one. */
+    fun fallbackConfigure(room: String, keyHex: String)
+    fun fallbackSetDns(servers: String)
+    fun fallbackEnable(p: vkfallback.Protector, h: vkfallback.Host)
+    /** Leaves the call: up to seconds. [detail] is fallback_off's reason. */
+    fun fallbackDisable(detail: String)
+    fun fallbackNetworkChanged()
+    fun fallbackNetworkLost()
 }
 
 internal object GoBackend : Backend {
@@ -139,7 +148,8 @@ internal object GoBackend : Backend {
         val quota = rc.getValue("daily_quota_mb").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString()?.trim()?.toLongOrNull()
         val yt = rc.getValue("yt_strategies").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString()
         val bp = RemoteConfig.parseDialEventBp(rc.getValue("dial_event_bp").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString())
-        return RcValues(rc.getString("endpoints"), rc.getLong("min_version"), rc.getLong("latest_version"), rc.getString("update_url"), quota, yt, rc.getString("apk_url"), bp)
+        val fallback = RemoteConfig.parseTurnFallback(rc.getValue("turn_fallback").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString())
+        return RcValues(rc.getString("endpoints"), rc.getLong("min_version"), rc.getLong("latest_version"), rc.getString("update_url"), quota, yt, rc.getString("apk_url"), bp, fallback)
     }
     override fun setQuota(used: Long, limit: Long) = tunnel.Tunnel.setQuota(used, limit)
     override fun usage() = tunnel.Tunnel.usage()
@@ -152,6 +162,13 @@ internal object GoBackend : Backend {
     override fun event(ctx: Context, name: String, params: Map<String, Any>) = Analytics.event(ctx, name, params)
     override fun userProperty(ctx: Context, name: String, value: String) = Analytics.userProperty(ctx, name, value)
     override fun setAnalytics(ctx: Context, on: Boolean) = Analytics.setCollection(ctx, on)
+    // Frame rate 0: vkfallback's default.
+    override fun fallbackConfigure(room: String, keyHex: String) = vkfallback.Vkfallback.configure(room, keyHex, 0)
+    override fun fallbackSetDns(servers: String) = vkfallback.Vkfallback.setDNS(servers)
+    override fun fallbackEnable(p: vkfallback.Protector, h: vkfallback.Host) = vkfallback.Vkfallback.enable(p, h)
+    override fun fallbackDisable(detail: String) = vkfallback.Vkfallback.disable(detail)
+    override fun fallbackNetworkChanged() = vkfallback.Vkfallback.networkChanged()
+    override fun fallbackNetworkLost() = vkfallback.Vkfallback.networkLost()
     override fun integrityToken(ctx: Context, nonce: ByteArray): ByteArray? {
         val project = BuildConfig.INTEGRITY_PROJECT
         if (project == 0L) return null
@@ -219,6 +236,47 @@ class TunnelVpnService : VpnService() {
         // sticks across runs and overrides the manifest, so every START
         // without this extra turns it off again.
         const val EXTRA_ANALYTICS = "analytics"
+        // Debug builds: the VK channel's room link and key until stages 5-6
+        // deliver them, and turn_fallback forced on. They stay in prefs for the
+        // STARTs without them; an empty value takes them back. The service is
+        // not exported: adb gives them to MainActivity, which passes them on tap.
+        const val EXTRA_FALLBACK_ROOM = "fallback_room"
+        const val EXTRA_FALLBACK_KEY = "fallback_key"
+        const val EXTRA_FALLBACK_FORCE = "fallback_force"
+        private const val KEY_FALLBACK_ROOM = "fallback_room.test"
+        private const val KEY_FALLBACK_KEY = "fallback_key.test"
+        private const val KEY_FALLBACK_FORCE = "fallback_force.test"
+
+        internal fun copyFallbackExtras(from: Intent?, to: Intent) {
+            from?.getStringExtra(EXTRA_FALLBACK_ROOM)?.let { to.putExtra(EXTRA_FALLBACK_ROOM, it) }
+            from?.getStringExtra(EXTRA_FALLBACK_KEY)?.let { to.putExtra(EXTRA_FALLBACK_KEY, it) }
+            if (from?.hasExtra(EXTRA_FALLBACK_FORCE) == true) to.putExtra(EXTRA_FALLBACK_FORCE, from.getBooleanExtra(EXTRA_FALLBACK_FORCE, false))
+        }
+
+        // vkfallback is one per process, and order matters: Enable after
+        // SetDNS, Disable after a queued Enable. Disable blocks for seconds.
+        private val fallbackThread = Executors.newSingleThreadExecutor { r -> Thread(r, "VkFallback").apply { isDaemon = true } }
+        // On that thread only. Go heard NetworkLost and no NetworkChanged since:
+        // events are forwarded only while the channel is on, and without this
+        // the next Enable would find Go still refusing for want of a network.
+        private var fallbackLostTold = false
+
+        internal fun drainFallbackForTests() {
+            fallbackThread.submit {}.get(20, TimeUnit.SECONDS)
+        }
+
+        internal fun forgetFallbackForTests() {
+            fallbackThread.submit { fallbackLostTold = false }.get(20, TimeUnit.SECONDS)
+        }
+
+        // fallback_connect and the like, as Host.Event brings them.
+        internal fun fallbackParams(name: String, result: String, step: String, ms: Long, mb: Long) = buildMap<String, Any> {
+            if (result.isNotEmpty()) put("result", result)
+            if (step.isNotEmpty()) put(if (name == "fallback_off") "detail" else "step", step)
+            if (ms != 0L) put("ms", ms)
+            if (mb != 0L) put("mb", mb)
+        }
+
         const val ERR_NEED_CODE = "Нужен код доступа"
         const val ERR_NO_SERVER = "Не удалось обновить доступ: нет связи с сервером. Повторите позже"
         const val ERR_OFFLINE = "Нет сети. Доступ обновится сам, когда сеть появится"
@@ -520,6 +578,7 @@ class TunnelVpnService : VpnService() {
         if (testStand && intent?.getBooleanExtra(EXTRA_FORGET_CRED, false) == true) Credentials.clear(this, test = true)
         if (intent?.hasExtra(EXTRA_QUOTA_MB) == true) Quota.setLimitMb(this, intent.getLongExtra(EXTRA_QUOTA_MB, Quota.DEFAULT_MB))
         if (intent?.getBooleanExtra(EXTRA_QUOTA_RESET, false) == true) Quota.save(this, 0, Quota.today())
+        fallbackHooks(intent)
         if (testRc) {
             // Each test starts from its list's first, whatever worked in the last one.
             Endpoints.setWorking(this, null, test = true)
@@ -528,13 +587,28 @@ class TunnelVpnService : VpnService() {
         }
     }.onFailure { AppLog.e("test hooks", it) }
 
+    private fun fallbackHooks(intent: Intent?) {
+        if (intent == null || listOf(EXTRA_FALLBACK_ROOM, EXTRA_FALLBACK_KEY, EXTRA_FALLBACK_FORCE).none(intent::hasExtra)) return
+        vpnPrefs.edit().apply {
+            intent.getStringExtra(EXTRA_FALLBACK_ROOM)?.let { putString(KEY_FALLBACK_ROOM, it) }
+            intent.getStringExtra(EXTRA_FALLBACK_KEY)?.let { putString(KEY_FALLBACK_KEY, it) }
+            if (intent.hasExtra(EXTRA_FALLBACK_FORCE)) putBoolean(KEY_FALLBACK_FORCE, intent.getBooleanExtra(EXTRA_FALLBACK_FORCE, false))
+        }.apply()
+        mainHandler.post {
+            // Posted: the START this came with clears the log. MainActivity is
+            // exported, so a room planted by another app shows here.
+            if (!intent.getStringExtra(EXTRA_FALLBACK_ROOM).isNullOrEmpty()) TunnelState.log("Комната VK задана из интента, только для отладки")
+            onFallbackFlag()
+        }
+    }
+
     private fun pushAll() {
         for (c in clients.toList()) push(c)
     }
 
     private fun push(to: Messenger) {
         try {
-            to.send(VpnClient.snapshot(TunnelState.state, TunnelState.lastError, TunnelState.logLines(), TunnelState.connectedAt, TunnelState.waiting, RemoteConfig.versions(this), Usage(usedNow(), Quota.limit(this), Quota.today()), directVerdict))
+            to.send(VpnClient.snapshot(TunnelState.state, TunnelState.lastError, TunnelState.logLines(), TunnelState.connectedAt, TunnelState.waiting, RemoteConfig.versions(this), Usage(usedNow(), Quota.limit(this), Quota.today()), directVerdict, TunnelState.fallback))
         } catch (_: RemoteException) {
             clients -= to
         }
@@ -613,6 +687,8 @@ class TunnelVpnService : VpnService() {
         override fun dnsServers() = defaultDns?.second?.joinToString("\n") ?: ""
         override fun relayDown(down: Boolean) {
             relayDown = down
+            // The first since it was up: Go tells again for each endpoint.
+            if (!down) relayDownAt = 0 else if (relayDownAt == 0L) relayDownAt = SystemClock.elapsedRealtime()
             mainHandler.post {
                 if (down) freshDown = true else relayUp()
                 updateWaiting()
@@ -630,16 +706,7 @@ class TunnelVpnService : VpnService() {
         }
         override fun dialEvent(id: String, result: String, ms: Long) {
             if (!collecting) return
-            // Before CONNECTED (Start's own probe, the most telling one) there is no default callback yet.
-            val caps = defaultCaps?.second ?: runCatching {
-                getSystemService(ConnectivityManager::class.java).let { it.getNetworkCapabilities(it.activeNetwork) }
-            }.getOrNull()
-            val net = when {
-                caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true -> "wifi"
-                caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true -> "cell"
-                else -> "other"
-            }
-            val op = if (net == "cell") carrier()?.filter(Char::isDigit)?.takeIf { it.isNotEmpty() } else null
+            val (net, op) = netAndOp()
             // Failures only: at dial_event_bp 10000 the successes would push the rest out of the rotated log.
             if (BuildConfig.DEBUG && result != "ok") AppLog.i("relay_dial $id $result $ms ms $net${op?.let { " $it" }.orEmpty()}")
             backend.event(
@@ -654,6 +721,159 @@ class TunnelVpnService : VpnService() {
             )
         }
     }
+    // The default network's kind and, on cell, its carrier: the net and op of an event.
+    private fun netAndOp(): Pair<String, String?> {
+        // Before CONNECTED (Start's own probe, the most telling one) there is no default callback yet.
+        val caps = defaultCaps?.second ?: runCatching {
+            getSystemService(ConnectivityManager::class.java).let { it.getNetworkCapabilities(it.activeNetwork) }
+        }.getOrNull()
+        val net = when {
+            caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true -> "wifi"
+            caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true -> "cell"
+            else -> "other"
+        }
+        return net to if (net == "cell") carrier()?.filter(Char::isDigit)?.takeIf { it.isNotEmpty() } else null
+    }
+
+    private val fallbackProtector = object : vkfallback.Protector {
+        override fun protect(fd: Long) = this@TunnelVpnService.protect(fd.toInt())
+    }
+
+    // On Go's goroutines. Labels only, nothing here names the room.
+    private val fallbackHost = object : vkfallback.Host {
+        override fun event(name: String, result: String, step: String, ms: Long, mb: Long) {
+            AppLog.i("$name $result $step $ms ms $mb MB")
+            if (fallbackOn) when {
+                name == "fallback_connect" && result == "ok" -> {
+                    fallbackState(Fallback.WORKING)
+                    TunnelState.log("Запасной канал через VK подключён")
+                }
+                name == "fallback_connect" -> fallbackState(Fallback.FAILED)
+                name == "fallback_off" && step == "idle" -> fallbackState(Fallback.READY)
+                name == "fallback_off" && step == "error" -> fallbackState(Fallback.FAILED)
+            }
+            if (collecting) backend.event(this@TunnelVpnService, name, fallbackParams(name, result, step, ms, mb))
+        }
+    }
+
+    private fun fallbackState(f: Fallback?) {
+        if (TunnelState.setFallback(f)) mainHandler.post { repostNotification() }
+    }
+
+    // Set under lock, with the state it depends on: a stop or a fail on another
+    // thread must not miss an Enable decided at that very moment.
+    @Volatile private var fallbackOn = false
+    // elapsedRealtime of the relay going down, for fallback_on; 0 while it is up.
+    @Volatile private var relayDownAt = 0L
+
+    private val fallbackAllowed get() = RemoteConfig.turnFallback(this) || BuildConfig.DEBUG && vpnPrefs.getBoolean(KEY_FALLBACK_FORCE, false)
+
+    // Until stages 5-6 only debug builds have a room; none is no error, the channel just stays off.
+    private fun fallbackRoom(): Pair<String, String>? {
+        if (!BuildConfig.DEBUG) return null
+        val room = vpnPrefs.getString(KEY_FALLBACK_ROOM, null).orEmpty()
+        val key = vpnPrefs.getString(KEY_FALLBACK_KEY, null).orEmpty()
+        return if (room.isEmpty() || key.isEmpty()) null else room to key
+    }
+
+    // Its text only redacted: olcrtc's may quote what it was given.
+    private fun fallbackTask(body: () -> Unit) = fallbackThread.submit {
+        try {
+            body()
+        } catch (e: Throwable) {
+            AppLog.e("fallback: ${e.javaClass.simpleName}: ${Crash.redact(e.message.orEmpty())}")
+        }
+    }
+
+    // Main thread only. On the first endpoint's verdict: a whole list takes
+    // minutes per endpoint, and a list of one never says. Past a new network's pause, as
+    // checkRelayDown: Go is still trying the relay on it. Not VALIDATED: allow
+    // lists fail Android's check too, and that is when the channel is needed. A
+    // network with nothing behind it costs little: the start is lazy, joins
+    // are capped and the UI says it did not connect. A captive portal is the
+    // one sure case against: it would eat the joins until the user signs in.
+    // Whatever held it back asks again: the pause's end, the portal's, a network
+    // appearing, the flag.
+    private fun considerFallback() {
+        mainHandler.removeCallbacks(recheckFallback)
+        fallbackAtPortal = false
+        if (fallbackOn || TunnelState.waiting != Waiting.NO_SERVER || !fallbackAllowed) return
+        val (room, key) = fallbackRoom() ?: return
+        val now = SystemClock.elapsedRealtime()
+        val settled = now - maxOf(netAppearedAt, defaultChangedAt)
+        if (settled < NEW_NETWORK_SWITCH_MS) {
+            mainHandler.postDelayed(recheckFallback, NEW_NETWORK_SWITCH_MS - settled)
+            return
+        }
+        if (synchronized(networks) { networks.isEmpty() }) return
+        if (defaultCaps?.second?.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL) == true) {
+            fallbackAtPortal = true
+            return
+        }
+        // CONNECTED: Tunnel.start has returned, so olcrtc's log goes through Go's mask.
+        val allowed = synchronized(lock) {
+            if (stopping || TunnelState.state != VpnState.CONNECTED) return@synchronized false
+            fallbackOn = true
+            true
+        }
+        if (!allowed) return
+        val downFor = relayDownAt.takeIf { it > 0 }?.let { now - it } ?: 0
+        val dns = defaultDns?.second.orEmpty().joinToString(" ")
+        AppLog.i("fallback: on, relay down for ${downFor / 1000} s")
+        fallbackState(Fallback.READY)
+        TunnelState.log("Сервер недоступен, включаю запасной канал через VK")
+        fallbackTask {
+            try {
+                backend.fallbackConfigure(room, key)
+                backend.fallbackSetDns(dns)
+                if (fallbackLostTold) backend.fallbackNetworkChanged()
+                fallbackLostTold = false
+                backend.fallbackEnable(fallbackProtector, fallbackHost)
+            } catch (e: Throwable) {
+                if (takeFallback()) fallbackState(null)
+                throw e
+            }
+            if (collecting) {
+                val (net, op) = netAndOp()
+                backend.event(this, "fallback_on", buildMap {
+                    put("net", net)
+                    op?.let { put("op", it) }
+                    put("ms", downFor)
+                })
+            }
+        }
+    }
+    private val recheckFallback = Runnable { considerFallback() }
+    // considerFallback stopped at a captive portal. Main thread only.
+    private var fallbackAtPortal = false
+
+    private fun takeFallback() = synchronized(lock) { fallbackOn.also { fallbackOn = false } }
+
+    // Any thread. Returns what to wait on, if there is a call to leave.
+    private fun disableFallback(detail: String): Future<*>? {
+        mainHandler.removeCallbacks(recheckFallback)
+        if (!takeFallback()) return null
+        AppLog.i("fallback: off ($detail)")
+        fallbackState(null)
+        if (TunnelState.state == VpnState.CONNECTED) TunnelState.log("Запасной канал через VK выключен")
+        return fallbackTask { backend.fallbackDisable(detail) }
+    }
+
+    // Main thread only. turn_fallback changed.
+    private fun onFallbackFlag() {
+        if (fallbackAllowed) considerFallback() else disableFallback("flag_off")
+    }
+
+    // A call goes down with its network: until Go reports it up again, it is not working.
+    private fun fallbackNetworkEvent(lost: Boolean) {
+        if (!fallbackOn) return
+        if (TunnelState.fallback == Fallback.WORKING) fallbackState(Fallback.READY)
+        fallbackTask {
+            fallbackLostTold = lost
+            if (lost) backend.fallbackNetworkLost() else backend.fallbackNetworkChanged()
+        }
+    }
+
     // Direct YouTube off by the switch or with no strategy left: yt_direct
     // says "off" whatever Go's verdict.
     @Volatile private var directOff = false
@@ -705,7 +925,10 @@ class TunnelVpnService : VpnService() {
         val was = TunnelState.waiting
         val changed = TunnelState.setWaiting(w)
         if (changed) AppLog.i("waiting: $w (no network=$noNetwork, relay down=$relayDown)")
-        if (w == Waiting.NO_SERVER && (changed || fresh) && !awaitingVerdict) onNoServer()
+        if (w == Waiting.NO_SERVER && (changed || fresh) && !awaitingVerdict) {
+            considerFallback()
+            onNoServer()
+        }
         if (!changed) return
         // Not on a bare RelayDown: that one also comes with no network at all.
         mainHandler.removeCallbacks(noServerFetch)
@@ -791,6 +1014,7 @@ class TunnelVpnService : VpnService() {
     }
 
     private fun relayUp() {
+        disableFallback("relay_back")
         mainHandler.removeCallbacks(switchOnNewNetwork)
         resetRound()
         resetBackoff()
@@ -920,12 +1144,14 @@ class TunnelVpnService : VpnService() {
         val before = Endpoints.cached(this, testRc)
         val versions = RemoteConfig.versions(this)
         val limit = Quota.limit(this)
+        val allowed = fallbackAllowed
         RemoteConfig.apply(this, v, decrypt, testRc)
         backend.setDialEvents(RemoteConfig.dialEventBp(this))
         val after = Endpoints.cached(this, testRc)
         if (after != null) mainHandler.post { onNewList(changed = after != before) }
         if (RemoteConfig.versions(this) != versions) mainHandler.post { onNewVersions() }
         if (Quota.limit(this) != limit) mainHandler.post { onNewLimit() }
+        if (fallbackAllowed != allowed) mainHandler.post { onFallbackFlag() }
     }
 
     // Main thread only. A lower limit already used up stops the tunnel via
@@ -1050,6 +1276,8 @@ class TunnelVpnService : VpnService() {
     // carrier's does a Wi-Fi address). Never the VPN's own: that one is our
     // fake DNS and would loop.
     @Volatile private var defaultDns: Pair<Network, List<String>>? = null
+    // What the default network last was, to tell vkfallback of a change only.
+    @Volatile private var defaultNet: Network? = null
     // The default network and whether Android found internet on it.
     @Volatile private var defaultValidated: Pair<Network, Boolean>? = null
     // elapsedRealtime the default network last changed. A network up for
@@ -1334,6 +1562,8 @@ class TunnelVpnService : VpnService() {
                     netAppearedAt = android.os.SystemClock.elapsedRealtime()
                     newNetwork()
                     updateWaiting()
+                    // NO_SERVER from before the networks went: nothing else asks.
+                    considerFallback()
                     checkDay()
                     checkActive()
                 }
@@ -1343,6 +1573,8 @@ class TunnelVpnService : VpnService() {
                 val none = synchronized(networks) { networks -= network; networks.isEmpty() }
                 AppLog.i("network lost: $network, cutting relay connections")
                 backend.networkLost()
+                // Not for each network: on Wi-Fi + LTE that would drop the call with either.
+                if (none) fallbackNetworkEvent(lost = true)
                 mainHandler.post {
                     if (none) netLostAt = android.os.SystemClock.elapsedRealtime()
                     updateWaiting()
@@ -1369,6 +1601,7 @@ class TunnelVpnService : VpnService() {
                 AppLog.i("default network $network dns: ${dns.second}")
                 // The old resolvers' answers may be local to their network.
                 backend.dnsChanged()
+                if (fallbackOn) fallbackTask { backend.fallbackSetDns(dns.second.joinToString(" ")) }
                 updateNetKey()
                 mainHandler.post {
                     checkDay()
@@ -1381,6 +1614,9 @@ class TunnelVpnService : VpnService() {
             override fun onAvailable(network: Network) {
                 if (defaultValidated?.first != network) defaultValidated = null
                 defaultChangedAt = SystemClock.elapsedRealtime()
+                // Each restart it causes is a new join: a real change only.
+                if (defaultNet != network) fallbackNetworkEvent(lost = false)
+                defaultNet = network
             }
 
             // On every change: the validation may also go.
@@ -1388,6 +1624,7 @@ class TunnelVpnService : VpnService() {
                 // The carrier's code may be empty right after a switch and come with a later call.
                 defaultCaps = network to caps
                 updateNetKey()
+                if (fallbackAtPortal && !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL)) considerFallback()
                 val validated = network to caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
                 if (validated == defaultValidated) return
                 defaultValidated = validated
@@ -1396,6 +1633,7 @@ class TunnelVpnService : VpnService() {
 
             override fun onLost(network: Network) {
                 if (defaultDns?.first == network) defaultDns = null
+                if (defaultNet == network) defaultNet = null
                 if (defaultValidated?.first == network) defaultValidated = null
                 if (defaultCaps?.first == network) defaultCaps = null
             }
@@ -1418,6 +1656,7 @@ class TunnelVpnService : VpnService() {
         net?.let(cm::unregisterNetworkCallback)
         def?.let(cm::unregisterNetworkCallback)
         defaultDns = null
+        defaultNet = null
         defaultValidated = null
         defaultCaps = null
         synchronized(networks) { networks.clear() }
@@ -1560,7 +1799,10 @@ class TunnelVpnService : VpnService() {
         mainHandler.post { resetRound() }
         current = null
         relayDown = false
+        relayDownAt = 0
         TunnelState.set(VpnState.ERROR, msg)
+        // After the state: see fallbackOn.
+        disableFallback("error")
         mainHandler.post { daily("vpn_failed", reason, src, detail) }
         stopForeground(STOP_FOREGROUND_REMOVE)
         cancelLateNotification()
@@ -1717,8 +1959,12 @@ class TunnelVpnService : VpnService() {
             } catch (e: Throwable) {
                 AppLog.e("Tunnel.stop crashed", e)
             }
+            // Not before: a dial still on its way could spend a VK join. Waits, or the
+            // process may go with the service in the middle of leaving the call.
+            runCatching { disableFallback(if (error != null) "error" else "user")?.get(10, TimeUnit.SECONDS) }
             AppLog.i("stopTunnel done")
             relayDown = false
+            relayDownAt = 0
             if (countDay >= 0) Quota.save(this, backend.usage(), countDay)
             if (stopSelfWhenDone) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -1742,6 +1988,7 @@ class TunnelVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        disableFallback("user")
         unregisterReceiver(channelReceiver)
         mainHandler.removeCallbacks(disconnectFallback)
         stopFetching()
@@ -1776,6 +2023,7 @@ class TunnelVpnService : VpnService() {
                 when {
                     retryOnNetwork != null -> "Нет сети · подключится автоматически"
                     TunnelState.waiting == Waiting.NO_NETWORK -> "Нет сети · подключится автоматически"
+                    TunnelState.waiting == Waiting.NO_SERVER && TunnelState.fallback == Fallback.WORKING -> "Канал через VK · батарея садится быстрее"
                     TunnelState.waiting == Waiting.NO_SERVER -> "Сервер недоступен · подключится автоматически"
                     else -> "VPN включён"
                 }

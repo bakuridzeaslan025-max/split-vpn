@@ -22,6 +22,17 @@ class CrashTest {
     @org.junit.Before
     fun setUp() = Endpoints.resetForTests()
 
+    @Test
+    fun roomLinkIsMaskedForTheFileAndForGoogle() {
+        val id = "6LYH98MpSLrY358BBjSGWroHhb"
+        for (s in listOf("join https://vk.ru/call/join/$id failed", "https://vk.com/CALL/JOIN/$id", "url=https%3A%2F%2Fvk.ru%2Fcall%2Fjoin%2F$id&x=1")) {
+            assertFalse(s, id in Crash.mask(s, emptyList()))
+            assertFalse(s, id in Crash.redact(s, emptyList()))
+            assertTrue(s, "<room>" in Crash.mask(s, emptyList()))
+        }
+        assertEquals("join https://vk.ru/call/join/<room> failed", Crash.mask("join https://vk.ru/call/join/$id failed", emptyList()))
+    }
+
     // Pinned: another salt or length would make every device a new user.
     @Test
     fun userIdIsAHashOfAndroidId() {

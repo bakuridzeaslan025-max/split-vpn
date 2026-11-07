@@ -23,8 +23,8 @@ data class Usage(val used: Long, val limit: Long, val day: Long) {
     val exceeded get() = Quota.exceeded(used, limit)
 }
 
-/** The last arg of a snapshot: direct YouTube on the current network, Go's verdict ("unknown", "testing", "works", "fails"). */
-class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, String?, List<String>, Long, Waiting?, Versions?, Usage?, String?) -> Unit) {
+/** The last args of a snapshot: direct YouTube on the current network, Go's verdict ("unknown", "testing", "works", "fails"); the VK channel. */
+class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, String?, List<String>, Long, Waiting?, Versions?, Usage?, String?, Fallback?) -> Unit) {
 
     companion object {
         const val MSG_REGISTER = 1
@@ -44,9 +44,10 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
         const val KEY_LIMIT = "limit"
         const val KEY_DAY = "day"
         const val KEY_DIRECT = "direct"
+        const val KEY_FALLBACK = "fallback"
         const val KEY_LINE = "line"
 
-        fun snapshot(state: VpnState, error: String?, log: List<String>, connectedAt: Long, waiting: Waiting?, versions: Versions, usage: Usage, direct: String): Message =
+        fun snapshot(state: VpnState, error: String?, log: List<String>, connectedAt: Long, waiting: Waiting?, versions: Versions, usage: Usage, direct: String, fallback: Fallback?): Message =
             Message.obtain(null, MSG_SNAPSHOT).apply {
                 data = Bundle().apply {
                     putInt(KEY_STATE, state.ordinal)
@@ -62,6 +63,7 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
                     putLong(KEY_LIMIT, usage.limit)
                     putLong(KEY_DAY, usage.day)
                     putString(KEY_DIRECT, direct)
+                    putInt(KEY_FALLBACK, fallback?.ordinal ?: -1)
                 }
             }
     }
@@ -78,6 +80,7 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
                 Versions(msg.data.getLong(KEY_MIN_VERSION), msg.data.getLong(KEY_LATEST_VERSION), msg.data.getString(KEY_UPDATE_URL).orEmpty(), msg.data.getString(KEY_APK_URL).orEmpty()),
                 Usage(msg.data.getLong(KEY_USED), msg.data.getLong(KEY_LIMIT), msg.data.getLong(KEY_DAY)),
                 msg.data.getString(KEY_DIRECT),
+                Fallback.values().getOrNull(msg.data.getInt(KEY_FALLBACK, -1)),
             )
         }
         true
@@ -92,7 +95,7 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
             // :vpn process died. Until it comes back, the tunnel is down;
             // the versions and traffic it last told stay true.
             service = null
-            onSnapshot(VpnState.DISCONNECTED, null, emptyList(), 0, null, null, null, null)
+            onSnapshot(VpnState.DISCONNECTED, null, emptyList(), 0, null, null, null, null, null)
         }
     }
 
