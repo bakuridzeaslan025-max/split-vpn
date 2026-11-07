@@ -382,6 +382,8 @@ class TunnelVpnService : VpnService() {
         // Go retries the current relay on a new network at once: up to 10 s
         // of dial and 10 s of upgrade. Only then is "still down" news about it.
         internal const val NEW_NETWORK_SWITCH_MS = NEW_NETWORK_GRACE_MS + 20_000L
+        // At a start the networks and the default one are replayed separately, in either order.
+        internal const val DEFAULT_REPLAY_WAIT_MS = 2_000L
         private const val REPROBE_DELAY_MS = 5_000L
         // A probe started right after establish() may still go out on the old
         // network: Android moves its socket to the VPN half a second later and
@@ -846,15 +848,23 @@ class TunnelVpnService : VpnService() {
     private fun considerFallback() {
         mainHandler.removeCallbacks(recheckFallback)
         fallbackAtPortal = false
+        fallbackAwaitingDefault = false
         if (fallbackOn || TunnelState.waiting != Waiting.NO_SERVER || !fallbackAllowed) return
         val (room, key) = fallbackRoom() ?: return
         val now = SystemClock.elapsedRealtime()
-        val settled = now - maxOf(netAppearedAt, defaultChangedAt)
+        val settled = now - fallbackNetChangedAt
         if (settled < NEW_NETWORK_SWITCH_MS) {
             mainHandler.postDelayed(recheckFallback, NEW_NETWORK_SWITCH_MS - settled)
             return
         }
         if (synchronized(networks) { networks.isEmpty() }) return
+        // The portal check below needs the default network's capabilities.
+        val replayLeft = DEFAULT_REPLAY_WAIT_MS - (now - watchingSince)
+        if (defaultCaps == null && replayLeft > 0) {
+            fallbackAwaitingDefault = true
+            mainHandler.postDelayed(recheckFallback, replayLeft)
+            return
+        }
         if (defaultCaps?.second?.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL) == true) {
             fallbackAtPortal = true
             return
@@ -898,6 +908,13 @@ class TunnelVpnService : VpnService() {
     private val recheckFallback = Runnable { considerFallback() }
     // considerFallback stopped at a captive portal. Main thread only.
     private var fallbackAtPortal = false
+    // considerFallback stopped for the default network's replay. Main thread only.
+    private var fallbackAwaitingDefault = false
+    // elapsedRealtime of the last real network change, for considerFallback only: Go judges the
+    // relay anew on one. netAppearedAt and defaultChangedAt also count what Android replays at
+    // registration, and a replay says nothing Go did not know when it judged.
+    @Volatile private var fallbackNetChangedAt = -NEW_NETWORK_SWITCH_MS
+    @Volatile private var watchingSince = 0L
 
     private fun takeFallback() = synchronized(lock) { fallbackOn.also { fallbackOn = false } }
 
@@ -1502,6 +1519,10 @@ class TunnelVpnService : VpnService() {
                     }
                 }
                 var cred = ensureCredential(invite)
+                fallbackNetChangedAt = -NEW_NETWORK_SWITCH_MS
+                // Before the TUN, which becomes the active network, and before Go's probe: a
+                // change during that probe must count as one.
+                networksBefore = networksNow()
                 fd = establishTun(enabled)
                 AppLog.i("TUN established, fd=${fd.fd}, starting Go tunnel")
                 // countDay first: a fetch landing meanwhile sets Go itself,
@@ -1630,11 +1651,39 @@ class TunnelVpnService : VpnService() {
     // Underlying network changed (wifi <-> LTE). A lost network takes every
     // relay connection with it: cut them so apps reconnect right away instead
     // of hanging on TCP retransmits. A new one only invalidates idle DoH.
+    // What watchNetwork will hear as replay, and the default network among it. Only those the
+    // default request matches: allNetworks also lists ones it never reports, and if one started
+    // to match later, its first report would pass for a replay.
+    private fun networksNow(): Pair<MutableSet<Network>, Network?> = runCatching {
+        val cm = getSystemService(ConnectivityManager::class.java)
+        @Suppress("DEPRECATION") val all = cm.allNetworks
+        all.filterTo(mutableSetOf()) { n ->
+            cm.getNetworkCapabilities(n)?.let { caps ->
+                listOf(
+                    NetworkCapabilities.NET_CAPABILITY_INTERNET,
+                    NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED,
+                    NetworkCapabilities.NET_CAPABILITY_TRUSTED,
+                    NetworkCapabilities.NET_CAPABILITY_NOT_VPN,
+                ).all(caps::hasCapability)
+            } == true
+        } to cm.activeNetwork
+    }.getOrDefault(mutableSetOf<Network>() to null)
+
+    // On the tunnel thread, as watchNetwork.
+    private var networksBefore: Pair<MutableSet<Network>, Network?> = mutableSetOf<Network>() to null
+
     private fun watchNetwork() {
         val cm = getSystemService(ConnectivityManager::class.java)
+        // A network's first report only, and until it is lost: one that comes back is news.
+        val replays = networksBefore.first
+        // The same for the default network, on the main thread.
+        var defaultReplay = networksBefore.second
+        watchingSince = SystemClock.elapsedRealtime()
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 AppLog.i("network available: $network")
+                // Before `networks`: a verdict on the main thread must not see one without the other.
+                if (!replays.remove(network)) fallbackNetChangedAt = SystemClock.elapsedRealtime()
                 synchronized(networks) { networks += network }
                 backend.networkChanged()
                 mainHandler.post {
@@ -1649,6 +1698,7 @@ class TunnelVpnService : VpnService() {
             }
 
             override fun onLost(network: Network) {
+                replays -= network
                 val none = synchronized(networks) { networks -= network; networks.isEmpty() }
                 AppLog.i("network lost: $network, cutting relay connections")
                 backend.networkLost()
@@ -1693,6 +1743,8 @@ class TunnelVpnService : VpnService() {
             override fun onAvailable(network: Network) {
                 if (defaultValidated?.first != network) defaultValidated = null
                 defaultChangedAt = SystemClock.elapsedRealtime()
+                if (network != defaultReplay && network != defaultNet) fallbackNetChangedAt = defaultChangedAt
+                defaultReplay = null
                 // Each restart it causes is a new join: a real change only.
                 if (defaultNet != network) fallbackNetworkEvent(lost = false)
                 defaultNet = network
@@ -1703,7 +1755,7 @@ class TunnelVpnService : VpnService() {
                 // The carrier's code may be empty right after a switch and come with a later call.
                 defaultCaps = network to caps
                 updateNetKey()
-                if (fallbackAtPortal && !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL)) considerFallback()
+                if (fallbackAwaitingDefault || fallbackAtPortal && !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL)) considerFallback()
                 val validated = network to caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
                 if (validated == defaultValidated) return
                 defaultValidated = validated
@@ -1711,6 +1763,7 @@ class TunnelVpnService : VpnService() {
             }
 
             override fun onLost(network: Network) {
+                defaultReplay = null
                 if (defaultDns?.first == network) defaultDns = null
                 if (defaultNet == network) defaultNet = null
                 if (defaultValidated?.first == network) defaultValidated = null

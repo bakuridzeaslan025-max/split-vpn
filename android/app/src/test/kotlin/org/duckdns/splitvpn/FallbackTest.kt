@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.LinkProperties
+import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.Looper
 import org.junit.After
@@ -185,8 +186,9 @@ class FallbackTest {
     }
 
     // Go's probe at start says down before CONNECTED, and with one endpoint it never says again.
+    // That probe had no network to judge by: the one appearing gets its pause.
     @Test
-    fun relayDownAtStartEnablesAfterThePause() {
+    fun relayDownAtStartWithNoNetworkYetEnablesAfterThePause() {
         be.endpoints = listOf(a)
         be.relayDownAtStart = true
         start()
@@ -814,6 +816,337 @@ class FallbackTest {
         verdict(false)
         calls()
         assertFalse(TunnelState.logLines().toString(), TunnelState.logLines().any { "VK" in it })
+    }
+
+    // ---- the pause only for real network changes
+
+    private val cm get() = app.getSystemService(ConnectivityManager::class.java)
+
+    private fun capsWith(vararg extra: Int) = ShadowNetworkCapabilities.newInstance().also { caps ->
+        val needed = listOf(
+            NetworkCapabilities.NET_CAPABILITY_INTERNET,
+            NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED,
+            NetworkCapabilities.NET_CAPABILITY_TRUSTED,
+            NetworkCapabilities.NET_CAPABILITY_NOT_VPN,
+        )
+        (needed + extra.toList()).forEach { shadowOf(caps).addCapability(it) }
+    }
+
+    /** Up before the start, so Android will replay them. First: the default one. */
+    private fun upBeforeStart(): Pair<Network, Network> {
+        val default = cm.activeNetwork!!
+        val other = cm.allNetworks.first { it != default }
+        for (n in listOf(default, other)) shadowOf(cm).setNetworkCapabilities(n, capsWith())
+        return default to other
+    }
+
+    private fun replayNet(n: Network) {
+        netCallback()!!.onAvailable(n)
+        ShadowLooper.idleMainLooper()
+    }
+
+    private fun replayDefault(n: Network, vararg caps: Int) {
+        defaultCallback().onAvailable(n)
+        defaultCallback().onCapabilitiesChanged(n, capsWith(*caps))
+        ShadowLooper.idleMainLooper()
+    }
+
+    // start() idles the looper for a varying time, and with it the clock.
+    private fun replayWindowFromNow() = ReflectionHelpers.setField(svc, "watchingSince", android.os.SystemClock.elapsedRealtime())
+
+    private fun assertPausedThenOn(fromNow: Long = TunnelVpnService.NEW_NETWORK_SWITCH_MS) {
+        assertEquals(Waiting.NO_SERVER, TunnelState.waiting)
+        assertEquals(0, enabledCount())
+        ShadowLooper.idleMainLooper(fromNow - 1, TimeUnit.MILLISECONDS)
+        assertEquals(0, enabledCount())
+        ShadowLooper.idleMainLooper(1, TimeUnit.MILLISECONDS)
+        assertEquals(1, enabledCount())
+    }
+
+    @Test
+    fun replayAfterTheVerdictHasNoPause() {
+        val (default, _) = upBeforeStart()
+        be.relayDownAtStart = true
+        start()
+        assertEquals(0, enabledCount())
+        replayNet(default)
+        replayDefault(default)
+        assertEquals(1, enabledCount())
+    }
+
+    @Test
+    fun verdictAfterTheReplayHasNoPause() {
+        val (default, _) = upBeforeStart()
+        start()
+        replayNet(default)
+        replayDefault(default)
+        assertEquals(0, enabledCount())
+        verdict(true)
+        assertEquals(1, enabledCount())
+    }
+
+    @Test
+    fun verdictQueuedBeforeTheReplayRunsHasNoPause() {
+        val (default, _) = upBeforeStart()
+        start()
+        be.startedHost!!.relayDown(true)
+        netCallback()!!.onAvailable(default)
+        defaultCallback().onAvailable(default)
+        defaultCallback().onCapabilitiesChanged(default, capsWith())
+        ShadowLooper.idleMainLooper()
+        assertEquals(1, enabledCount())
+    }
+
+    @Test
+    fun twoReplayedNetworksHaveNoPause() {
+        val (default, other) = upBeforeStart()
+        be.relayDownAtStart = true
+        start()
+        replayNet(other)
+        replayNet(default)
+        replayDefault(default)
+        assertEquals(1, enabledCount())
+    }
+
+    @Test
+    fun theDefaultReplayedFirstHasNoPause() {
+        val (default, other) = upBeforeStart()
+        be.relayDownAtStart = true
+        start()
+        replayDefault(default)
+        assertEquals("no network reported yet", 0, enabledCount())
+        replayNet(default)
+        replayNet(other)
+        assertEquals(1, enabledCount())
+    }
+
+    // The portal check reads its caps: the networks alone are not enough, for a moment.
+    @Test
+    fun theNetworksReplayedFirstWaitForTheDefaultOne() {
+        val (default, _) = upBeforeStart()
+        be.relayDownAtStart = true
+        start()
+        replayWindowFromNow()
+        replayNet(default)
+        assertEquals(0, enabledCount())
+        ShadowLooper.idleMainLooper(500, TimeUnit.MILLISECONDS)
+        assertEquals(0, enabledCount())
+        replayDefault(default)
+        assertEquals(1, enabledCount())
+    }
+
+    @Test
+    fun aDefaultNeverReplayedStopsTheWaitInTime() {
+        val (default, _) = upBeforeStart()
+        be.relayDownAtStart = true
+        start()
+        replayWindowFromNow()
+        replayNet(default)
+        ShadowLooper.idleMainLooper(TunnelVpnService.DEFAULT_REPLAY_WAIT_MS - 1, TimeUnit.MILLISECONDS)
+        assertEquals(0, enabledCount())
+        ShadowLooper.idleMainLooper(1, TimeUnit.MILLISECONDS)
+        assertEquals(1, enabledCount())
+    }
+
+    @Test
+    fun aReplayedPortalStillHoldsItBack() {
+        val (default, _) = upBeforeStart()
+        be.relayDownAtStart = true
+        start()
+        replayNet(default)
+        replayDefault(default, NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL)
+        ShadowLooper.idleMainLooper(TunnelVpnService.NEW_NETWORK_SWITCH_MS, TimeUnit.MILLISECONDS)
+        assertEquals(0, enabledCount())
+        defaultCallback().onCapabilitiesChanged(default, capsWith())
+        ShadowLooper.idleMainLooper()
+        assertEquals(1, enabledCount())
+    }
+
+    @Test
+    fun aRealDefaultChangePausesWithTheRecheckAfterIt() {
+        val (default, other) = upBeforeStart()
+        start()
+        replayNet(default)
+        replayNet(other)
+        replayDefault(default)
+        advance(5_000)
+        replayDefault(other)
+        advance(5_000)
+        verdict(true)
+        assertPausedThenOn(TunnelVpnService.NEW_NETWORK_SWITCH_MS - 5_000)
+    }
+
+    @Test
+    fun aDefaultArrivingAfterNonePauses() {
+        val (default, _) = upBeforeStart()
+        start()
+        replayNet(default)
+        replayDefault(default)
+        defaultCallback().onLost(default)
+        replayDefault(default)
+        verdict(true)
+        assertPausedThenOn()
+    }
+
+    @Test
+    fun aKnownNetworkLostAndBackPauses() {
+        val (default, other) = upBeforeStart()
+        start()
+        replayNet(default)
+        replayNet(other)
+        replayDefault(default)
+        netCallback()!!.onLost(other)
+        replayNet(other)
+        verdict(true)
+        assertPausedThenOn()
+    }
+
+    @Test
+    fun theSameDefaultReportedAgainIsNoChange() {
+        val (default, _) = upBeforeStart()
+        start()
+        replayNet(default)
+        replayDefault(default)
+        replayDefault(default)
+        verdict(true)
+        assertEquals(1, enabledCount())
+    }
+
+    @Test
+    fun aNewNetworkAfterTheStartPauses() {
+        val (default, _) = upBeforeStart()
+        start()
+        replayNet(default)
+        replayDefault(default)
+        replayNet(net(9))
+        verdict(true)
+        assertPausedThenOn()
+    }
+
+    @Test
+    fun noNetworkAtStartThenOnePauses() {
+        be.relayDownAtStart = true
+        start()
+        replayNet(net(9))
+        replayDefault(net(9))
+        assertPausedThenOn()
+    }
+
+    // Stamped at the callback: the verdict's runnable runs before the callback's own.
+    @Test
+    fun aNewNetworkRacingAQueuedVerdictPauses() {
+        val (default, _) = upBeforeStart()
+        start()
+        replayNet(default)
+        replayDefault(default)
+        be.startedHost!!.relayDown(true)
+        netCallback()!!.onAvailable(net(9))
+        ShadowLooper.idleMainLooper()
+        assertPausedThenOn()
+    }
+
+    @Test
+    fun aDefaultChangeRacingAQueuedVerdictPauses() {
+        val (default, other) = upBeforeStart()
+        start()
+        replayNet(default)
+        replayNet(other)
+        replayDefault(default)
+        be.startedHost!!.relayDown(true)
+        defaultCallback().onAvailable(other)
+        ShadowLooper.idleMainLooper()
+        assertPausedThenOn()
+    }
+
+    // Listed by the time of registration, but not in the snapshot from before the probe.
+    @Test
+    fun aNetworkAppearingDuringTheStartsProbePauses() {
+        val (default, _) = upBeforeStart()
+        val during = net(9)
+        be.relayDownAtStart = true
+        be.establishHook = {
+            shadowOf(cm).addNetwork(during, cm.activeNetworkInfo)
+            shadowOf(cm).setNetworkCapabilities(during, capsWith())
+        }
+        start()
+        replayNet(default)
+        replayNet(during)
+        replayDefault(default)
+        assertPausedThenOn()
+    }
+
+    @Test
+    fun theDefaultChangingDuringTheStartsProbePauses() {
+        val (default, other) = upBeforeStart()
+        be.relayDownAtStart = true
+        start()
+        replayNet(default)
+        replayNet(other)
+        replayDefault(other)
+        assertPausedThenOn()
+    }
+
+    @Test
+    fun aChangeInTheLastRunDoesNotPauseThisOne() {
+        val (default, _) = upBeforeStart()
+        start()
+        replayNet(net(9))
+        replayDefault(net(9))
+        stop()
+        assertEquals(VpnState.DISCONNECTED, TunnelState.state)
+        be.fetches.set(0)
+        be.relayDownAtStart = true
+        start()
+        replayNet(default)
+        replayDefault(default)
+        assertEquals(1, enabledCount())
+    }
+
+    @Test
+    fun theRelayDyingInARunningTunnelEnablesAtOnceAndGoesOffWithIt() {
+        val (default, _) = upBeforeStart()
+        start()
+        replayNet(default)
+        replayDefault(default)
+        settle()
+        assertEquals(0, enabledCount())
+        verdict(true)
+        assertEquals(1, enabledCount())
+        verdict(false)
+        assertEquals("fallbackDisable:relay_back", calls().last())
+    }
+
+    // These two read netAppearedAt and defaultChangedAt, where a replay still counts.
+    @Test
+    fun checkRelayDownStillWaitsOutAReplayedNetwork() {
+        val (default, _) = upBeforeStart()
+        start(intent(analytics = true))
+        replayNet(default)
+        replayDefault(default, NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        verdict(true)
+        val reasons = { be.analytics.filter { it.first == "vpn_failed" }.map { it.second["reason"] } }
+        assertEquals(emptyList<Any?>(), reasons())
+        ShadowLooper.idleMainLooper(TunnelVpnService.NEW_NETWORK_SWITCH_MS, TimeUnit.MILLISECONDS)
+        assertEquals(listOf<Any?>("relay_down"), reasons())
+    }
+
+    @Test
+    fun switchOnNewNetworkStillWaitsOutAReplayedNetwork() {
+        be.endpoints = listOf(a, b)
+        val (default, other) = upBeforeStart()
+        start()
+        replayNet(default)
+        replayDefault(default)
+        settle()
+        verdict(true)
+        assertEquals(listOf(b), be.endpointsSet.toList())
+        verdict(true)
+        // Both down, the round paused: the report of a network ends the pause, in its own time.
+        replayNet(other)
+        ShadowLooper.idleMainLooper(TunnelVpnService.NEW_NETWORK_SWITCH_MS - 1, TimeUnit.MILLISECONDS)
+        assertEquals(listOf(b), be.endpointsSet.toList())
+        ShadowLooper.idleMainLooper(1, TimeUnit.MILLISECONDS)
+        assertEquals(listOf(b, a), be.endpointsSet.toList())
     }
 
     // ---- fallback_relay_dead
