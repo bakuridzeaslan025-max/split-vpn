@@ -371,6 +371,46 @@ class TunnelVpnServiceTest {
         assertEquals(1, fake!!.fetches.get())
     }
 
+    private fun fetchesAfterStart(fake: FakeBackend, releaseAfterConnected: Boolean): Int {
+        this.fake = fake
+        val svc = controller.get()
+        svc.backend = fake
+        Credentials.save(app, fakeCred(System.currentTimeMillis() / 1000 + 7 * 86400))
+        svc.onStartCommand(Intent(TunnelVpnService.ACTION_START), 0, 1)
+        awaitState(VpnState.CONNECTED)
+        if (releaseAfterConnected) fake.release()
+        // Room for a second fetch to start, and for a third that must not.
+        val until = System.currentTimeMillis() + 500
+        while (System.currentTimeMillis() < until) {
+            Thread.sleep(20)
+            ShadowLooper.idleMainLooper()
+        }
+        return fake.fetches.get()
+    }
+
+    // The start's fetch reset by the TUN coming up: once more over it, no more.
+    @Test
+    fun failedStartFetchGoesOnceMoreWhenConnected() {
+        // The TUN late enough for the fetch to have failed before CONNECTED.
+        val fake = FakeBackend().apply { configError = Exception("reset"); establishHook = { Thread.sleep(200) } }
+        assertEquals(2, fetchesAfterStart(fake, releaseAfterConnected = false))
+    }
+
+    @Test
+    fun startFetchFailingAfterConnectedGoesOnceMore() {
+        assertEquals(2, fetchesAfterStart(FakeBackend().apply { blockConfig = true; configError = Exception("reset") }, releaseAfterConnected = true))
+    }
+
+    @Test
+    fun startFetchThatLandsIsTheOnlyOne() {
+        assertEquals(1, fetchesAfterStart(FakeBackend(), releaseAfterConnected = false))
+    }
+
+    @Test
+    fun startFetchLandingAfterConnectedIsTheOnlyOne() {
+        assertEquals(1, fetchesAfterStart(FakeBackend().apply { blockConfig = true }, releaseAfterConnected = true))
+    }
+
     @Test
     fun snapshotCarriesVersions() {
         rc(min = 3, latest = newer)

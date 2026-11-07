@@ -1161,6 +1161,22 @@ class TunnelVpnService : VpnService() {
         }
     }
 
+    // The start's fetch races the TUN: its socket, opened before the TUN
+    // took Google's routes, got reset on a phone at every start with a
+    // credential. One opened once connected goes through Go and lives, so a
+    // start whose fetch got no answer fetches once more then. Any answer
+    // clears it before `fetching` goes false: CONNECTED must not take a
+    // fetch that just landed for a failed one.
+    @Volatile private var fetchAgain = false
+
+    // Main thread only, as every fetchConfig: `fetching` cannot turn true meanwhile.
+    private fun fetchAgainIfConnected() {
+        // `fetching` first: false, it shows the flag as its fetch left it.
+        if (fetching.get() || !fetchAgain || TunnelState.state != VpnState.CONNECTED) return
+        fetchAgain = false
+        fetchConfig("connected")
+    }
+
     private fun stopFetching() {
         mainHandler.removeCallbacks(periodicFetch)
         mainHandler.removeCallbacks(noServerFetch)
@@ -1172,12 +1188,15 @@ class TunnelVpnService : VpnService() {
         if (!fetching.compareAndSet(false, true)) return
         Thread({
             try {
-                applyConfig(backend.fetchConfig(), backend::decryptEndpoints)
+                val v = backend.fetchConfig()
+                fetchAgain = false
+                applyConfig(v, backend::decryptEndpoints)
             } catch (e: Throwable) {
                 AppLog.e("remote config ($why) failed", e, expected = true) // offline, throttled
             } finally {
                 fetching.set(false)
                 synchronized(lock) { lock.notifyAll() }
+                if (fetchAgain) mainHandler.post { fetchAgainIfConnected() }
             }
         }, "RemoteConfig").start()
     }
@@ -1435,6 +1454,7 @@ class TunnelVpnService : VpnService() {
         freshDown = false
         awaitingVerdict = false
         stopFetching()
+        fetchAgain = true
         fetchConfig("start")
         mainHandler.postDelayed(periodicFetch, CONFIG_PERIOD_MS)
         // Not against the instrumented tests' relay: RC's versions are not about it.
@@ -1504,6 +1524,7 @@ class TunnelVpnService : VpnService() {
                     watchScreen()
                     mainHandler.post { updateWaiting() }
                     mainHandler.post { checkActive() }
+                    mainHandler.post { fetchAgainIfConnected() }
                     // A list that landed while connecting could not switch.
                     mainHandler.post { onNewList(changed = missedChange.also { missedChange = false }) }
                     mainHandler.removeCallbacks(periodicRebuild)
