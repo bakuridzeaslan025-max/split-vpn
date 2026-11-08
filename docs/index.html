@@ -56,7 +56,7 @@ code{font:12px/1.4 ui-monospace,Menlo,monospace;word-break:break-all;display:blo
 </div>
 
 <div class="card">
-<a class="dl" id="dl" href="https://github.com/bakuridzeaslan025-max/split-vpn/releases/latest/download/split-vpn.apk">Скачать для Android</a>
+<a class="dl" id="dl" href="split-vpn.apk">Скачать для Android</a>
 <p class="meta" id="meta"></p>
 <div class="note">Уже пользуешься Split VPN? Ставь поверх — настройки сохранятся, а VPN включится сам, если был включён.</div>
 </div>
@@ -73,7 +73,7 @@ fetch("https://api.github.com/repos/bakuridzeaslan025-max/split-vpn/releases/lat
     // Without the API (60 requests an hour per IP, and mobile NAT shares one) the button keeps the direct link.
     const apk = rel.assets.find(a => a.name === "split-vpn.apk") || rel.assets.find(a => a.name.endsWith(".apk"));
     if (!apk) return;
-    document.getElementById("dl").href = apk.browser_download_url;
+    // Temporary: release downloads answer 504 (2026-11-08), the button keeps the copy on Pages.
     const mb = (apk.size / 1048576).toLocaleString("ru-RU", {maximumFractionDigits: 1});
     const date = new Date(rel.published_at).toLocaleDateString("ru-RU", {day: "numeric", month: "long"});
     document.getElementById("meta").textContent = `Версия ${rel.tag_name.replace(/^v/, "")} · ${mb} МБ · ${date}`;
