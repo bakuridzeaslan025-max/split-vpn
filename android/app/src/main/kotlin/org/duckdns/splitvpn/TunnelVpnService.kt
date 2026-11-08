@@ -30,6 +30,7 @@ import androidx.core.content.ContextCompat
 import com.google.android.gms.tasks.Tasks
 import com.google.android.play.core.integrity.IntegrityManagerFactory
 import com.google.android.play.core.integrity.IntegrityTokenRequest
+import com.google.firebase.FirebaseApp
 import com.google.firebase.remoteconfig.CustomSignals
 import com.google.firebase.remoteconfig.FirebaseRemoteConfig
 import com.google.firebase.remoteconfig.FirebaseRemoteConfigSettings
@@ -133,7 +134,13 @@ internal object GoBackend : Backend {
         )
         // Always set, never only for debug: custom signals persist, and a
         // release installed over a debug build would keep "debug".
-        Tasks.await(rc.setCustomSignals(CustomSignals.Builder().put("build", if (BuildConfig.DEBUG) "debug" else "release").build()), 10, TimeUnit.SECONDS)
+        // uid is the Analytics user_id: RC conditions can't see it, so a
+        // per-device value (one device's quota) keys on this signal.
+        val signals = CustomSignals.Builder()
+            .put("build", if (BuildConfig.DEBUG) "debug" else "release")
+            .put("uid", Crash.userId(FirebaseApp.getInstance().applicationContext))
+            .build()
+        Tasks.await(rc.setCustomSignals(signals), 10, TimeUnit.SECONDS)
         Tasks.await(rc.fetchAndActivate(), 60, TimeUnit.SECONDS)
         // Not asLong(): a typo in the console would throw and cost the endpoints too.
         val quota = rc.getValue("daily_quota_mb").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString()?.trim()?.toLongOrNull()
