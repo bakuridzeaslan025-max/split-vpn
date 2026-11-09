@@ -349,7 +349,7 @@ class MainActivityTest {
         assertEquals("ищу обход…", a.note("youtube"))
         verdict("works")
         assertEquals("YouTube напрямую", a.note("youtube"))
-        assertEquals(app.getColor(R.color.simple_blue), a.row("youtube").findViewById<TextView>(R.id.note).currentTextColor)
+        assertEquals(app.getColor(R.color.primary), a.row("youtube").findViewById<TextView>(R.id.note).currentTextColor)
         // The server down: YouTube still goes direct, the card says so.
         TunnelState.setWaiting(Waiting.NO_SERVER)
         ShadowLooper.idleMainLooper()
@@ -357,7 +357,7 @@ class MainActivityTest {
         TunnelState.setWaiting(null)
         verdict("fails")
         assertEquals("120\u00A0мс", a.note("youtube"))
-        assertEquals(app.getColor(R.color.simple_dim), a.row("youtube").findViewById<TextView>(R.id.note).currentTextColor)
+        assertEquals(app.getColor(R.color.on_surface_variant), a.row("youtube").findViewById<TextView>(R.id.note).currentTextColor)
         verdict("works")
         TunnelState.set(VpnState.DISCONNECTED)
         ShadowLooper.idleMainLooper()

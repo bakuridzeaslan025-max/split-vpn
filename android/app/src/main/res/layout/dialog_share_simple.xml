@@ -20,7 +20,7 @@
             android:layout_weight="1"
             android:text="Поделиться Split VPN"
             android:textSize="20sp"
-            android:textColor="@color/simple_ink" />
+            android:textColor="@color/on_surface" />
 
         <TextView
             android:id="@+id/close"
@@ -30,7 +30,7 @@
             android:contentDescription="Закрыть"
             android:text="✕"
             android:textSize="18sp"
-            android:textColor="@color/simple_dim" />
+            android:textColor="@color/on_surface_variant" />
     </LinearLayout>
 
     <TextView
@@ -40,7 +40,7 @@
         android:lineSpacingMultiplier="1.2"
         android:text="Наведите камеру другого телефона на код — откроется страница, где можно скачать приложение."
         android:textSize="14sp"
-        android:textColor="@color/simple_dim" />
+        android:textColor="@color/on_surface_variant" />
 
     <ImageView
         android:id="@+id/qr"
@@ -61,5 +61,5 @@
         android:fontFamily="sans-serif-medium"
         android:text="Отправить ссылку"
         android:textSize="15sp"
-        android:textColor="@color/on_blue" />
+        android:textColor="@color/on_primary" />
 </LinearLayout>

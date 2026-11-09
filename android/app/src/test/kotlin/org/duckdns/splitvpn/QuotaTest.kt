@@ -315,7 +315,7 @@ class QuotaTest {
             "Сегодня через VPN: 2\u00A0ГБ из 2\u00A0ГБ, снова после 00:00",
             findViewById<TextView>(R.id.usageText).text.toString(),
         )
-        assertEquals(getColor(R.color.simple_blue), findViewById<TextView>(R.id.hintText).currentTextColor)
+        assertEquals(getColor(R.color.primary), findViewById<TextView>(R.id.hintText).currentTextColor)
         assertEquals("a normal state, not a failure", View.GONE, findViewById<View>(R.id.errorBox).visibility)
         assertEquals("Лимит на сегодня исчерпан", findViewById<TextView>(R.id.buttonLabel).text.toString())
         assertFalse(findViewById<View>(R.id.toggleButton).isEnabled)
@@ -326,7 +326,7 @@ class QuotaTest {
         assertEquals(View.GONE, findViewById<View>(R.id.errorBox).visibility)
         assertEquals("Подключить", findViewById<TextView>(R.id.buttonLabel).text.toString())
         assertTrue(findViewById<View>(R.id.toggleButton).isEnabled)
-        assertEquals(getColor(R.color.simple_blue), findViewById<TextView>(R.id.hintText).currentTextColor)
+        assertEquals(getColor(R.color.primary), findViewById<TextView>(R.id.hintText).currentTextColor)
     }
 
     @Test

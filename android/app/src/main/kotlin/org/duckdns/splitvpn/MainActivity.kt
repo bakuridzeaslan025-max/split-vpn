@@ -236,7 +236,7 @@ class MainActivity : Activity() {
 
         findViewById<View>(R.id.menuButton).setOnClickListener { showMenu(it) }
         findViewById<View>(R.id.shareLogButton).apply {
-            background = box(getColor(R.color.surface), radius = 24f)
+            background = box(getColor(R.color.surface_lowest), radius = 24f)
             setOnClickListener { shareLog() }
         }
         findViewById<View>(R.id.toggleButton).setOnClickListener {
@@ -362,7 +362,7 @@ class MainActivity : Activity() {
         val tabs = listOf(Triple("vpn", "⇅", "Соединение"), Triple("auto", "↻", "Автозапуск"), Triple("log", "☰", "Журнал"))
         for ((key, icon, label) in tabs) {
             val active = key == tab
-            val ink = getColor(if (active) R.color.simple_link else R.color.simple_dim)
+            val ink = getColor(if (active) R.color.primary else R.color.on_surface_variant)
             val item = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
@@ -380,7 +380,7 @@ class MainActivity : Activity() {
                 includeFontPadding = false
                 setTextColor(ink)
             }
-            iconView.background = if (active) box(getColor(R.color.blue_tint), radius = 13f) else null
+            iconView.background = if (active) box(getColor(R.color.primary_container), radius = 13f) else null
             labelView.textSize = 12f
             labelView.typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
             item.addView(iconView, LinearLayout.LayoutParams(dp(56), dp(26)))
@@ -424,13 +424,13 @@ class MainActivity : Activity() {
                 else -> null
             } else null
             note.text = status ?: ping
-            note.setTextColor(getColor(if (status != null && direct == "works") R.color.blue_text else R.color.simple_dim))
+            note.setTextColor(getColor(if (status != null && direct == "works") R.color.primary else R.color.on_surface_variant))
             renderSwitch(row.findViewById(R.id.seg), row.findViewById(R.id.knob), en)
         }
     }
 
     private fun renderSwitch(seg: View, knob: View, on: Boolean) {
-        val track = if (!on) getColor(R.color.switch_off) else if (editable) getColor(R.color.simple_blue) else getColor(R.color.switch_locked)
+        val track = if (!on) getColor(R.color.surface_container_highest) else if (editable) getColor(R.color.primary) else getColor(R.color.primary)
         seg.background = box(track, radius = 16f)
         knob.layoutParams = (knob.layoutParams as FrameLayout.LayoutParams).apply {
             gravity = if (on) Gravity.END else Gravity.START
@@ -445,7 +445,7 @@ class MainActivity : Activity() {
                 text = ic
                 textSize = 10f
                 gravity = Gravity.CENTER
-                setTextColor(getColor(R.color.badge_ink))
+                setTextColor(getColor(R.color.on_surface_variant))
                 setBackgroundResource(R.drawable.simple_icon_bg)
             }
             badges.addView(badge, i, LinearLayout.LayoutParams(dp(22), dp(22)).apply { marginEnd = dp(6) })
@@ -477,21 +477,21 @@ class MainActivity : Activity() {
         val dot = findViewById<View>(R.id.statusDot)
         val on = state == VpnState.CONNECTED
         hint.text = if (editable) "Выберите, что пойдёт через VPN" else "Чтобы изменить список, выключите VPN"
-        hint.setTextColor(getColor(if (editable) R.color.blue_text else R.color.simple_dim))
+        hint.setTextColor(getColor(if (editable) R.color.primary else R.color.on_surface_variant))
         findViewById<View>(R.id.chip).background = box(
-            if (waitingNow) getColor(R.color.warn_bg) else if (on) getColor(R.color.chip_on_bg) else getColor(R.color.chip_off_bg), radius = 16f
+            if (waitingNow) getColor(R.color.warning_container) else if (on) getColor(R.color.success_container) else getColor(R.color.surface_container_high), radius = 16f
         )
         findViewById<TextView>(R.id.statusText).setTextColor(
-            if (waitingNow) getColor(R.color.warn_ink) else if (on) getColor(R.color.chip_on_ink) else getColor(R.color.chip_off_ink)
+            if (waitingNow) getColor(R.color.on_warning_container) else if (on) getColor(R.color.on_success_container) else getColor(R.color.on_surface)
         )
-        val green = getColor(R.color.dot_on)
-        val grey = getColor(R.color.dot_busy)
+        val green = getColor(R.color.success)
+        val grey = getColor(R.color.outline)
         // Not a failure but nothing to press until midnight: greyed out like busy.
         // Nor while min_version turns this version away: the red box's "Обновить" is the way.
         val inert = busy || quotaOut || updateRequired
-        dot.background = box(if (waitingNow) getColor(R.color.warn_dot) else if (on) green else if (busy) grey else getColor(R.color.dot_off), radius = 4f)
+        dot.background = box(if (waitingNow) getColor(R.color.warning) else if (on) green else if (busy) grey else getColor(R.color.on_surface_variant), radius = 4f)
         findViewById<View>(R.id.buttonDot).background =
-            box(if (waitingNow) getColor(R.color.warn_dot) else if (on) green else if (inert) grey else getColor(R.color.on_blue), radius = 5f)
+            box(if (waitingNow) getColor(R.color.warning) else if (on) green else if (inert) grey else getColor(R.color.on_primary), radius = 5f)
         findViewById<TextView>(R.id.buttonLabel).apply {
             text = if (quotaOut) "Лимит на сегодня исчерпан" else when (state) {
                 VpnState.CONNECTING -> "Подключение…"
@@ -500,13 +500,13 @@ class MainActivity : Activity() {
                 VpnState.ERROR -> if (offlineRetry) "Выключить" else "Подключить"
                 VpnState.DISCONNECTED -> "Подключить"
             }
-            setTextColor(if (on) getColor(R.color.simple_ink) else if (inert) getColor(R.color.simple_dim) else getColor(R.color.on_blue))
+            setTextColor(if (on) getColor(R.color.on_surface) else if (inert) getColor(R.color.on_surface_variant) else getColor(R.color.on_primary))
         }
         button.isEnabled = !inert
         button.background = when {
-            on -> box(getColor(R.color.surface), getColor(R.color.outline), 30f)
-            inert -> box(getColor(R.color.button_inert), radius = 30f)
-            else -> box(getColor(R.color.simple_blue), radius = 30f)
+            on -> box(getColor(R.color.surface_lowest), getColor(R.color.outline), 30f)
+            inert -> box(getColor(R.color.surface_container_high), radius = 30f)
+            else -> box(getColor(R.color.primary), radius = 30f)
         }
     }
 
@@ -553,8 +553,8 @@ class MainActivity : Activity() {
             else if (waiting == Waiting.NO_NETWORK) "Нет интернета. VPN включён и заработает сам, когда сеть появится — ничего делать не нужно."
             else "Сервер пока не отвечает — возможно, его блокирует оператор. VPN включён и подключится сам, ничего делать не нужно."
             text.text = msg
-            text.setTextColor(getColor(R.color.warn_ink))
-            view.background = box(getColor(R.color.warn_bg), radius = 16f)
+            text.setTextColor(getColor(R.color.on_warning_container))
+            view.background = box(getColor(R.color.warning_container), radius = 16f)
             return
         }
         // A used-up day is told by the toggle and the usage line: a normal state, not a failure.
@@ -576,10 +576,10 @@ class MainActivity : Activity() {
         val downloading = updateRequired && updating
         action.isEnabled = !downloading
         action.alpha = if (downloading) 0.6f else 1f
-        val ink = getColor(if (needCode) R.color.snackbar_ink else R.color.error_ink)
+        val ink = getColor(if (needCode) R.color.on_warning_container else R.color.on_error_container)
         text.setTextColor(ink)
-        action.setTextColor(if (needCode) getColor(R.color.snackbar_action) else ink)
-        view.background = box(getColor(if (needCode) R.color.snackbar_bg else R.color.error_bg), radius = 16f)
+        action.setTextColor(if (needCode) getColor(R.color.on_warning_container) else ink)
+        view.background = box(getColor(if (needCode) R.color.warning_container else R.color.error_container), radius = 16f)
     }
 
     // Also with the app closed when it happened: the service may be gone, the count is not.
@@ -622,20 +622,20 @@ class MainActivity : Activity() {
             v.latest > prefs.getLong(KEY_UPDATE_DISMISSED, 0)
         view.visibility = if (show) View.VISIBLE else View.GONE
         if (v == null || !show) return
-        view.background = box(getColor(R.color.warn_bg), radius = 16f)
+        view.background = box(getColor(R.color.warning_container), radius = 16f)
         findViewById<TextView>(R.id.updateText).apply {
             text = "Доступна новая версия"
-            setTextColor(getColor(R.color.warn_ink))
+            setTextColor(getColor(R.color.on_warning_container))
         }
         // While downloading: not a button, and no way to hide the only sign of it.
         findViewById<TextView>(R.id.updateAction).apply {
             text = updateLabel
-            setTextColor(getColor(R.color.warn_ink))
+            setTextColor(getColor(R.color.on_warning_container))
             isEnabled = !updating
             alpha = if (updating) 0.6f else 1f
         }
         findViewById<TextView>(R.id.updateClose).apply {
-            setTextColor(getColor(R.color.warn_ink))
+            setTextColor(getColor(R.color.on_warning_container))
             visibility = if (updating) View.INVISIBLE else View.VISIBLE
         }
     }
@@ -768,12 +768,12 @@ class MainActivity : Activity() {
     }
 
     private fun showMenu(anchor: View) {
-        val ink = getColor(R.color.simple_ink)
-        val dim = getColor(R.color.menu_dim)
+        val ink = getColor(R.color.on_surface)
+        val dim = getColor(R.color.on_surface_variant)
         val side = dp(20)
         val menu = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = box(getColor(R.color.surface), radius = 16f)
+            background = box(getColor(R.color.surface_lowest), radius = 16f)
             setPadding(0, dp(12), 0, dp(6))
             elevation = dp(8f)
         }
