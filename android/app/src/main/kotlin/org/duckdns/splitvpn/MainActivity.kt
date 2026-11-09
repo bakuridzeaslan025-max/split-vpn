@@ -460,6 +460,7 @@ class MainActivity : Activity() {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
                 setOnClickListener { showTab(key) }
+                isSelected = active
                 if (badge) contentDescription = "$label, нужно действие"
             }
             val pill = FrameLayout(this).apply {
@@ -526,6 +527,7 @@ class MainActivity : Activity() {
                 row.findViewWithTag<View>("badge").visibility = if (en) View.GONE else View.VISIBLE
                 mode.text = if (directMode) "Напрямую" else "Через VPN"
                 mode.isEnabled = editable
+                mode.contentDescription = "Режим YouTube: ${mode.text}"
                 // The chip names the mode; the probe pinged the relay, which direct
                 // YouTube does not use. Also while the server is down.
                 note.text = if (en && directMode && state == VpnState.CONNECTED) when (direct) {
@@ -561,7 +563,7 @@ class MainActivity : Activity() {
             }
             badges.addView(badge, i, LinearLayout.LayoutParams(dp(22), dp(22)).apply { marginEnd = dp(6) })
         }
-        if (svc.id == "youtube") badges.addView(modeChip(), 0, LinearLayout.LayoutParams(-2, dp(22)).apply { marginEnd = dp(8) })
+        if (svc.id == "youtube") badges.addView(modeChip(), 0, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
         row.setOnClickListener {
             // performClick reaches a disabled view too.
             if (!editable) return@setOnClickListener
@@ -581,14 +583,14 @@ class MainActivity : Activity() {
         gravity = Gravity.CENTER_VERTICAL
         setTextColor(getColor(R.color.on_primary_container))
         background = box(getColor(R.color.primary_container), radius = 6f)
-        setPadding(dp(8), 0, dp(4), 0)
+        setPaddingRelative(dp(8), dp(3), dp(4), dp(3))
+        minHeight = dp(22)
         val chevron = getDrawable(R.drawable.ic_expand_more)!!.mutate().apply {
             setBounds(0, 0, dp(14), dp(14))
             setTintList(tint(R.color.on_primary_container))
         }
         setCompoundDrawablesRelative(null, null, chevron, null)
         compoundDrawablePadding = dp(2)
-        contentDescription = null
         setOnClickListener { if (editable) showModeMenu(this) }
     }
 
@@ -635,6 +637,7 @@ class MainActivity : Activity() {
                 isSelected = selected
                 setOnClickListener {
                     popup.dismiss()
+                    if (!editable) return@setOnClickListener
                     prefs.edit().putBoolean(KEY_DIRECT, on).apply()
                     renderServices()
                 }

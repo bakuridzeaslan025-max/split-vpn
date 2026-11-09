@@ -337,6 +337,19 @@ class MainActivityTest {
         assertTrue(before === shadowOf(app).latestPopupWindow)
     }
 
+    // A start from outside (boot, always-on) locks the list under an open menu.
+    @Test
+    fun youTubeModeMenuDoesNothingOnceLocked() {
+        prefs.edit().putBoolean(Services.prefKey("youtube"), true).commit()
+        val a = launch()
+        a.mode().performClick()
+        val menu = shadowOf(app).latestPopupWindow.contentView as LinearLayout
+        connect()
+        menu.getChildAt(1).performClick()
+        assertEquals(true, prefs.getBoolean("yt_direct", true))
+        assertEquals("Режим YouTube: Напрямую", a.mode().contentDescription)
+    }
+
     /** Go's verdict as the :vpn host hears it; the service pushes a snapshot. */
     private fun verdict(v: String) {
         org.robolectric.util.ReflectionHelpers.getField<tunnel.Host>(service.get(), "host").directVerdict(v)
@@ -354,6 +367,12 @@ class MainActivityTest {
         assertEquals("ищу обход…", a.note("youtube"))
         verdict("works")
         assertEquals("", a.note("youtube"))
+        // The server down: YouTube still goes direct, no relay ping to show.
+        TunnelState.setWaiting(Waiting.NO_SERVER)
+        ShadowLooper.idleMainLooper()
+        assertEquals("", a.note("youtube"))
+        TunnelState.setWaiting(null)
+        ShadowLooper.idleMainLooper()
         verdict("fails")
         assertEquals("120 мс", a.note("youtube"))
         prefs.edit().putBoolean("yt_direct", false).commit()

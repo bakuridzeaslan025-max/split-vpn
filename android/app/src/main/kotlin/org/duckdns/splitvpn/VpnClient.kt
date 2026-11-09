@@ -73,6 +73,8 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
     }
 
     private var service: Messenger? = null
+    // A switch made while unbound; a sticky restart would otherwise run with the old one.
+    private var pendingAdBlock: Boolean? = null
     private val incoming = Messenger(Handler(Looper.getMainLooper()) { msg ->
         if (msg.what == MSG_SNAPSHOT) {
             onSnapshot(
@@ -95,6 +97,7 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
     private val conn = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             service = Messenger(binder).also { send(it, MSG_REGISTER) }
+            pendingAdBlock?.let { setAdBlock(it) }
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
@@ -125,9 +128,11 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
         }
     }
 
-    /** Ad blocking on or off right away; dropped while unbound, the next start carries it. */
+    /** Ad blocking on or off right away; while unbound, as soon as the service is back. */
     fun setAdBlock(on: Boolean) {
-        val to = service ?: return
+        val to = service
+        pendingAdBlock = if (to == null) on else null
+        if (to == null) return
         try {
             to.send(Message.obtain(null, MSG_ADBLOCK).apply { data = Bundle().apply { putBoolean(KEY_ADBLOCK, on) } })
         } catch (_: RemoteException) {
