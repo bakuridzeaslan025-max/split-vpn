@@ -11,7 +11,8 @@ internal data class RcValues(val endpoints: String, val minVersion: Long, val la
  * [url] is a page for the browser (that is all 0.6.1–0.10 know it as). Self-
  * update downloads from the mirrors of [apks] (apk_urls, a JSON list, "[]"
  * turns it off), without them the APK of [apk] ("" turns it off). [name]:
- * the versionName of [latest], "" when RC has none.
+ * latest_name, the versionName of the newest published release (not of
+ * [latest], which may lag behind it), "" when RC has none.
  */
 data class Versions(val min: Long = 0, val latest: Long = 0, val url: String = "", val apk: String = "", val apks: String = "", val name: String = "") {
     val required get() = BuildConfig.VERSION_CODE < min

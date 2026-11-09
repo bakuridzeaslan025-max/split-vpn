@@ -49,13 +49,31 @@ func TestParseMirrors_SharedVector(t *testing.T) {
 }
 
 func TestCheckBuild(t *testing.T) {
-	c := config{LatestVersion: 139, LatestName: "0.12.4"}
-	for _, ok := range []string{"", "139:0.12.4", "140:0.12.5", "garbage"} {
+	c := config{LatestVersion: 139, LatestName: "0.12.10"}
+	// Behind the tree.
+	for _, ok := range []string{"139:0.12.10", "140:0.12.10", "141:0.13.0", "140:1.0.0", "140:0.12.11"} {
 		if err := c.checkBuild(ok); err != nil {
 			t.Errorf("%q: %v", ok, err)
 		}
 	}
-	if err := c.checkBuild("139:0.12.5"); err == nil || !strings.Contains(err.Error(), "0.12.5") {
-		t.Errorf("stale latest_name: %v", err)
+	// latest_name may be ahead of latest_version: the banner lags behind.
+	if err := (config{LatestVersion: 135, LatestName: "0.12.3"}).checkBuild("138:0.12.3"); err != nil {
+		t.Errorf("latest_name ahead of latest_version: %v", err)
+	}
+	for in, want := range map[string]string{
+		"138:0.12.10": "versionCode 138",    // latest_version ahead of the tree
+		"140:0.12.9":  "versionName 0.12.9", // latest_name ahead, 10 > 9 by number
+		"140:0.11.99": "versionName 0.11.99",
+		"139:0.12.11": "its versionName is 0.12.11",
+		// Set, but not what the Makefile means to pass.
+		"":         `APP_VERSION ""`,
+		":":        `APP_VERSION ":"`,
+		"garbage":  `APP_VERSION "garbage"`,
+		"139:":     `APP_VERSION "139:"`,
+		":0.12.10": `APP_VERSION ":0.12.10"`,
+	} {
+		if err := c.checkBuild(in); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: %v, want %q", in, err, want)
+		}
 	}
 }

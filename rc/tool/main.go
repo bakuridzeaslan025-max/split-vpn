@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -41,8 +42,11 @@ type config struct {
 	// MIRRORS: probed in parallel, the first that passes wins. [] turns
 	// self-update off there; apk_url is theirs only while RC has no apk_urls.
 	APKURLs json.RawMessage `json:"apk_urls"`
-	// latest_version's versionName: self-update asks the mirrors for
-	// split-vpn-<it>.apk first, as the page does with the API's tag.
+	// The versionName of the newest published release, set on each release;
+	// latest_version, the banner's threshold, may lag behind it. Self-update
+	// asks the Pages mirrors for split-vpn-<it>.apk first, as the page does
+	// with the API's tag. A stale one (rc-rollback brings one back) only
+	// costs that: the mirrors answer 404 and split-vpn.apk comes next.
 	LatestName   string `json:"latest_name"`
 	DailyQuotaMB int    `json:"daily_quota_mb"`
 	// Direct YouTube's strategies, in the order to try them; [] turns it
@@ -75,16 +79,39 @@ func compact(js json.RawMessage) string {
 	return b.String()
 }
 
-// checkBuild: rc-push with latest_version of the build in the tree comes
-// right after its publish-local, and latest_name must be its versionName.
-// A stale one costs self-update the versioned file, and Releases at all.
-// appVersion is "<versionCode>:<versionName>" from app/build.gradle.kts.
+// checkBuild compares with the build in the tree, appVersion
+// "<versionCode>:<versionName>" from app/build.gradle.kts: nothing newer
+// than it is published yet, and with latest_version its versionCode,
+// latest_name is its versionName. Anything behind it is fine.
 func (c config) checkBuild(appVersion string) error {
 	code, name, ok := strings.Cut(appVersion, ":")
-	if ok && code == strconv.Itoa(c.LatestVersion) && name != c.LatestName {
+	treeCode, err := strconv.Atoi(code)
+	if !ok || err != nil || !versionName.MatchString(name) {
+		// The Makefile's sed no longer matching build.gradle.kts must not pass as "no check".
+		return fmt.Errorf("APP_VERSION %q: want <versionCode>:<versionName> of the build in the tree", appVersion)
+	}
+	switch {
+	case c.LatestVersion > treeCode:
+		return fmt.Errorf("config: latest_version %d is above the build in the tree, versionCode %d", c.LatestVersion, treeCode)
+	case compareVersions(c.LatestName, name) > 0:
+		return fmt.Errorf("config: latest_name %s is above the build in the tree, versionName %s", c.LatestName, name)
+	case c.LatestVersion == treeCode && c.LatestName != name:
 		return fmt.Errorf("config: latest_version %d is the build in the tree, its versionName is %s, latest_name is %q", c.LatestVersion, name, c.LatestName)
 	}
 	return nil
+}
+
+// compareVersions orders two X.Y.Z names by number; both must match versionName.
+func compareVersions(a, b string) int {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := range as {
+		x, _ := strconv.Atoi(as[i])
+		y, _ := strconv.Atoi(bs[i])
+		if x != y {
+			return cmp.Compare(x, y)
+		}
+	}
+	return 0
 }
 
 func (c config) validate() error {
@@ -116,7 +143,7 @@ func (c config) validate() error {
 		}
 	}
 	if !versionName.MatchString(c.LatestName) {
-		return errors.New("config: latest_name is required, latest_version's versionName X.Y.Z")
+		return errors.New("config: latest_name is required, the versionName X.Y.Z of the newest published release")
 	}
 	if c.YTStrategies == nil {
 		return errors.New("config: yt_strategies is required, a JSON array ([] turns direct YouTube off)")
@@ -399,8 +426,11 @@ func run(rcDir, gsPath, saPath, credPath string, args []string) error {
 		if cfg, err = loadConfig(filepath.Join(rcDir, "config.json")); err != nil {
 			return err
 		}
-		if err := cfg.checkBuild(os.Getenv("APP_VERSION")); err != nil {
-			return err
+		// Unset outside make rc-push: nothing to compare with.
+		if v, ok := os.LookupEnv("APP_VERSION"); ok {
+			if err := cfg.checkBuild(v); err != nil {
+				return err
+			}
 		}
 		eps, src, err := loadEndpoints(rcDir, os.Getenv("VDS_ENDPOINTS"))
 		if err != nil {

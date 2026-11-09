@@ -298,7 +298,12 @@ object Updater {
         false
     }
 
-    /** latest_name's file, null when RC has none: then only [FIXED] is asked for. */
+    /**
+     * latest_name's file, null when RC has none: then only [FIXED] is asked
+     * for. latest_name is the newest published release, set on each release,
+     * apart from latest_version (the banner's threshold); a stale one only
+     * makes the Pages mirrors answer 404 to it, and FIXED is asked for next.
+     */
     internal fun versioned(name: String) = name.takeIf { versionName.matches(it) }?.let { "split-vpn-$it.apk" }
 
     /** Shrunk in unit tests. probeMs is the one deadline of all probes, as download.js PROBE_TIMEOUT_MS. */
@@ -358,7 +363,9 @@ object Updater {
         val reachable = probes.any { p -> p.http || names.any { p.heads[it] != NET } }
         val last = mirrors.firstOrNull { !it.probe }?.takeIf { reachable }
             ?: return Decision(emptyList())
-        val c = Candidate(last.base + (versioned ?: FIXED), last.index, checked = false)
+        // Releases' latest/download/ is always the newest release, with no cache
+        // in the way as on Pages: the fixed name, whatever latest_name says.
+        val c = Candidate(last.base + FIXED, last.index, checked = false)
         return Decision(listOf(c))
     }
 

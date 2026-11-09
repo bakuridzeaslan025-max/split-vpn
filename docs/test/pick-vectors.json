@@ -41,8 +41,8 @@
        {"heads": {"v": 404, "f": 404}, "passed": true, "http": true, "bytes": 24576, "alive": false},
        {"heads": {"v": "net", "f": "net"}, "passed": false, "http": false, "bytes": 0, "alive": false}
      ],
-     "want": {"url": "https://r.test/split-vpn-1.2.3.apk", "checked": false},
-     "failover": ["https://r.test/split-vpn-1.2.3.apk"]
+     "want": {"url": "https://r.test/split-vpn.apk", "checked": false},
+     "failover": ["https://r.test/split-vpn.apk"]
     },
     {"name": "a probe still running on the first mirror keeps a passed second one waiting",
      "probes": [
@@ -87,8 +87,8 @@
        {"heads": {"v": 200, "f": 200}, "passed": false, "http": true, "bytes": 16700, "alive": false},
        {"heads": {"v": "net", "f": "net"}, "passed": false, "http": false, "bytes": 0, "alive": false}
      ],
-     "want": {"url": "https://r.test/split-vpn-1.2.3.apk", "checked": false},
-     "failover": ["https://r.test/split-vpn-1.2.3.apk"]
+     "want": {"url": "https://r.test/split-vpn.apk", "checked": false},
+     "failover": ["https://r.test/split-vpn.apk"]
     },
     {"name": "a slow link opens the alive mirror with more bytes, unchecked",
      "probes": [
@@ -136,8 +136,8 @@
        {"heads": {"v": 404, "f": 404}, "passed": false, "http": true, "bytes": 10000, "alive": true},
        {"heads": {"v": "net", "f": "net"}, "passed": false, "http": false, "bytes": 0, "alive": false}
      ],
-     "want": {"url": "https://r.test/split-vpn-1.2.3.apk", "checked": false},
-     "failover": ["https://r.test/split-vpn-1.2.3.apk"]
+     "want": {"url": "https://r.test/split-vpn.apk", "checked": false},
+     "failover": ["https://r.test/split-vpn.apk"]
     },
     {"name": "a passed probe with failed HEADs opens the fixed name unchecked",
      "probes": [
@@ -170,8 +170,8 @@
        {"heads": {"v": 504, "f": 504}, "passed": false, "http": true, "bytes": 0, "alive": false},
        {"heads": {"v": "net", "f": "net"}, "passed": false, "http": false, "bytes": 0, "alive": false}
      ],
-     "want": {"url": "https://r.test/split-vpn-1.2.3.apk", "checked": false},
-     "failover": ["https://r.test/split-vpn-1.2.3.apk"]
+     "want": {"url": "https://r.test/split-vpn.apk", "checked": false},
+     "failover": ["https://r.test/split-vpn.apk"]
     },
     {"name": "all net gives no URL",
      "probes": [

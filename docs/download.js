@@ -29,7 +29,9 @@ export function releaseInfo(rel) {
   return {versioned, meta: `Версия ${version} · ${mb} МБ · ${date}`};
 }
 
-export const lastResort = (mirrors, versioned) => mirrors.find(m => !m.probe).base + (versioned || FIXED);
+// Releases' latest/download/split-vpn.apk is always the newest release, with no
+// cache in the way as on Pages: the fixed name, whatever the version.
+export const lastResort = mirrors => mirrors.find(m => !m.probe).base + FIXED;
 
 // probe.bin on a mirror: 32 KB of random bytes. Throttled mobile networks let ~16 KB
 // of a host through and then stall, so an answer to HEAD alone proves nothing; the
@@ -96,7 +98,7 @@ export function decide({mirrors = MIRRORS, versioned = null, probes}) {
   // Nothing answered at all: GitHub is likely unreachable, and opening Releases would
   // only swap this page for the browser's error page.
   const reachable = probes.some(p => p.http || names.some(n => p.heads[n] !== "net"));
-  return {url: reachable ? lastResort(mirrors, versioned) : null, checked: false};
+  return {url: reachable ? lastResort(mirrors) : null, checked: false};
 }
 
 // All requests at once under one 4 s timeout: per mirror a HEAD on each APK name and
@@ -142,9 +144,9 @@ export async function pickUrl({mirrors = MIRRORS, versioned = null, fetch, strea
   }
 }
 
-// The button's behavior. pickUrl() and fallback() read the current versioned name;
-// the timer and event functions are called unbound, as the browser's globals allow.
-export function attach({dl, fail, direct, pickUrl, fallback, navigate,
+// The button's behavior. pickUrl() reads the current versioned name; the timer and
+// event functions are called unbound, as the browser's globals allow.
+export function attach({dl, fail, pickUrl, navigate,
     setTimeout, clearTimeout, addEventListener}) {
   const label = dl.textContent;
   let pending = null;
@@ -167,7 +169,6 @@ export function attach({dl, fail, direct, pickUrl, fallback, navigate,
     let url, checked;
     try {
       ({url, checked} = await pickUrl());
-      direct.href = fallback();
     } catch {
       // Engines without response streams (pickUrl throws): fall back to the plain link
       // the click was kept from opening.
@@ -205,9 +206,7 @@ function start() {
   attach({
     dl: document.getElementById("dl"),
     fail: document.getElementById("fail"),
-    direct: document.getElementById("direct"),
     pickUrl: () => pickUrl({versioned, fetch, streams: "body" in Response.prototype}),
-    fallback: () => lastResort(MIRRORS, versioned),
     navigate: url => { location.href = url; },
     setTimeout, clearTimeout, addEventListener,
   });

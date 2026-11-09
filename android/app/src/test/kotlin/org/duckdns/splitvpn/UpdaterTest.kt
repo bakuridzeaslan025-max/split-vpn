@@ -572,7 +572,7 @@ class UpdaterTest {
         val t0 = System.nanoTime()
         val s = select(ms)
         assertTrue("decided without the deadline", (System.nanoTime() - t0) / 1_000_000 < 720)
-        assertEquals(ms[2].base + v, s.decision.url)
+        assertEquals(ms[2].base + Updater.FIXED, s.decision.url)
         assertFalse(s.decision.checked)
         assertEquals(mapOf(1 to "http504", 2 to "short"), s.tags())
     }
@@ -762,7 +762,7 @@ class UpdaterTest {
             Thread.sleep(600)
             s.ok(m, apkOf("r"))
         }
-        val ms = mirrors(mapOf("/a/probe.bin" to http504, "/b/probe.bin" to http504, "/r/$v" to slow))
+        val ms = mirrors(mapOf("/a/probe.bin" to http504, "/b/probe.bin" to http504, "/r/split-vpn.apk" to slow))
         assertEquals(Updater.Result.STARTED, run(ms))
         assertEquals(listOf('r'), installed)
     }
