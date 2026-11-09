@@ -136,6 +136,28 @@ class RemoteConfigTest {
         assertTrue(fromRc in Endpoints.known)
     }
 
+    // No key or garbage: self-update takes apk_url; garbage is reported once per value.
+    @Test
+    fun apkUrlsAsFetched() {
+        fun fetch(apks: String) = RemoteConfig.apply(app, RcValues("", 0, 0, "", apkUrls = apks, latestName = " 0.12.4 "), be::decryptEndpoints)
+        val list = """ [{"base":"https://split-vpn-dl-547fcb.gitlab.io/","probe":true}] """
+        fetch(list)
+        assertEquals(list.trim(), RemoteConfig.versions(app).apks)
+        assertEquals("0.12.4", RemoteConfig.versions(app).name)
+        fetch("{garbage")
+        fetch("{garbage")
+        assertEquals("", RemoteConfig.versions(app).apks)
+        // Strict as rc/tool: nothing after the list.
+        fetch("[] x")
+        assertEquals("", RemoteConfig.versions(app).apks)
+        fetch("[]")
+        assertEquals("[]", RemoteConfig.versions(app).apks)
+        fetch("")
+        assertEquals("", RemoteConfig.versions(app).apks)
+        assertEquals(3, logLines().count { " E remote config: apk_urls is no JSON array" in it })
+        assertFalse(RemoteConfig.firstDrop(app, "[] x", RemoteConfig.KEY_BAD_APK_URLS))
+    }
+
     @Test
     fun brokenBlobLeavesTheCache() {
         Endpoints.cache(app, listOf(fromRc))

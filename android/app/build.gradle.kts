@@ -144,6 +144,16 @@ android {
     }
 
     testOptions.unitTests.isIncludeAndroidResources = true
+    // Test vectors shared with the download page's and rc/tool's tests, read
+    // where they are: one file each, nothing to keep in step.
+    testOptions.unitTests.all { test ->
+        val vectors = mapOf(
+            "vectors.pick" to rootProject.file("../docs/test/pick-vectors.json"),
+            "vectors.apkUrls" to rootProject.file("../rc/tool/testdata/apk_urls.json"),
+        )
+        vectors.forEach { (k, f) -> test.systemProperty(k, f.path) }
+        test.inputs.files(vectors.values)
+    }
 }
 
 dependencies {

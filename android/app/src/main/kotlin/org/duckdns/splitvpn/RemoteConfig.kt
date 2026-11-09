@@ -4,14 +4,17 @@ import android.content.Context
 
 /** Remote Config keys as fetched. */
 /** [dailyQuotaMb], [ytStrategies]: null when RC has no such key. [dialEventBp]: already [RemoteConfig.parseDialEventBp]'s. */
-internal data class RcValues(val endpoints: String, val minVersion: Long, val latestVersion: Long, val updateUrl: String, val dailyQuotaMb: Long? = null, val ytStrategies: String? = null, val apkUrl: String = "", val dialEventBp: Int = 0)
+internal data class RcValues(val endpoints: String, val minVersion: Long, val latestVersion: Long, val updateUrl: String, val dailyQuotaMb: Long? = null, val ytStrategies: String? = null, val apkUrl: String = "", val dialEventBp: Int = 0, val apkUrls: String = "", val latestName: String = "")
 
 /**
  * The versions part of Remote Config; the UI gets it in VpnClient's snapshot.
- * [url] is a page for the browser (that is all 0.6.1–0.10 know it as), [apk]
- * what self-update downloads; "" turns self-update off.
+ * [url] is a page for the browser (that is all 0.6.1–0.10 know it as). Self-
+ * update downloads from the mirrors of [apks] (apk_urls, a JSON list, "[]"
+ * turns it off), without them the APK of [apk] ("" turns it off). [name]:
+ * latest_name, the versionName of the newest published release (not of
+ * [latest], which may lag behind it), "" when RC has none.
  */
-data class Versions(val min: Long = 0, val latest: Long = 0, val url: String = "", val apk: String = "") {
+data class Versions(val min: Long = 0, val latest: Long = 0, val url: String = "", val apk: String = "", val apks: String = "", val name: String = "") {
     val required get() = BuildConfig.VERSION_CODE < min
     // Not for debug: release would go on top of it.
     val available get() = !debug && latest > BuildConfig.VERSION_CODE
@@ -35,6 +38,8 @@ internal object RemoteConfig {
     const val KEY_LATEST_VERSION = "rc.latest_version"
     const val KEY_UPDATE_URL = "rc.update_url"
     const val KEY_APK_URL = "rc.apk_url"
+    const val KEY_APK_URLS = "rc.apk_urls"
+    const val KEY_LATEST_NAME = "rc.latest_name"
     const val KEY_YT_STRATEGIES = "rc.yt_strategies"
     const val KEY_DIAL_EVENT_BP = "rc.dial_event_bp"
     private const val KEY_DROPPED = "rc.dropped_endpoints"
@@ -42,9 +47,13 @@ internal object RemoteConfig {
     // make them report each other's value as new, by turns.
     const val KEY_DROPPED_YT = "rc.dropped_yt_strategies"
     const val KEY_BAD_YT = "rc.bad_yt_strategies"
+    const val KEY_BAD_APK_URLS = "rc.bad_apk_urls"
 
     fun versions(ctx: Context) = ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).let {
-        Versions(it.getLong(KEY_MIN_VERSION, 0), it.getLong(KEY_LATEST_VERSION, 0), it.getString(KEY_UPDATE_URL, "").orEmpty(), it.getString(KEY_APK_URL, "").orEmpty())
+        Versions(
+            it.getLong(KEY_MIN_VERSION, 0), it.getLong(KEY_LATEST_VERSION, 0), it.getString(KEY_UPDATE_URL, "").orEmpty(),
+            it.getString(KEY_APK_URL, "").orEmpty(), it.getString(KEY_APK_URLS, "").orEmpty(), it.getString(KEY_LATEST_NAME, "").orEmpty(),
+        )
     }
 
     /**
@@ -80,11 +89,17 @@ internal object RemoteConfig {
     /** [test]: a list for the instrumented tests' stand, see [Endpoints.cached]; versions stay as they are. */
     fun apply(ctx: Context, v: RcValues, decrypt: (String) -> String, test: Boolean = false) {
         if (!test) {
+            // No usable list: self-update falls back to apk_url, as without the key.
+            val apkUrls = v.apkUrls.trim().takeIf { it.isEmpty() || Updater.parseMirrors(it) != null } ?: "".also {
+                AppLog.e("remote config: apk_urls is no JSON array with a probed mirror, self-update takes apk_url", expected = !firstDrop(ctx, v.apkUrls, KEY_BAD_APK_URLS))
+            }
             ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).edit()
                 .putLong(KEY_MIN_VERSION, v.minVersion)
                 .putLong(KEY_LATEST_VERSION, v.latestVersion)
                 .putString(KEY_UPDATE_URL, v.updateUrl)
                 .putString(KEY_APK_URL, v.apkUrl)
+                .putString(KEY_APK_URLS, apkUrls)
+                .putString(KEY_LATEST_NAME, v.latestName.trim())
                 .putInt(KEY_DIAL_EVENT_BP, v.dialEventBp)
                 .apply()
             Quota.setLimitMb(ctx, v.dailyQuotaMb)

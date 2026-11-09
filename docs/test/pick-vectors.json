@@ -1,0 +1,185 @@
+{
+  "about": "Mirror choice over probe results, shared by download.js decide() (test/download.test.mjs) and the app's Updater.decide (UpdaterTest). heads: v = the versioned name, f = split-vpn.apk; an HTTP status, \"net\", or absent while unanswered. passed: null while probe.bin still runs. want: \"pending\" while undecided. failover: the app's candidates in order, one per mirror (the page has none).",
+  "mirrors": [{"base": "https://a.test/", "probe": true}, {"base": "https://b.test/", "probe": true}, {"base": "https://r.test/", "probe": false}],
+  "versioned": "split-vpn-1.2.3.apk",
+  "cases": [
+    {"name": "both pass: the first mirror's versioned name",
+     "probes": [
+       {"heads": {"v": 200, "f": 200}, "passed": true, "http": true, "bytes": 24576, "alive": false},
+       {"heads": {"v": 200, "f": 200}, "passed": true, "http": true, "bytes": 24576, "alive": false}
+     ],
+     "want": {"url": "https://a.test/split-vpn-1.2.3.apk", "checked": true},
+     "failover": ["https://a.test/split-vpn-1.2.3.apk", "https://b.test/split-vpn-1.2.3.apk"]
+    },
+    {"name": "the versioned name on every mirror comes before any fixed one",
+     "probes": [
+       {"heads": {"v": 404, "f": 200}, "passed": true, "http": true, "bytes": 24576, "alive": false},
+       {"heads": {"v": 200, "f": 200}, "passed": true, "http": true, "bytes": 24576, "alive": false}
+     ],
+     "want": {"url": "https://b.test/split-vpn-1.2.3.apk", "checked": true},
+     "failover": ["https://b.test/split-vpn-1.2.3.apk", "https://a.test/split-vpn.apk"]
+    },
+    {"name": "without a version only the fixed name counts",
+     "versioned": null,
+     "probes": [
+       {"heads": {"f": 200}, "passed": false, "http": false, "bytes": 0, "alive": false},
+       {"heads": {"f": 200}, "passed": true, "http": true, "bytes": 24576, "alive": false}
+     ],
+     "want": {"url": "https://b.test/split-vpn.apk", "checked": true},
+     "failover": ["https://b.test/split-vpn.apk"]
+    },
+    {"name": "versioned HEAD 404 with a good probe gives the fixed name there",
+     "probes": [
+       {"heads": {"v": 404, "f": 200}, "passed": true, "http": true, "bytes": 24576, "alive": false},
+       {"heads": {"v": 200, "f": 200}, "passed": false, "http": false, "bytes": 0, "alive": false}
+     ],
+     "want": {"url": "https://a.test/split-vpn.apk", "checked": true},
+     "failover": ["https://a.test/split-vpn.apk"]
+    },
+    {"name": "a good probe with HEAD 404 on both names is no pass",
+     "probes": [
+       {"heads": {"v": 404, "f": 404}, "passed": true, "http": true, "bytes": 24576, "alive": false},
+       {"heads": {"v": "net", "f": "net"}, "passed": false, "http": false, "bytes": 0, "alive": false}
+     ],
+     "want": {"url": "https://r.test/split-vpn.apk", "checked": false},
+     "failover": ["https://r.test/split-vpn.apk"]
+    },
+    {"name": "a probe still running on the first mirror keeps a passed second one waiting",
+     "probes": [
+       {"heads": {"v": 200, "f": 200}, "passed": null, "http": true, "bytes": 16700, "alive": false},
+       {"heads": {"v": 200, "f": 200}, "passed": true, "http": true, "bytes": 24576, "alive": false}
+     ],
+     "want": "pending"
+    },
+    {"name": "the first mirror's HEAD unanswered keeps everything waiting",
+     "probes": [
+       {"heads": {}, "passed": null, "http": true, "bytes": 0, "alive": false},
+       {"heads": {"v": 200, "f": 200}, "passed": true, "http": true, "bytes": 24576, "alive": false}
+     ],
+     "want": "pending"
+    },
+    {"name": "no pass yet and a probe still running: waiting",
+     "probes": [
+       {"heads": {"v": 404, "f": 404}, "passed": true, "http": true, "bytes": 24576, "alive": false},
+       {"heads": {"v": 200, "f": 200}, "passed": null, "http": true, "bytes": 1000, "alive": false}
+     ],
+     "want": "pending"
+    },
+    {"name": "a probe stalled at 16 700 bytes by the deadline: a lower mirror wins",
+     "probes": [
+       {"heads": {"v": 200, "f": 200}, "passed": false, "http": true, "bytes": 16700, "alive": false},
+       {"heads": {"v": 200, "f": 200}, "passed": true, "http": true, "bytes": 24576, "alive": false}
+     ],
+     "want": {"url": "https://b.test/split-vpn-1.2.3.apk", "checked": true},
+     "failover": ["https://b.test/split-vpn-1.2.3.apk"]
+    },
+    {"name": "the first mirror passes: no waiting for the second",
+     "versioned": null,
+     "probes": [
+       {"heads": {"f": 200}, "passed": true, "http": true, "bytes": 24576, "alive": false},
+       {"heads": {}, "passed": null, "http": true, "bytes": 16700, "alive": false}
+     ],
+     "want": {"url": "https://a.test/split-vpn.apk", "checked": true},
+     "failover": ["https://a.test/split-vpn.apk"]
+    },
+    {"name": "a stalled mirror is never a target: Releases unchecked",
+     "probes": [
+       {"heads": {"v": 200, "f": 200}, "passed": false, "http": true, "bytes": 16700, "alive": false},
+       {"heads": {"v": "net", "f": "net"}, "passed": false, "http": false, "bytes": 0, "alive": false}
+     ],
+     "want": {"url": "https://r.test/split-vpn.apk", "checked": false},
+     "failover": ["https://r.test/split-vpn.apk"]
+    },
+    {"name": "a slow link opens the alive mirror with more bytes, unchecked",
+     "probes": [
+       {"heads": {"v": 200, "f": 200}, "passed": false, "http": true, "bytes": 6000, "alive": true},
+       {"heads": {"v": 200, "f": 200}, "passed": false, "http": true, "bytes": 10000, "alive": true}
+     ],
+     "want": {"url": "https://b.test/split-vpn-1.2.3.apk", "checked": false},
+     "failover": ["https://b.test/split-vpn-1.2.3.apk"]
+    },
+    {"name": "alive with equal bytes: the first in order",
+     "probes": [
+       {"heads": {"v": 200, "f": 200}, "passed": false, "http": true, "bytes": 10000, "alive": true},
+       {"heads": {"v": 200, "f": 200}, "passed": false, "http": true, "bytes": 10000, "alive": true}
+     ],
+     "want": {"url": "https://a.test/split-vpn-1.2.3.apk", "checked": false},
+     "failover": ["https://a.test/split-vpn-1.2.3.apk"]
+    },
+    {"name": "alive with fewer bytes beats stalled with more",
+     "versioned": null,
+     "probes": [
+       {"heads": {"f": 200}, "passed": false, "http": true, "bytes": 16300, "alive": false},
+       {"heads": {"f": 200}, "passed": false, "http": true, "bytes": 10000, "alive": true}
+     ],
+     "want": {"url": "https://b.test/split-vpn.apk", "checked": false},
+     "failover": ["https://b.test/split-vpn.apk"]
+    },
+    {"name": "an alive mirror with versioned HEAD 404 opens the fixed name",
+     "probes": [
+       {"heads": {"v": 404, "f": 200}, "passed": false, "http": true, "bytes": 10000, "alive": true},
+       {"heads": {"v": "net", "f": "net"}, "passed": false, "http": false, "bytes": 0, "alive": false}
+     ],
+     "want": {"url": "https://a.test/split-vpn.apk", "checked": false},
+     "failover": ["https://a.test/split-vpn.apk"]
+    },
+    {"name": "an alive mirror with no answer to HEAD opens the fixed name",
+     "probes": [
+       {"heads": {"v": "net", "f": "net"}, "passed": false, "http": true, "bytes": 10000, "alive": true},
+       {"heads": {"v": "net", "f": "net"}, "passed": false, "http": false, "bytes": 0, "alive": false}
+     ],
+     "want": {"url": "https://a.test/split-vpn.apk", "checked": false},
+     "failover": ["https://a.test/split-vpn.apk"]
+    },
+    {"name": "an alive mirror with HEAD 404 on both names is no target",
+     "probes": [
+       {"heads": {"v": 404, "f": 404}, "passed": false, "http": true, "bytes": 10000, "alive": true},
+       {"heads": {"v": "net", "f": "net"}, "passed": false, "http": false, "bytes": 0, "alive": false}
+     ],
+     "want": {"url": "https://r.test/split-vpn.apk", "checked": false},
+     "failover": ["https://r.test/split-vpn.apk"]
+    },
+    {"name": "a passed probe with failed HEADs opens the fixed name unchecked",
+     "probes": [
+       {"heads": {"v": 404, "f": "net"}, "passed": true, "http": true, "bytes": 24576, "alive": false},
+       {"heads": {"v": "net", "f": "net"}, "passed": false, "http": false, "bytes": 0, "alive": false}
+     ],
+     "want": {"url": "https://a.test/split-vpn.apk", "checked": false},
+     "failover": ["https://a.test/split-vpn.apk"]
+    },
+    {"name": "a probe that failed before the deadline is not alive",
+     "versioned": null,
+     "probes": [
+       {"heads": {"f": "net"}, "passed": false, "http": true, "bytes": 8000, "alive": false},
+       {"heads": {"f": "net"}, "passed": false, "http": false, "bytes": 0, "alive": false}
+     ],
+     "want": {"url": "https://r.test/split-vpn.apk", "checked": false},
+     "failover": ["https://r.test/split-vpn.apk"]
+    },
+    {"name": "an HTTP error on probe.bin alone still makes Releases the last resort",
+     "versioned": null,
+     "probes": [
+       {"heads": {"f": "net"}, "passed": false, "http": true, "bytes": 0, "alive": false},
+       {"heads": {"f": "net"}, "passed": false, "http": false, "bytes": 0, "alive": false}
+     ],
+     "want": {"url": "https://r.test/split-vpn.apk", "checked": false},
+     "failover": ["https://r.test/split-vpn.apk"]
+    },
+    {"name": "HTTP errors only make Releases the unchecked last resort",
+     "probes": [
+       {"heads": {"v": 504, "f": 504}, "passed": false, "http": true, "bytes": 0, "alive": false},
+       {"heads": {"v": "net", "f": "net"}, "passed": false, "http": false, "bytes": 0, "alive": false}
+     ],
+     "want": {"url": "https://r.test/split-vpn.apk", "checked": false},
+     "failover": ["https://r.test/split-vpn.apk"]
+    },
+    {"name": "all net gives no URL",
+     "probes": [
+       {"heads": {"v": "net", "f": "net"}, "passed": false, "http": false, "bytes": 0, "alive": false},
+       {"heads": {"v": "net", "f": "net"}, "passed": false, "http": false, "bytes": 0, "alive": false}
+     ],
+     "want": {"url": null, "checked": false},
+     "failover": []
+    }
+  ]
+}

@@ -57,12 +57,18 @@ class MainActivityTest {
 
     private val realEvent = Analytics.event
     private val updateSteps = mutableListOf<String>()
+    private val updateMirrors = mutableListOf<Any?>()
 
     @Before
     fun stubAnalytics() {
         Analytics.event = { _, name, params ->
-            if (name == "self_update") updateSteps += listOfNotNull(params["step"], params["detail"]).joinToString(":")
+            if (name == "self_update") {
+                updateSteps += listOfNotNull(params["step"], params["detail"]).joinToString(":")
+                updateMirrors += params["mirror"]
+            }
         }
+        Updater.lastMirror = null
+        Updater.lastDetail = null
     }
 
     @After
@@ -399,17 +405,18 @@ class MainActivityTest {
 
     private fun updater(vararg results: Updater.Result) {
         val queue = ArrayDeque(results.toList())
-        MainActivity.update = { _, latest, u, _ -> calls += latest to u; queue.removeFirst() }
+        MainActivity.update = { _, v, _ -> calls += v.latest to v.apk; queue.removeFirst() }
         MainActivity.background = { it.run() }
     }
 
     /** What :vpn has from Remote Config; any state change pushes a fresh snapshot. */
-    private fun rc(min: Long = 0, latest: Long = 0, url: String = this.url, apk: String = this.apk) {
+    private fun rc(min: Long = 0, latest: Long = 0, url: String = this.url, apk: String = this.apk, apks: String = "") {
         app.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).edit()
             .putLong(RemoteConfig.KEY_MIN_VERSION, min)
             .putLong(RemoteConfig.KEY_LATEST_VERSION, latest)
             .putString(RemoteConfig.KEY_UPDATE_URL, url)
             .putString(RemoteConfig.KEY_APK_URL, apk)
+            .putString(RemoteConfig.KEY_APK_URLS, apks)
             .commit()
         TunnelState.log("rc")
         ShadowLooper.idleMainLooper()
@@ -466,6 +473,44 @@ class MainActivityTest {
         assertEquals(View.VISIBLE, a.updateBox())
     }
 
+    /** apk_urls "[]" turns self-update off, apk_url or not. */
+    @Test
+    fun emptyMirrorListOpensThePage() {
+        Versions.debug = false
+        updater()
+        val a = launch()
+        rc(latest = newer, apks = "[]")
+        a.findViewById<View>(R.id.updateAction).performClick()
+        assertOpens(url)
+        assertTrue(calls.isEmpty())
+    }
+
+    /** The mirror taken and why the ones before it failed. */
+    @Test
+    fun startedAndFailedCarryTheMirrors() {
+        Versions.debug = false
+        val a = launch()
+        rc(latest = newer, apks = """[{"base":"https://split-vpn-dl-547fcb.gitlab.io/","probe":true}]""")
+        MainActivity.background = { it.run() }
+        MainActivity.update = { _, v, _ ->
+            assertEquals("""[{"base":"https://split-vpn-dl-547fcb.gitlab.io/","probe":true}]""", v.apks)
+            Updater.lastMirror = 2
+            Updater.lastDetail = "1:stall"
+            Updater.Result.STARTED
+        }
+        a.findViewById<View>(R.id.updateAction).performClick()
+        MainActivity.update = { _, _, _ ->
+            Updater.lastMirror = 0
+            Updater.lastDetail = "1:stall,2:get-http504"
+            Updater.Result.FAILED
+        }
+        a.findViewById<View>(R.id.updateAction).performClick()
+        assertEquals(listOf("started:1:stall", "failed:1:stall,2:get-http504"), updateSteps)
+        assertEquals(listOf<Any?>(2, 0), updateMirrors)
+        // The user's log has the mirrors' reasons too.
+        assertTrue(org.robolectric.shadows.ShadowLog.getLogsForTag(AppLog.TAG).any { it.msg.startsWith("update: FAILED") && it.msg.endsWith(", mirrors 1:stall,2:get-http504") })
+    }
+
     /** apk_url "" turns self-update off: the page, as before it. */
     @Test
     fun noApkUrlOpensThePage() {
@@ -519,7 +564,7 @@ class MainActivityTest {
         var job: Runnable? = null
         var midway = ""
         val a = launch()
-        MainActivity.update = { _, _, _, report -> report(45); midway = a.text(R.id.updateAction); Updater.Result.STARTED }
+        MainActivity.update = { _, _, report -> report(45); midway = a.text(R.id.updateAction); Updater.Result.STARTED }
         MainActivity.background = { job = it }
         rc(latest = newer)
         a.findViewById<View>(R.id.updateAction).performClick()

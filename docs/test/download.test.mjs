@@ -1,7 +1,8 @@
 // Tests for ../download.js: node:test only, no DOM and no npm packages (make -C android page-test).
 import {test, mock, afterEach} from "node:test";
 import assert from "node:assert/strict";
-import {probe, pickUrl, attach, releaseInfo, lastResort, MIRRORS, FIXED, PROBE_FILE} from "../download.js";
+import {readFileSync} from "node:fs";
+import {probe, decide, pickUrl, attach, releaseInfo, lastResort, MIRRORS, FIXED, PROBE_FILE} from "../download.js";
 
 const A = {base: "https://a.test/", probe: true};
 const B = {base: "https://b.test/", probe: true};
@@ -126,7 +127,7 @@ test("probe: a complete body short of 24 KB fails, one of 24 KB passes", async (
 
 test("pickUrl: a truncated probe.bin is no pass and no target", async () => {
   const {result} = pick({...mirror(A, {bin: ok(1000)}), ...mirror(B, {v: refused, f: refused, bin: refused})}, {versioned: V});
-  assert.deepEqual(await result, {url: "https://r.test/" + V, checked: false});
+  assert.deepEqual(await result, {url: "https://r.test/" + FIXED, checked: false});
 });
 
 test("probe: an HTTP error fails, with http set", async () => {
@@ -157,6 +158,21 @@ test("probe: 16 700 bytes and then a stall fails once aborted", async () => {
   await flush();
   assert.equal(result.value, false);
   assert.equal(state.ended, true);
+});
+
+// Shared with the app's UpdaterTest: the page and self-update choose alike.
+test("decide: the shared vectors", () => {
+  const vec = JSON.parse(readFileSync(new URL("./pick-vectors.json", import.meta.url)));
+  for (const c of vec.cases) {
+    const versioned = c.versioned === undefined ? vec.versioned : c.versioned;
+    const probes = c.probes.map(p => ({...p, heads: {[versioned]: p.heads.v, [FIXED]: p.heads.f}}));
+    const got = decide({mirrors: vec.mirrors, versioned, probes});
+    assert.deepEqual(got === undefined ? "pending" : got, c.want, c.name);
+  }
+});
+
+test("pickUrl: no mirror to probe decides at once", async () => {
+  assert.deepEqual(await pick({}, {mirrors: [R]}).result, {url: null, checked: false});
 });
 
 test("pickUrl: traffic is one probe.bin GET per Pages mirror and HEADs for the names", async () => {
@@ -192,7 +208,7 @@ test("pickUrl: versioned HEAD 404 with a good probe gives the fixed name there",
 test("pickUrl: a good probe with HEAD 404 on both names is no pass", async () => {
   const {result} = pick({...mirror(A, {v: status(404), f: status(404)}), ...mirror(B, {v: refused, f: refused, bin: refused})},
     {versioned: V});
-  assert.deepEqual(await result, {url: "https://r.test/" + V, checked: false});
+  assert.deepEqual(await result, {url: "https://r.test/" + FIXED, checked: false});
 });
 
 test("pickUrl: a probe stalled at 16 700 bytes waits for the deadline, then a lower mirror wins", async () => {
@@ -211,7 +227,7 @@ test("pickUrl: a stalled mirror is never a target: Releases unchecked", async ()
   const state = settled(pick({...mirror(A, {bin: stall()}), ...mirror(B, {v: refused, f: refused, bin: refused})},
     {versioned: V}).result);
   await advance(4000);
-  assert.deepEqual(state.value, {url: "https://r.test/" + V, checked: false});
+  assert.deepEqual(state.value, {url: "https://r.test/" + FIXED, checked: false});
 });
 
 test("pickUrl: a slow link opens the alive mirror with more bytes, unchecked", async () => {
@@ -242,7 +258,7 @@ test("pickUrl: a host silent for over 1.5 s before the deadline is stalled", asy
   const state = settled(pick({...mirror(A, {bin: drip(1000, 400, 5)}), ...mirror(B, {v: refused, f: refused, bin: refused})},
     {versioned: V}).result);
   await advance(4000);
-  assert.deepEqual(state.value, {url: "https://r.test/" + V, checked: false});
+  assert.deepEqual(state.value, {url: "https://r.test/" + FIXED, checked: false});
 });
 
 test("pickUrl: an alive mirror with no answer to HEAD opens the fixed name", async () => {
@@ -270,7 +286,7 @@ test("pickUrl: an HTTP error on probe.bin alone still makes Releases the last re
 test("pickUrl: HTTP errors only make Releases the unchecked last resort", async () => {
   const {result} = pick({...mirror(A, {v: status(504), f: status(504), bin: status(504)}),
     ...mirror(B, {v: refused, f: refused, bin: refused})}, {versioned: V});
-  assert.deepEqual(await result, {url: "https://r.test/" + V, checked: false});
+  assert.deepEqual(await result, {url: "https://r.test/" + FIXED, checked: false});
 });
 
 test("pickUrl: all net gives no URL, at once when refused, at the deadline when hanging", async () => {
@@ -311,9 +327,8 @@ test("releaseInfo: the versioned name and the meta line", () => {
   assert.match(releaseInfo({...rel, assets: [{name: "other.apk", size: 2e6}]}).meta, / 2 МБ /);
 });
 
-test("lastResort: Releases, with the versioned name when known", () => {
-  assert.equal(lastResort(mirrors, null), "https://r.test/" + FIXED);
-  assert.equal(lastResort(mirrors, V), "https://r.test/" + V);
+test("lastResort: Releases' fixed name, always the newest release", () => {
+  assert.equal(lastResort(mirrors), "https://r.test/" + FIXED);
   assert.deepEqual(MIRRORS.map(m => m.probe), [true, true, false]);
 });
 
@@ -331,13 +346,11 @@ function page(answer) {
   };
   const dl = el({textContent: "Скачать для Android", href: "https://a.test/" + FIXED});
   const fail = el({hidden: true});
-  const direct = el({href: "https://r.test/" + FIXED});
   const win = {};
-  const p = {dl, fail, direct, navigated: [], picks: 0};
+  const p = {dl, fail, navigated: [], picks: 0};
   attach({
-    dl, fail, direct,
+    dl, fail,
     pickUrl: async () => { p.picks++; return typeof answer === "function" ? answer() : answer; },
-    fallback: () => "https://r.test/" + V,
     navigate: url => p.navigated.push(url),
     setTimeout: (...a) => setTimeout(...a),
     clearTimeout: t => clearTimeout(t),
@@ -363,7 +376,6 @@ test("button: a checked mirror opens at once, no note", async () => {
   assert.equal(p.fail.hidden, true);
   assert.equal(p.busy(), false);
   assert.equal(p.dl.textContent, "Скачать для Android");
-  assert.equal(p.direct.href, "https://r.test/" + V);
 });
 
 test("button: all net shows the note at once and opens nothing", async () => {
