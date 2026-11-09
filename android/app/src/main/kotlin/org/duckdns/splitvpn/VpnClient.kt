@@ -31,6 +31,7 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
         const val MSG_UNREGISTER = 2
         const val MSG_SNAPSHOT = 3
         const val MSG_LOG = 4
+        const val MSG_ADBLOCK = 5
         const val KEY_STATE = "state"
         const val KEY_ERROR = "error"
         const val KEY_LOG = "log"
@@ -47,6 +48,7 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
         const val KEY_DAY = "day"
         const val KEY_DIRECT = "direct"
         const val KEY_LINE = "line"
+        const val KEY_ADBLOCK = "adblock"
 
         fun snapshot(state: VpnState, error: String?, log: List<String>, connectedAt: Long, waiting: Waiting?, versions: Versions, usage: Usage, direct: String): Message =
             Message.obtain(null, MSG_SNAPSHOT).apply {
@@ -119,6 +121,15 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
         val to = service ?: return
         try {
             to.send(Message.obtain(null, MSG_LOG).apply { data = Bundle().apply { putString(KEY_LINE, line) } })
+        } catch (_: RemoteException) {
+        }
+    }
+
+    /** Ad blocking on or off right away; dropped while unbound, the next start carries it. */
+    fun setAdBlock(on: Boolean) {
+        val to = service ?: return
+        try {
+            to.send(Message.obtain(null, MSG_ADBLOCK).apply { data = Bundle().apply { putBoolean(KEY_ADBLOCK, on) } })
         } catch (_: RemoteException) {
         }
     }

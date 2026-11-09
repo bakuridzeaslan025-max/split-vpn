@@ -429,6 +429,15 @@ class TunnelVpnService : VpnService() {
             }
             VpnClient.MSG_UNREGISTER -> msg.replyTo?.let { clients -= it }
             VpnClient.MSG_LOG -> msg.data.getString(VpnClient.KEY_LINE)?.let { AppLog.i("ui: $it") }
+            // Go checks the flag on every DNS query: no restart. The start thread
+            // reads the saved value, so a switch during CONNECTING is not undone.
+            VpnClient.MSG_ADBLOCK -> {
+                val on = msg.data.getBoolean(VpnClient.KEY_ADBLOCK)
+                vpnPrefs.edit().putBoolean(KEY_ADBLOCK, on).apply()
+                backend.setAdBlock(on)
+                backend.userProperty(this, "adblock", if (on) "on" else "off")
+                AppLog.i("adblock: $on")
+            }
         }
         true
     })
@@ -1236,7 +1245,7 @@ class TunnelVpnService : VpnService() {
                 backend.setQuota(used, limitNow)
                 if (Quota.limit(this) != limitNow) mainHandler.post { onNewLimit() }
                 Quota.save(this, used, day)
-                backend.setAdBlock(adBlock)
+                backend.setAdBlock(vpnPrefs.getBoolean(KEY_ADBLOCK, adBlock))
                 backend.setDirect(direct)
                 directOn = direct
                 try {
