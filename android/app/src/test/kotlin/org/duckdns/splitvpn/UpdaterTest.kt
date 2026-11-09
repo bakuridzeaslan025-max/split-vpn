@@ -496,7 +496,9 @@ class UpdaterTest {
     }
 
     private val v = "split-vpn-1.2.3.apk"
-    private val fast = Updater.Timing(probeMs = 800, aliveMs = 300, connectMs = 2_000, readMs = 300, uncheckedReadMs = 1_000)
+    // Wide margins around each event a test relies on: CI runners stall threads
+    // for hundreds of ms. A test pays the deadline only when its claim needs it.
+    private val wide = Updater.Timing(probeMs = 2_000, aliveMs = 300, connectMs = 5_000, readMs = 1_000, uncheckedReadMs = 4_000)
 
     // An APK per mirror, told apart by its bytes.
     private fun apkOf(m: String) = ByteArray(50_000) { m[0].code.toByte() }
@@ -539,24 +541,27 @@ class UpdaterTest {
     private val hang: (String, Socket) -> Unit = { _, _ -> Thread.sleep(10_000) }
     private val http504: (String, Socket) -> Unit = { _, s -> s.reply("HTTP/1.1 504 Gateway Timeout\r\nContent-Length: 0") }
 
-    private fun select(ms: List<Updater.Mirror>, versioned: String? = v) = Updater.Probes(ms, versioned, fast)
+    private fun select(ms: List<Updater.Mirror>, versioned: String? = v, t: Updater.Timing = wide) = Updater.Probes(ms, versioned, t)
 
     @Test
     fun aProbeStalledAt16KbLosesAtTheDeadline() {
         val ms = mirrors(mapOf("/a/probe.bin" to { _, s -> s.drip(16_700, 0, 1) }))
         val t0 = System.nanoTime()
         val s = select(ms)
-        assertTrue((System.nanoTime() - t0) / 1_000_000 >= 800)
+        // The 16 700 bytes came at once, 1.7 s of silence before the deadline: not alive.
+        assertTrue((System.nanoTime() - t0) / 1_000_000 >= wide.probeMs)
         assertEquals(ms[1].base + v, s.decision.url)
         assertTrue(s.decision.checked)
         assertEquals(mapOf(1 to "stall"), s.tags())
     }
 
-    /** ~2.5 KB/s: alive, short of a pass. The faster one opens unchecked. */
+    /** A slow link: alive, short of a pass. The one with more bytes opens unchecked. */
     @Test
     fun aSlowLinkOpensTheAliveMirrorWithMoreBytes() {
-        val ms = mirrors(mapOf("/a/probe.bin" to { _, s -> s.drip(100, 40) }, "/b/probe.bin" to { _, s -> s.drip(200, 40) }))
-        val s = select(ms)
+        // A chunk every 40 ms is alive by any runner's hiccup within 1 s; b
+        // sends ten times as much, short of the 24 KB pass in 1.5 s.
+        val ms = mirrors(mapOf("/a/probe.bin" to { _, s -> s.drip(40, 40) }, "/b/probe.bin" to { _, s -> s.drip(400, 40) }))
+        val s = select(ms, t = Updater.Timing(probeMs = 1_500, aliveMs = 1_000))
         assertEquals(ms[1].base + v, s.decision.url)
         assertFalse(s.decision.checked)
         assertEquals(listOf(Updater.Candidate(ms[1].base + v, 2, checked = false)), s.decision.candidates)
@@ -571,7 +576,7 @@ class UpdaterTest {
         ))
         val t0 = System.nanoTime()
         val s = select(ms)
-        assertTrue("decided without the deadline", (System.nanoTime() - t0) / 1_000_000 < 720)
+        assertTrue("decided without the deadline", (System.nanoTime() - t0) / 1_000_000 < wide.probeMs - 200)
         assertEquals(ms[2].base + Updater.FIXED, s.decision.url)
         assertFalse(s.decision.checked)
         assertEquals(mapOf(1 to "http504", 2 to "short"), s.tags())
@@ -586,7 +591,8 @@ class UpdaterTest {
                 write(ByteArray(5_000))
                 flush()
             }
-            Thread.sleep(50)
+            // Time for the app to read the head: a reset before it is no 200.
+            Thread.sleep(500)
             s.setSoLinger(true, 0)
             s.close()
         }))
@@ -617,16 +623,17 @@ class UpdaterTest {
         }
         val ms = mirrors(mapOf("/b/probe.bin" to silent, "/b/$v" to silent, "/b/split-vpn.apk" to silent))
         val s = select(ms)
-        assertTrue((System.nanoTime() - t0) / 1_000_000 < 720)
+        val decided = (System.nanoTime() - t0) / 1_000_000
+        assertTrue("$decided ms", decided < wide.probeMs - 200)
         assertEquals(listOf(Updater.Candidate(ms[0].base + v, 1)), s.decision.candidates)
         assertTrue("nothing known against b yet", s.tags().isEmpty())
         assertEquals(listOf(Updater.Candidate(ms[0].base + v, 1)), s.backups())
-        assertTrue((System.nanoTime() - t0) / 1_000_000 >= 800)
+        assertTrue((System.nanoTime() - t0) / 1_000_000 >= wide.probeMs)
         assertEquals(mapOf(2 to "timeout"), s.tags())
-        val deadline = System.nanoTime() + 2_000_000_000L
+        val deadline = System.nanoTime() + 4_000_000_000L
         while (closed.size < 3 && System.nanoTime() < deadline) Thread.sleep(20)
         assertEquals(3, closed.size)
-        assertTrue("dropped at the deadline: $closed", closed.all { it in 800..2_000 })
+        assertTrue("dropped at the deadline: $closed", closed.all { it in wide.probeMs..wide.probeMs + 2_000 })
     }
 
     @Test
@@ -655,7 +662,7 @@ class UpdaterTest {
     }
 
     private fun run(ms: List<Updater.Mirror>, progress: MutableList<Int> = mutableListOf()) =
-        Updater.run(app, 200, Updater.Source.Mirrored(Updater.Mirrors(ms, emptyList()), v), { progress += it }, fast)
+        Updater.run(app, 200, Updater.Source.Mirrored(Updater.Mirrors(ms, emptyList()), v), { progress += it }, wide)
 
     @Test
     fun aDownloadStalledMidApkGoesToTheNextMirrorThatPassed() {
@@ -716,8 +723,9 @@ class UpdaterTest {
     }
 
     // The first mirror stalls mid-APK; the second had not passed yet when the first won.
-    private fun stallOnA(bProbe: (String, Socket) -> Unit) = mirrors(mapOf("/b/probe.bin" to bProbe, "/a/$v" to { m, s ->
+    private fun stallOnA(bProbe: (String, Socket) -> Unit, getA: java.util.concurrent.CountDownLatch? = null) = mirrors(mapOf("/b/probe.bin" to bProbe, "/a/$v" to { m, s ->
         if (m == "HEAD") s.ok(m, apkOf("a")) else s.getOutputStream().apply {
+            getA?.countDown()
             write("HTTP/1.1 200 OK\r\nContent-Length: 50000\r\nConnection: close\r\n\r\n".toByteArray())
             write(ByteArray(16_000) { 'a'.code.toByte() })
             flush()
@@ -728,10 +736,12 @@ class UpdaterTest {
     @Test
     fun aMirrorPassingAfterTheChoiceIsABackup() {
         fakeApk()
-        val ms = stallOnA { m, s ->
-            Thread.sleep(200)
+        // b answers once a's APK is asked for: after the choice, whatever the runner's pace.
+        val chosen = java.util.concurrent.CountDownLatch(1)
+        val ms = stallOnA({ m, s ->
+            chosen.await(5, java.util.concurrent.TimeUnit.SECONDS)
             s.ok(m, ByteArray(32_768))
-        }
+        }, chosen)
         assertEquals(Updater.Result.STARTED, run(ms))
         assertEquals(listOf('b'), installed)
         assertEquals(2, Updater.lastMirror)
@@ -741,7 +751,7 @@ class UpdaterTest {
     @Test
     fun aMirrorNotPassedByTheDeadlineIsNoBackup() {
         fakeApk()
-        assertEquals(Updater.Result.FAILED, run(stallOnA { _, s -> s.drip(16_700, 0, 1) }))
+        assertEquals(Updater.Result.FAILED, run(stallOnA({ _, s -> s.drip(16_700, 0, 1) })))
         assertEquals("1:get-stall,2:stall", Updater.lastDetail)
     }
 
@@ -752,7 +762,7 @@ class UpdaterTest {
         val ms = mirrors(mapOf("/b/probe.bin" to hang, "/b/$v" to hang, "/b/split-vpn.apk" to hang))
         val t0 = System.nanoTime()
         assertEquals(Updater.Result.STARTED, run(ms))
-        assertTrue((System.nanoTime() - t0) / 1_000_000 < 720)
+        assertTrue((System.nanoTime() - t0) / 1_000_000 < wide.probeMs - 200)
         assertEquals(listOf('a'), installed)
     }
 
@@ -760,8 +770,9 @@ class UpdaterTest {
     @Test
     fun anUncheckedMirrorWaitsLongerForTheAnswer() {
         fakeApk()
+        // Over the checked readMs (1 s) by as much as under the unchecked one (4 s).
         val slow: (String, Socket) -> Unit = { m, s ->
-            Thread.sleep(600)
+            Thread.sleep(2_500)
             s.ok(m, apkOf("r"))
         }
         val ms = mirrors(mapOf("/a/probe.bin" to http504, "/b/probe.bin" to http504, "/r/split-vpn.apk" to slow))
