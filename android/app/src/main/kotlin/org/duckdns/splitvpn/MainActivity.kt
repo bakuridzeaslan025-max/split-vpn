@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
@@ -68,6 +69,9 @@ class MainActivity : Activity() {
 
         private const val PRIVACY_URL = "https://bakuridzeaslan025-max.github.io/split-vpn-privacy/"
 
+        // The dialogs' scrim: black at 32 %.
+        private const val SCRIM = 0.32f
+
         private val PROBE_LINE = Regex("""^\S+\s+(.+?): (\d+ мс|ошибка)""")
     }
 
@@ -88,21 +92,27 @@ class MainActivity : Activity() {
         "cloudflare" to listOf("AI", "DC"),
     )
 
-    private data class Vendor(val match: List<String>, val hint: String, val intents: List<ComponentName>)
+    private data class Vendor(val match: List<String>, val steps: List<String>, val intents: List<ComponentName>)
 
     // Vendor ROMs (MIUI, EMUI, ColorOS, One UI…) kill foreground services on
     // "clear all" or in battery saver. Nothing in code prevents that; the user
-    // has to whitelist the app. The keep-alive tab walks them through it.
+    // has to whitelist the app. The settings tab walks them through it.
     private val vendors = listOf(
         Vendor(
             listOf("xiaomi", "redmi", "poco"),
-            "Автозапуск\u00A0→ включить для Split VPN. Экономия энергии\u00A0→ «Без ограничений». " +
-                "В недавних приложениях: зажать карточку\u00A0→ закрепить (замок), иначе «Закрыть всё» убьёт VPN.",
+            listOf(
+                "Автозапуск → включить для Split VPN",
+                "Экономия энергии → «Без ограничений»",
+                "В недавних приложениях зажмите карточку Split VPN и закрепите замком — иначе «Закрыть всё» выключит VPN",
+            ),
             listOf(ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")),
         ),
         Vendor(
             listOf("huawei", "honor"),
-            "Запуск приложений\u00A0→ Split VPN\u00A0→ «Управлять вручную»\u00A0→ включить все три пункта.",
+            listOf(
+                "Запуск приложений → Split VPN",
+                "«Управлять вручную» → включить все три пункта",
+            ),
             listOf(
                 ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"),
                 ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.optimize.process.ProtectActivity"),
@@ -110,7 +120,10 @@ class MainActivity : Activity() {
         ),
         Vendor(
             listOf("oppo", "realme", "oneplus"),
-            "Автозапуск\u00A0→ включить. Батарея\u00A0→ Split VPN\u00A0→ «Разрешить фоновую активность».",
+            listOf(
+                "Автозапуск → включить",
+                "Батарея → Split VPN → «Разрешить фоновую активность»",
+            ),
             listOf(
                 ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity"),
                 ComponentName("com.oppo.safe", "com.oppo.safe.permission.startup.StartupAppListActivity"),
@@ -119,15 +132,32 @@ class MainActivity : Activity() {
         ),
         Vendor(
             listOf("vivo", "iqoo"),
-            "Автозапуск\u00A0→ включить. Батарея\u00A0→ «Высокое энергопотребление в фоне»\u00A0→ разрешить.",
+            listOf(
+                "Автозапуск → включить",
+                "Батарея → «Высокое энергопотребление в фоне» → разрешить",
+            ),
             listOf(ComponentName("com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity")),
         ),
         Vendor(
             listOf("samsung"),
-            "Батарея\u00A0→ Split VPN\u00A0→ «Без ограничений». Убрать из «Спящих приложений».",
+            listOf(
+                "Батарея → Split VPN → «Без ограничений»",
+                "Уберите Split VPN из «Спящих приложений»",
+            ),
             listOf(ComponentName("com.samsung.android.lool", "com.samsung.android.sm.ui.battery.BatteryActivity")),
         ),
     )
+
+    // People know the phone by the brand on it (Redmi, POCO); MANUFACTURER says Xiaomi.
+    private val brandNames = mapOf(
+        "xiaomi" to "Xiaomi", "redmi" to "Redmi", "poco" to "POCO", "huawei" to "Huawei", "honor" to "Honor",
+        "oppo" to "OPPO", "realme" to "realme", "oneplus" to "OnePlus", "vivo" to "vivo", "iqoo" to "iQOO", "samsung" to "Samsung",
+    )
+
+    private fun brandName(): String {
+        val b = Build.BRAND?.takeIf { it.isNotBlank() } ?: Build.MANUFACTURER.orEmpty()
+        return brandNames[b.lowercase()] ?: b.replaceFirstChar { it.uppercase() }
+    }
 
     private lateinit var prefs: SharedPreferences
     private var tab = "vpn"
@@ -135,8 +165,8 @@ class MainActivity : Activity() {
     private var inviteDialog: Dialog? = null
     private var shareDialog: Dialog? = null
     private var menuPopup: PopupWindow? = null
-    // Toasts queue up: ten taps would keep the hint on screen for twenty seconds.
-    private var lockedToastAt: Long? = null
+    // Null until the first onResume asks the system.
+    private var batteryOptimized: Boolean? = null
 
     private var state = VpnState.DISCONNECTED
     private var error: String? = null
@@ -168,7 +198,7 @@ class MainActivity : Activity() {
         if (st == VpnState.CONNECTED && state != VpnState.CONNECTED) {
             // The code is one-shot on the issuer: once we are in, forget it.
             invite = null
-            if (!prefs.getBoolean(KEY_KEEPALIVE_SHOWN, false)) showTab("auto")
+            if (!prefs.getBoolean(KEY_KEEPALIVE_SHOWN, false)) showTab("settings")
         }
         state = st
         error = err
@@ -234,7 +264,7 @@ class MainActivity : Activity() {
             insets
         }
 
-        findViewById<View>(R.id.menuButton).setOnClickListener { showMenu(it) }
+        findViewById<View>(R.id.shareButton).setOnClickListener { showShareDialog() }
         findViewById<View>(R.id.shareLogButton).apply {
             background = box(getColor(R.color.surface_lowest), radius = 24f)
             setOnClickListener { shareLog() }
@@ -248,37 +278,88 @@ class MainActivity : Activity() {
                 VpnState.CONNECTING, VpnState.DISCONNECTING -> Unit
             }
         }
-        findViewById<View>(R.id.errorAction).setOnClickListener {
-            when {
-                updateRequired -> startUpdate()
-                error == TunnelVpnService.ERR_NEED_CODE -> showInviteDialog()
-                else -> startVpn()
-            }
-        }
-        findViewById<View>(R.id.updateAction).setOnClickListener { startUpdate() }
-        findViewById<View>(R.id.updateClose).setOnClickListener {
+        findViewById<View>(R.id.bannerAction).setOnClickListener { banner()?.onAction?.invoke() }
+        findViewById<View>(R.id.bannerClose).setOnClickListener {
             versions?.let { prefs.edit().putLong(KEY_UPDATE_DISMISSED, it.latest).apply() }
-            renderUpdate()
+            renderBanner()
         }
 
-        findViewById<View>(R.id.batteryButton).setOnClickListener {
-            startActivity(
-                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
-            )
-        }
-        val vendor = vendors.firstOrNull { v -> v.match.any { Build.MANUFACTURER.lowercase().contains(it) } }
-        if (vendor == null) {
-            findViewById<View>(R.id.vendorBlock).visibility = View.GONE
-            findViewById<View>(R.id.batteryStepNum).visibility = View.GONE
-        } else {
-            findViewById<TextView>(R.id.vendorHint).text = vendor.hint
-            findViewById<View>(R.id.vendorButton).setOnClickListener { openVendorSettings(vendor) }
-        }
+        initSettings()
 
         invite = savedInstanceState?.getString(KEY_INVITE)
         showTab(savedInstanceState?.getString(KEY_TAB) ?: "vpn")
         render()
         if (savedInstanceState == null) onUpdateIntent(intent)
+    }
+
+    private fun initSettings() {
+        findViewById<View>(R.id.batteryWarn).background = box(getColor(R.color.warning_container), radius = 22f)
+        findViewById<View>(R.id.batteryOk).background = box(getColor(R.color.surface_lowest), radius = 22f)
+        findViewById<View>(R.id.batteryButton).apply {
+            background = box(getColor(R.color.on_warning_container), radius = 18f)
+            setOnClickListener {
+                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+            }
+        }
+        val vendor = vendors.firstOrNull { v -> v.match.any { Build.MANUFACTURER.lowercase().contains(it) } }
+        val vendorBlock = findViewById<View>(R.id.vendorBlock)
+        if (vendor == null) {
+            vendorBlock.visibility = View.GONE
+        } else {
+            vendorBlock.background = box(getColor(R.color.surface_lowest), radius = 22f)
+            findViewById<TextView>(R.id.vendorTitle).text = "Настройки ${brandName()}"
+            val steps = findViewById<LinearLayout>(R.id.vendorSteps)
+            for ((i, step) in vendor.steps.withIndex()) steps.addView(stepRow(i + 1, step))
+            findViewById<View>(R.id.vendorButton).apply {
+                background = box(getColor(R.color.surface_lowest), getColor(R.color.outline), 18f)
+                setOnClickListener { openVendorSettings(vendor) }
+            }
+        }
+
+        findViewById<View>(R.id.mainCard).apply {
+            background = box(getColor(R.color.surface_lowest), radius = 22f)
+            clipToOutline = true
+        }
+        val seg = findViewById<View>(R.id.adBlockSeg)
+        val knob = findViewById<View>(R.id.adBlockKnob)
+        renderSwitch(seg, knob, prefs.getBoolean(KEY_ADBLOCK, false))
+        findViewById<View>(R.id.adBlockRow).apply {
+            accessibilityDelegate = object : View.AccessibilityDelegate() {
+                override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+                    super.onInitializeAccessibilityNodeInfo(host, info)
+                    info.className = Switch::class.java.name
+                    info.isCheckable = true
+                    info.isChecked = prefs.getBoolean(KEY_ADBLOCK, false)
+                }
+            }
+            // Go checks it on every DNS query: no need to wait for the next start.
+            setOnClickListener {
+                val on = !prefs.getBoolean(KEY_ADBLOCK, false)
+                prefs.edit().putBoolean(KEY_ADBLOCK, on).apply()
+                renderSwitch(seg, knob, on)
+                vpn.setAdBlock(on)
+            }
+        }
+        findViewById<View>(R.id.notificationRow).setOnClickListener { openNotificationSettings() }
+        findViewById<View>(R.id.privacyLink).setOnClickListener { openUrl(PRIVACY_URL) }
+        findViewById<TextView>(R.id.versionText).text = "Split VPN · версия ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
+    }
+
+    private fun stepRow(n: Int, text: String) = LinearLayout(this).apply {
+        val ink = getColor(R.color.on_surface)
+        addView(TextView(this@MainActivity).apply {
+            this.text = "$n."
+            textSize = 13f
+            setTextColor(ink)
+            setLineSpacing(0f, 1.45f)
+            minWidth = dp(18)
+        })
+        addView(TextView(this@MainActivity).apply {
+            this.text = text
+            textSize = 13f
+            setTextColor(ink)
+            setLineSpacing(0f, 1.45f)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -322,13 +403,17 @@ class MainActivity : Activity() {
         ticker.removeCallbacks(midnight)
     }
 
+    // Both change in the system's own screens: asked again on every return.
     override fun onResume() {
         super.onResume()
         Updater.takePending(this)?.let { runCatching { startActivity(it) } }
-        val ignoring = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
-        findViewById<TextView>(R.id.batteryStatus).text =
-            if (ignoring) "✓\u00A0Оптимизация батареи отключена" else "Оптимизация батареи включена"
-        findViewById<View>(R.id.batteryButton).visibility = if (ignoring) View.GONE else View.VISIBLE
+        val optimized = !getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+        batteryOptimized = optimized
+        findViewById<View>(R.id.batteryWarn).visibility = if (optimized) View.VISIBLE else View.GONE
+        findViewById<View>(R.id.batteryOk).visibility = if (optimized) View.GONE else View.VISIBLE
+        findViewById<TextView>(R.id.notificationState).text =
+            if (notificationsOn()) "Включено · настраивается в системе" else "Выключено · настраивается в системе"
+        renderTabs()
     }
 
     private fun dp(v: Float) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, resources.displayMetrics)
@@ -340,6 +425,8 @@ class MainActivity : Activity() {
         cornerRadius = dp(radius)
     }
 
+    private fun tint(color: Int) = ColorStateList.valueOf(getColor(color))
+
     private val editable get() = state == VpnState.DISCONNECTED || state == VpnState.ERROR && !offlineRetry
     private val busy get() = state == VpnState.CONNECTING || state == VpnState.DISCONNECTING
 
@@ -347,44 +434,57 @@ class MainActivity : Activity() {
 
     private fun showTab(next: String) {
         tab = next
-        if (next == "auto") prefs.edit().putBoolean(KEY_KEEPALIVE_SHOWN, true).apply()
+        if (next == "settings") prefs.edit().putBoolean(KEY_KEEPALIVE_SHOWN, true).apply()
         findViewById<View>(R.id.pageVpn).visibility = if (next == "vpn") View.VISIBLE else View.GONE
-        findViewById<View>(R.id.pageAuto).visibility = if (next == "auto") View.VISIBLE else View.GONE
+        findViewById<View>(R.id.pageSettings).visibility = if (next == "settings") View.VISIBLE else View.GONE
         findViewById<View>(R.id.pageLog).visibility = if (next == "log") View.VISIBLE else View.GONE
         findViewById<TextView>(R.id.titleText).text =
-            mapOf("vpn" to "Split VPN", "auto" to "Автозапуск", "log" to "Журнал")[next]
+            mapOf("vpn" to "Split VPN", "settings" to "Настройки", "log" to "Журнал")[next]
         renderTabs()
     }
 
     private fun renderTabs() {
         val bar = findViewById<LinearLayout>(R.id.tabBar)
         bar.removeAllViews()
-        val tabs = listOf(Triple("vpn", "⇅", "Соединение"), Triple("auto", "↻", "Автозапуск"), Triple("log", "☰", "Журнал"))
+        val tabs = listOf(
+            Triple("vpn", R.drawable.ic_nav_connection, "Соединение"),
+            Triple("settings", R.drawable.ic_nav_settings, "Настройки"),
+            Triple("log", R.drawable.ic_nav_log, "Журнал"),
+        )
         for ((key, icon, label) in tabs) {
             val active = key == tab
-            val ink = getColor(if (active) R.color.primary else R.color.on_surface_variant)
+            val ink = if (active) R.color.on_primary_container else R.color.on_surface_variant
+            // Only the battery: whether the firmware step is done, nothing can tell.
+            val badge = key == "settings" && batteryOptimized == true
             val item = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
                 setOnClickListener { showTab(key) }
+                if (badge) contentDescription = "$label, нужно действие"
             }
-            val iconView = TextView(this).apply {
-                text = icon
-                textSize = 17f
-                gravity = Gravity.CENTER
-                includeFontPadding = false
-                setTextColor(ink)
+            val pill = FrameLayout(this).apply {
+                background = if (active) box(getColor(R.color.primary_container), radius = 16f) else null
+                addView(ImageView(this@MainActivity).apply {
+                    setImageResource(icon)
+                    imageTintList = tint(ink)
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                }, FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER))
+                if (badge) addView(View(this@MainActivity).apply {
+                    background = box(getColor(R.color.warning), radius = 4f)
+                }, FrameLayout.LayoutParams(dp(8), dp(8), Gravity.TOP or Gravity.END).apply {
+                    topMargin = dp(3)
+                    marginEnd = dp(13)
+                })
             }
             val labelView = TextView(this).apply {
                 text = label
                 includeFontPadding = false
-                setTextColor(ink)
+                textSize = 12f
+                typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+                setTextColor(getColor(ink))
             }
-            iconView.background = if (active) box(getColor(R.color.primary_container), radius = 13f) else null
-            labelView.textSize = 12f
-            labelView.typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
-            item.addView(iconView, LinearLayout.LayoutParams(dp(56), dp(26)))
-            item.addView(labelView, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(5) })
+            item.addView(pill, LinearLayout.LayoutParams(dp(56), dp(32)))
+            item.addView(labelView, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(4) })
             bar.addView(item, LinearLayout.LayoutParams(0, -1, 1f))
         }
     }
@@ -393,8 +493,7 @@ class MainActivity : Activity() {
         renderServices()
         renderStatus()
         renderClock()
-        renderError()
-        renderUpdate()
+        renderBanner()
         renderUsage()
         // The service pushes nothing on a used-up day, so the new one needs its own redraw.
         ticker.removeCallbacks(midnight)
@@ -403,35 +502,46 @@ class MainActivity : Activity() {
             if (log.isEmpty()) "Журнал начат" else log.reversed().joinToString("\n")
     }
 
+    private val directMode get() = prefs.getBoolean(KEY_DIRECT, true)
+
     private fun renderServices() {
         val pings = mutableMapOf<String, String>()
         for (line in log) {
             val m = PROBE_LINE.find(line) ?: continue
-            pings[m.groupValues[1]] = m.groupValues[2].replace(' ', '\u00A0')
+            pings[m.groupValues[1]] = m.groupValues[2].replace(' ', ' ')
         }
         val list = findViewById<LinearLayout>(R.id.serviceList)
+        // Locked as a whole while the VPN is on: the switches keep their places.
+        list.alpha = if (editable) 1f else 0.5f
         for ((i, svc) in Services.ALL.withIndex()) {
             val en = enabled(svc)
             val ping = pings[svc.title].takeIf { state == VpnState.CONNECTED && !waitingNow && en }
             val row = list.getChildAt(i) ?: newServiceRow(list, svc)
-            val name = row.findViewById<TextView>(R.id.name)
+            row.isEnabled = editable
+            row.findViewById<TextView>(R.id.name).text = labels[svc.id] ?: svc.title
             val note = row.findViewById<TextView>(R.id.note)
-            name.text = labels[svc.id] ?: svc.title
-            // Also while the server is down: direct YouTube does not need it.
-            val status = if (svc.id == "youtube" && en && state == VpnState.CONNECTED) when (direct) {
-                "works" -> "YouTube напрямую"
-                "testing" -> "ищу обход…"
-                else -> null
-            } else null
-            note.text = status ?: ping
-            note.setTextColor(getColor(if (status != null && direct == "works") R.color.primary else R.color.on_surface_variant))
+            if (svc.id == "youtube") {
+                val mode = row.findViewById<TextView>(R.id.ytMode)
+                mode.visibility = if (en) View.VISIBLE else View.GONE
+                row.findViewWithTag<View>("badge").visibility = if (en) View.GONE else View.VISIBLE
+                mode.text = if (directMode) "Напрямую" else "Через VPN"
+                mode.isEnabled = editable
+                // The chip names the mode; the probe pinged the relay, which direct
+                // YouTube does not use. Also while the server is down.
+                note.text = if (en && directMode && state == VpnState.CONNECTED) when (direct) {
+                    "testing" -> "ищу обход…"
+                    "works" -> null
+                    else -> ping
+                } else ping
+            } else {
+                note.text = ping
+            }
             renderSwitch(row.findViewById(R.id.seg), row.findViewById(R.id.knob), en)
         }
     }
 
     private fun renderSwitch(seg: View, knob: View, on: Boolean) {
-        val track = if (!on) getColor(R.color.surface_container_highest) else if (editable) getColor(R.color.primary) else getColor(R.color.primary)
-        seg.background = box(track, radius = 16f)
+        seg.background = box(getColor(if (on) R.color.primary else R.color.surface_container_highest), radius = 16f)
         knob.layoutParams = (knob.layoutParams as FrameLayout.LayoutParams).apply {
             gravity = if (on) Gravity.END else Gravity.START
         }
@@ -443,6 +553,7 @@ class MainActivity : Activity() {
         for ((i, ic) in (icons[svc.id] ?: emptyList()).withIndex()) {
             val badge = TextView(this).apply {
                 text = ic
+                tag = "badge"
                 textSize = 10f
                 gravity = Gravity.CENTER
                 setTextColor(getColor(R.color.on_surface_variant))
@@ -450,11 +561,10 @@ class MainActivity : Activity() {
             }
             badges.addView(badge, i, LinearLayout.LayoutParams(dp(22), dp(22)).apply { marginEnd = dp(6) })
         }
+        if (svc.id == "youtube") badges.addView(modeChip(), 0, LinearLayout.LayoutParams(-2, dp(22)).apply { marginEnd = dp(8) })
         row.setOnClickListener {
-            if (!editable) {
-                lockedToast()
-                return@setOnClickListener
-            }
+            // performClick reaches a disabled view too.
+            if (!editable) return@setOnClickListener
             prefs.edit().putBoolean(Services.prefKey(svc.id), !enabled(svc)).apply()
             renderServices()
             renderClock()
@@ -463,31 +573,95 @@ class MainActivity : Activity() {
         return row
     }
 
-    private fun lockedToast() {
-        val now = SystemClock.elapsedRealtime()
-        if (lockedToastAt.let { it == null || now - it > 2000 }) {
-            lockedToastAt = now
-            Toast.makeText(this, "Сначала выключите VPN", Toast.LENGTH_SHORT).show()
+    private fun modeChip() = TextView(this).apply {
+        id = R.id.ytMode
+        textSize = 12f
+        typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+        includeFontPadding = false
+        gravity = Gravity.CENTER_VERTICAL
+        setTextColor(getColor(R.color.on_primary_container))
+        background = box(getColor(R.color.primary_container), radius = 6f)
+        setPadding(dp(8), 0, dp(4), 0)
+        val chevron = getDrawable(R.drawable.ic_expand_more)!!.mutate().apply {
+            setBounds(0, 0, dp(14), dp(14))
+            setTintList(tint(R.color.on_primary_container))
         }
+        setCompoundDrawablesRelative(null, null, chevron, null)
+        compoundDrawablePadding = dp(2)
+        contentDescription = null
+        setOnClickListener { if (editable) showModeMenu(this) }
+    }
+
+    private fun showModeMenu(anchor: View) {
+        val current = directMode
+        val menu = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = box(getColor(R.color.surface_lowest), radius = 16f)
+            // The selected item's fill must not stick out of the corners.
+            clipToOutline = true
+            elevation = dp(3f)
+        }
+        val popup = PopupWindow(menu, dp(288), ViewGroup.LayoutParams.WRAP_CONTENT, true)
+        val modes = listOf(
+            Triple(true, "Напрямую", "Обход замедления провайдера. Почти не тратит лимит."),
+            Triple(false, "Через VPN", "Если напрямую скорости не хватает. Тратит лимит."),
+        )
+        for ((on, title, caption) in modes) {
+            val selected = on == current
+            menu.addView(LinearLayout(this).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(16), dp(12), dp(16), dp(12))
+                minimumHeight = dp(56)
+                if (selected) setBackgroundColor(getColor(R.color.surface_container))
+                addView(LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(TextView(this@MainActivity).apply {
+                        text = title
+                        textSize = 15f
+                        setTextColor(getColor(R.color.on_surface))
+                    })
+                    addView(TextView(this@MainActivity).apply {
+                        text = caption
+                        textSize = 12f
+                        setTextColor(getColor(R.color.on_surface_variant))
+                    })
+                }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(12) })
+                addView(ImageView(this@MainActivity).apply {
+                    setImageResource(R.drawable.ic_check)
+                    imageTintList = tint(R.color.primary)
+                    visibility = if (selected) View.VISIBLE else View.INVISIBLE
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                }, LinearLayout.LayoutParams(dp(20), dp(20)))
+                isSelected = selected
+                setOnClickListener {
+                    popup.dismiss()
+                    prefs.edit().putBoolean(KEY_DIRECT, on).apply()
+                    renderServices()
+                }
+            })
+        }
+        menuPopup = popup
+        popup.elevation = dp(3f)
+        popup.showAsDropDown(anchor, 0, dp(4))
     }
 
     private fun renderStatus() {
-        val hint = findViewById<TextView>(R.id.hintText)
         val button = findViewById<View>(R.id.toggleButton)
         val dot = findViewById<View>(R.id.statusDot)
         val on = state == VpnState.CONNECTED
-        hint.text = if (editable) "Выберите, что пойдёт через VPN" else "Чтобы изменить список, выключите VPN"
-        hint.setTextColor(getColor(if (editable) R.color.primary else R.color.on_surface_variant))
+        findViewById<TextView>(R.id.hintText).text =
+            if (editable) "Что пойдёт через VPN" else "Чтобы изменить список, выключите VPN"
+        findViewById<View>(R.id.hintLock).visibility = if (editable) View.GONE else View.VISIBLE
         findViewById<View>(R.id.chip).background = box(
-            if (waitingNow) getColor(R.color.warning_container) else if (on) getColor(R.color.success_container) else getColor(R.color.surface_container_high), radius = 16f
+            getColor(if (waitingNow) R.color.warning_container else if (on) R.color.success_container else R.color.surface_container_high), radius = 16f
         )
         findViewById<TextView>(R.id.statusText).setTextColor(
-            if (waitingNow) getColor(R.color.on_warning_container) else if (on) getColor(R.color.on_success_container) else getColor(R.color.on_surface)
+            getColor(if (waitingNow) R.color.on_warning_container else if (on) R.color.on_success_container else R.color.on_surface)
         )
         val green = getColor(R.color.success)
         val grey = getColor(R.color.outline)
         // Not a failure but nothing to press until midnight: greyed out like busy.
-        // Nor while min_version turns this version away: the red box's "Обновить" is the way.
+        // Nor while min_version turns this version away: the banner's "Обновить" is the way.
         val inert = busy || quotaOut || updateRequired
         dot.background = box(if (waitingNow) getColor(R.color.warning) else if (on) green else if (busy) grey else getColor(R.color.on_surface_variant), radius = 4f)
         findViewById<View>(R.id.buttonDot).background =
@@ -500,7 +674,7 @@ class MainActivity : Activity() {
                 VpnState.ERROR -> if (offlineRetry) "Выключить" else "Подключить"
                 VpnState.DISCONNECTED -> "Подключить"
             }
-            setTextColor(if (on) getColor(R.color.on_surface) else if (inert) getColor(R.color.on_surface_variant) else getColor(R.color.on_primary))
+            setTextColor(getColor(if (on) R.color.on_surface else if (inert) R.color.on_surface_variant else R.color.on_primary))
         }
         button.isEnabled = !inert
         button.background = when {
@@ -533,7 +707,7 @@ class MainActivity : Activity() {
         val e = error ?: ""
         return when {
             // The service's text is for its notification, read outside the app.
-            e == TunnelVpnService.ERR_VPN_TAKEN -> "Разрешение VPN занято другим приложением. Нажмите «Подключить», чтобы вернуть его"
+            e == TunnelVpnService.ERR_VPN_TAKEN -> "Разрешение VPN занято другим приложением"
             e.any { it in 'а'..'я' } -> e
             "unreachable" in e || "relay reply" in e -> "Сервер недоступен. Проверьте интернет и повторите"
             "rejected" in e -> "Сервер отклонил доступ"
@@ -541,45 +715,66 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun renderError() {
-        val view = findViewById<View>(R.id.errorBox)
-        val text = findViewById<TextView>(R.id.errorText)
-        val action = findViewById<TextView>(R.id.errorAction)
-        if (waitingNow) {
-            // Not an error: nothing to press, the tunnel is on and comes back by itself.
-            view.visibility = View.VISIBLE
-            action.visibility = View.GONE
-            val msg = if (offlineRetry) "Нет интернета. VPN подключится сам, когда сеть появится — ничего делать не нужно."
-            else if (waiting == Waiting.NO_NETWORK) "Нет интернета. VPN включён и заработает сам, когда сеть появится — ничего делать не нужно."
-            else "Сервер пока не отвечает — возможно, его блокирует оператор. VPN включён и подключится сам, ничего делать не нужно."
-            text.text = msg
-            text.setTextColor(getColor(R.color.on_warning_container))
-            view.background = box(getColor(R.color.warning_container), radius = 16f)
-            return
+    private enum class Level(val bg: Int, val ink: Int) {
+        INFO(R.color.primary_container, R.color.on_primary_container),
+        WARN(R.color.warning_container, R.color.on_warning_container),
+        ERROR(R.color.error_container, R.color.on_error_container),
+    }
+
+    private class Banner(
+        val level: Level, val icon: Int, val text: String,
+        val action: String? = null, val onAction: (() -> Unit)? = null,
+        val busy: Boolean = false, val closable: Boolean = false,
+    )
+
+    private val updateAvailable get() = versions.let { v ->
+        v != null && v.available && !updateRequired && v.latest > prefs.getLong(KEY_UPDATE_DISMISSED, 0)
+    }
+
+    // One at a time, the most important: an error, then a warning, then news.
+    private fun banner(): Banner? = when {
+        updateRequired -> Banner(Level.ERROR, R.drawable.ic_system_update, "Эта версия больше не поддерживается", updateLabel, ::startUpdate, busy = updating)
+        quotaOut -> Banner(Level.ERROR, R.drawable.ic_error, "Дневной лимит трафика исчерпан. VPN снова заработает после 00:00")
+        state == VpnState.ERROR && error == TunnelVpnService.ERR_NEED_CODE ->
+            Banner(Level.WARN, R.drawable.ic_gpp_maybe, "Не удалось проверить устройство через Google Play", "Ввести код", ::showInviteDialog)
+        // A stale used-up day is over: nothing to tell.
+        state == VpnState.ERROR && !offlineRetry && !quotaError ->
+            Banner(Level.ERROR, R.drawable.ic_error, errorText(), "Повторить", ::startVpn)
+        waitingNow && (waiting == Waiting.NO_NETWORK || offlineRetry) ->
+            Banner(Level.WARN, R.drawable.ic_wifi_off, "Нет интернета — VPN заработает, когда сеть появится")
+        waitingNow -> Banner(Level.WARN, R.drawable.ic_schedule, "Сервер не отвечает — подключимся сами, как только он ответит")
+        // While downloading: no way to hide the only sign of it.
+        updateAvailable -> Banner(Level.INFO, R.drawable.ic_system_update, "Доступна новая версия", updateLabel, ::startUpdate, busy = updating, closable = !updating)
+        else -> null
+    }
+
+    private fun renderBanner() {
+        val view = findViewById<View>(R.id.banner)
+        val b = banner()
+        view.visibility = if (b == null) View.GONE else View.VISIBLE
+        if (b == null) return
+        val ink = getColor(b.level.ink)
+        view.background = box(getColor(b.level.bg), radius = 16f)
+        findViewById<ImageView>(R.id.bannerIcon).apply {
+            setImageResource(b.icon)
+            imageTintList = tint(b.level.ink)
         }
-        // A used-up day is told by the toggle and the usage line: a normal state, not a failure.
-        // A stale one is over. An update still shows: the one thing to do right now.
-        if (!updateRequired && (state != VpnState.ERROR || quotaError)) {
-            view.visibility = View.GONE
-            return
+        findViewById<TextView>(R.id.bannerText).apply {
+            text = b.text
+            setTextColor(ink)
         }
-        view.visibility = View.VISIBLE
-        val needCode = error == TunnelVpnService.ERR_NEED_CODE
-        // A plain retry is the toggle's own "Подключить".
-        action.visibility = if (needCode || updateRequired) View.VISIBLE else View.GONE
-        text.text = when {
-            needCode -> "Не удалось проверить устройство через Google Play"
-            updateRequired -> TunnelVpnService.ERR_UPDATE_REQUIRED
-            else -> errorText()
+        findViewById<TextView>(R.id.bannerAction).apply {
+            visibility = if (b.action == null) View.GONE else View.VISIBLE
+            text = b.action
+            setTextColor(ink)
+            isEnabled = !b.busy
+            alpha = if (b.busy) 0.6f else 1f
         }
-        action.text = if (needCode) "Ввести код" else updateLabel
-        val downloading = updateRequired && updating
-        action.isEnabled = !downloading
-        action.alpha = if (downloading) 0.6f else 1f
-        val ink = getColor(if (needCode) R.color.on_warning_container else R.color.on_error_container)
-        text.setTextColor(ink)
-        action.setTextColor(if (needCode) getColor(R.color.on_warning_container) else ink)
-        view.background = box(getColor(if (needCode) R.color.warning_container else R.color.error_container), radius = 16f)
+        findViewById<ImageView>(R.id.bannerClose).apply {
+            visibility = if (b.closable) View.VISIBLE else View.GONE
+            imageTintList = tint(b.level.ink)
+        }
+        view.setPaddingRelative(dp(14), dp(12), if (b.action != null || b.closable) dp(6) else dp(14), dp(12))
     }
 
     // Also with the app closed when it happened: the service may be gone, the count is not.
@@ -598,8 +793,7 @@ class MainActivity : Activity() {
         findViewById<TextView>(R.id.usageText).apply {
             visibility = if (u == null) View.GONE else View.VISIBLE
             val used = u?.takeIf { it.day == Quota.today() }?.used ?: 0
-            if (u != null) text = "Сегодня через VPN: ${Quota.format(used)} из ${Quota.format(u.limit)}" +
-                if (quotaOut) ", снова после 00:00" else ""
+            if (u != null) text = "Сегодня через VPN: ${Quota.format(used)} из ${Quota.format(u.limit)}"
         }
     }
 
@@ -611,33 +805,6 @@ class MainActivity : Activity() {
         !updating -> "Обновить"
         progress >= 0 -> "Скачивается… $progress%"
         else -> "Скачивается…"
-    }
-
-    // The calm banner of Waiting: news, not an error. A required update is
-    // the error box's business instead.
-    private fun renderUpdate() {
-        val view = findViewById<View>(R.id.updateBox)
-        val v = versions
-        val show = v != null && v.available && !updateRequired &&
-            v.latest > prefs.getLong(KEY_UPDATE_DISMISSED, 0)
-        view.visibility = if (show) View.VISIBLE else View.GONE
-        if (v == null || !show) return
-        view.background = box(getColor(R.color.warning_container), radius = 16f)
-        findViewById<TextView>(R.id.updateText).apply {
-            text = "Доступна новая версия"
-            setTextColor(getColor(R.color.on_warning_container))
-        }
-        // While downloading: not a button, and no way to hide the only sign of it.
-        findViewById<TextView>(R.id.updateAction).apply {
-            text = updateLabel
-            setTextColor(getColor(R.color.on_warning_container))
-            isEnabled = !updating
-            alpha = if (updating) 0.6f else 1f
-        }
-        findViewById<TextView>(R.id.updateClose).apply {
-            setTextColor(getColor(R.color.on_warning_container))
-            visibility = if (updating) View.INVISIBLE else View.VISIBLE
-        }
     }
 
     private fun openDownloadPage() = openUrl((versions ?: Versions()).page)
@@ -655,8 +822,7 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     if (!updating || isDestroyed) return@runOnUiThread
                     progress = p
-                    renderError()
-                    renderUpdate()
+                    renderBanner()
                 }
             }
             // Here, not in onUpdateResult: that one is skipped for a destroyed activity.
@@ -698,6 +864,7 @@ class MainActivity : Activity() {
         dialog.setContentView(R.layout.dialog_install_simple)
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(SCRIM)
             setLayout(resources.displayMetrics.widthPixels - dp(48), ViewGroup.LayoutParams.WRAP_CONTENT)
         }
         dialog.findViewById<View>(R.id.cancel).setOnClickListener { dialog.dismiss() }
@@ -720,6 +887,7 @@ class MainActivity : Activity() {
         dialog.setContentView(R.layout.dialog_invite_simple)
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(SCRIM)
             setLayout(resources.displayMetrics.widthPixels - dp(48), ViewGroup.LayoutParams.WRAP_CONTENT)
             setSoftInputMode(
                 WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE or WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
@@ -745,6 +913,7 @@ class MainActivity : Activity() {
         dialog.setContentView(R.layout.dialog_share_simple)
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(SCRIM)
             setLayout(resources.displayMetrics.widthPixels - dp(48), ViewGroup.LayoutParams.WRAP_CONTENT)
         }
         dialog.findViewById<ImageView>(R.id.qr).setImageBitmap(qr(url, dp(220)))
@@ -766,142 +935,26 @@ class MainActivity : Activity() {
         val px = IntArray(m.width * m.height) { if (m[it % m.width, it / m.width]) Color.BLACK else Color.WHITE }
         return Bitmap.createBitmap(px, m.width, m.height, Bitmap.Config.ARGB_8888)
     }
-
-    private fun showMenu(anchor: View) {
-        val ink = getColor(R.color.on_surface)
-        val dim = getColor(R.color.on_surface_variant)
-        val side = dp(20)
-        val menu = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = box(getColor(R.color.surface_lowest), radius = 16f)
-            setPadding(0, dp(12), 0, dp(6))
-            elevation = dp(8f)
-        }
-        val popup = PopupWindow(menu, dp(264), ViewGroup.LayoutParams.WRAP_CONTENT, true)
-        menu.addView(switchItem("Блокировать рекламу", null, KEY_ADBLOCK, false, ink, dim, side))
-        menu.addView(switchItem("YouTube напрямую", "С обходом замедления у провайдера. Не тратит лимит", KEY_DIRECT, true, ink, dim, side))
-        menu.addView(notificationItem(ink, dim, side, popup))
-        menu.addView(TextView(this).apply {
-            text = "Поделиться приложением"
-            textSize = 14f
-            gravity = Gravity.CENTER_VERTICAL
-            setTextColor(ink)
-            setPadding(side, 0, side, 0)
-            setOnClickListener {
-                popup.dismiss()
-                showShareDialog()
-            }
-        }, LinearLayout.LayoutParams(-1, dp(46)))
-        menu.addView(TextView(this).apply {
-            text = "Политика конфиденциальности\u00A0↗"
-            textSize = 14f
-            gravity = Gravity.CENTER_VERTICAL
-            setTextColor(ink)
-            setPadding(side, dp(6), side, dp(6))
-            minHeight = dp(46)
-            setOnClickListener {
-                popup.dismiss()
-                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(PRIVACY_URL)))
-            }
-        }, LinearLayout.LayoutParams(-1, -2))
-        menu.addView(TextView(this).apply {
-            text = "Версия ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
-            textSize = 10f
-            setTextColor(dim)
-            setPadding(side, dp(8), side, dp(6))
-        })
-        menuPopup = popup
-        popup.elevation = dp(8f)
-        popup.showAsDropDown(anchor, -dp(264 - 44 + 6), 0)
-    }
-
-    // Go reads these at start only, so like the services they are locked
-    // while the VPN is on: the grey switch says so.
-    private fun switchItem(title: String, caption: String?, key: String, default: Boolean, ink: Int, dim: Int, side: Int): View {
-        val knob = View(this).apply {
-            setBackgroundResource(R.drawable.simple_knob)
-            elevation = dp(2f)
-        }
-        val seg = FrameLayout(this).apply {
-            setPadding(dp(3), dp(3), dp(3), dp(3))
-            addView(knob, FrameLayout.LayoutParams(dp(26), dp(26)))
-        }
-        renderSwitch(seg, knob, prefs.getBoolean(key, default))
-        val texts = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(TextView(this@MainActivity).apply {
-                text = title
-                textSize = 14f
-                setTextColor(if (editable) ink else dim)
-            })
-            // 10sp: at 11 a line holds a word or two less on 264dp.
-            if (caption != null) addView(TextView(this@MainActivity).apply {
-                text = caption
-                textSize = 10f
-                setTextColor(dim)
-            })
-        }
-        return LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(side, dp(6), side, dp(6))
-            minimumHeight = dp(46)
-            addView(texts, LinearLayout.LayoutParams(0, -2, 1f).apply { marginEnd = dp(12) })
-            addView(seg, LinearLayout.LayoutParams(dp(52), dp(32)))
-            accessibilityDelegate = object : View.AccessibilityDelegate() {
-                override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
-                    super.onInitializeAccessibilityNodeInfo(host, info)
-                    info.className = Switch::class.java.name
-                    info.isCheckable = true
-                    info.isChecked = prefs.getBoolean(key, default)
-                }
-            }
-            setOnClickListener {
-                if (!editable) {
-                    lockedToast()
-                    return@setOnClickListener
-                }
-                val on = !prefs.getBoolean(key, default)
-                prefs.edit().putBoolean(key, on).apply()
-                renderSwitch(seg, knob, on)
-            }
-        }
-    }
-
     // The service stays in the foreground either way; only the system can
     // hide its notification (the channel, or on 13+ the app's permission).
-    private fun notificationItem(ink: Int, dim: Int, side: Int, popup: PopupWindow): View {
+    private fun notificationsOn(): Boolean {
         val nm = getSystemService(NotificationManager::class.java)
         TunnelVpnService.createChannel(this)
-        val appOn = nm.areNotificationsEnabled()
-        val on = appOn && nm.getNotificationChannel(TunnelVpnService.CHANNEL_ID)?.importance != NotificationManager.IMPORTANCE_NONE
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(side, dp(6), side, dp(6))
-            minimumHeight = dp(46)
-            addView(TextView(this@MainActivity).apply {
-                text = "Уведомление в шторке\u00A0↗"
-                textSize = 14f
-                setTextColor(ink)
-            })
-            addView(TextView(this@MainActivity).apply {
-                text = if (on) "Включено · настроить в системе" else "Выключено · настроить в системе"
-                textSize = 10f
-                setTextColor(dim)
-            })
-            setOnClickListener {
-                popup.dismiss()
-                // With the app's notifications off the channel page is inert.
-                // Trimmed ROMs may lack either page: fall through like openVendorSettings.
-                val channel = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
-                    .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
-                    .putExtra(Settings.EXTRA_CHANNEL_ID, TunnelVpnService.CHANNEL_ID)
-                val app = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
-                val details = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
-                for (i in if (appOn) listOf(channel, app, details) else listOf(app, details)) {
-                    runCatching { startActivity(i) }.onSuccess { return@setOnClickListener }
-                }
-            }
+        return nm.areNotificationsEnabled() &&
+            nm.getNotificationChannel(TunnelVpnService.CHANNEL_ID)?.importance != NotificationManager.IMPORTANCE_NONE
+    }
+
+    private fun openNotificationSettings() {
+        val appOn = getSystemService(NotificationManager::class.java).areNotificationsEnabled()
+        // With the app's notifications off the channel page is inert.
+        // Trimmed ROMs may lack either page: fall through like openVendorSettings.
+        val channel = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+            .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+            .putExtra(Settings.EXTRA_CHANNEL_ID, TunnelVpnService.CHANNEL_ID)
+        val app = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+        val details = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+        for (i in if (appOn) listOf(channel, app, details) else listOf(app, details)) {
+            runCatching { startActivity(i) }.onSuccess { return }
         }
     }
 

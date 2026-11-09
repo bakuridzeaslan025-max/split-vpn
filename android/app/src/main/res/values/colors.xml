@@ -30,5 +30,4 @@
     <!-- Text on a button filled with on_warning_container. -->
     <color name="on_warning_button">#FFFFFF</color>
 
-    <color name="scrim">#52000000</color>
 </resources>
