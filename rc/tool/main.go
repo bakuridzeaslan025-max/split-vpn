@@ -35,8 +35,15 @@ type config struct {
 	MinVersion    int    `json:"min_version"`
 	LatestVersion int    `json:"latest_version"`
 	UpdateURL     string `json:"update_url"`
-	// The APK self-update downloads; "" turns self-update off.
-	APKURL       string `json:"apk_url"`
+	// The APK self-update of 0.11-0.12.3 downloads; "" turns it off there.
+	APKURL string `json:"apk_url"`
+	// Self-update's mirrors in the builds after 0.12.3, as download.js
+	// MIRRORS: probed in parallel, the first that passes wins. [] turns
+	// self-update off there; apk_url is theirs only while RC has no apk_urls.
+	APKURLs json.RawMessage `json:"apk_urls"`
+	// latest_version's versionName: self-update asks the mirrors for
+	// split-vpn-<it>.apk first, as the page does with the API's tag.
+	LatestName   string `json:"latest_name"`
 	DailyQuotaMB int    `json:"daily_quota_mb"`
 	// Direct YouTube's strategies, in the order to try them; [] turns it
 	// off for everyone. The app bakes this file's value in as its default.
@@ -47,12 +54,37 @@ type config struct {
 }
 
 // ytValue is yt_strategies as RC carries it: a compact JSON string.
-func (c config) ytValue() string {
+func (c config) ytValue() string { return compact(c.YTStrategies) }
+
+// apk_urls "" (a JSON string in config.json) publishes a blank value: the
+// app then takes apk_url, the way back when the Pages mirrors fail.
+func (c config) apkURLsValue() string {
+	if c.blankAPKURLs() {
+		return ""
+	}
+	return compact(c.APKURLs)
+}
+
+func (c config) blankAPKURLs() bool { return strings.TrimSpace(string(c.APKURLs)) == `""` }
+
+func compact(js json.RawMessage) string {
 	var b bytes.Buffer
-	if json.Compact(&b, c.YTStrategies) != nil {
+	if json.Compact(&b, js) != nil {
 		return ""
 	}
 	return b.String()
+}
+
+// checkBuild: rc-push with latest_version of the build in the tree comes
+// right after its publish-local, and latest_name must be its versionName.
+// A stale one costs self-update the versioned file, and Releases at all.
+// appVersion is "<versionCode>:<versionName>" from app/build.gradle.kts.
+func (c config) checkBuild(appVersion string) error {
+	code, name, ok := strings.Cut(appVersion, ":")
+	if ok && code == strconv.Itoa(c.LatestVersion) && name != c.LatestName {
+		return fmt.Errorf("config: latest_version %d is the build in the tree, its versionName is %s, latest_name is %q", c.LatestVersion, name, c.LatestName)
+	}
+	return nil
 }
 
 func (c config) validate() error {
@@ -74,6 +106,17 @@ func (c config) validate() error {
 	if c.APKURL != "" && (!strings.HasPrefix(c.APKURL, releasesPrefix) ||
 		!apkAsset.MatchString(strings.TrimPrefix(c.APKURL, releasesPrefix)) || strings.Contains(c.APKURL, "..")) {
 		return errors.New("config: apk_url must be empty or " + releasesPrefix + "{download/<tag>,latest/download}/<file>.apk")
+	}
+	if c.APKURLs == nil {
+		return errors.New(`config: apk_urls is required, a JSON array ([] turns self-update off in the builds after 0.12.3) or "" (apk_url instead)`)
+	}
+	if !c.blankAPKURLs() {
+		if err := checkMirrors(string(c.APKURLs)); err != nil {
+			return fmt.Errorf("config: apk_urls: %v", err)
+		}
+	}
+	if !versionName.MatchString(c.LatestName) {
+		return errors.New("config: latest_name is required, latest_version's versionName X.Y.Z")
 	}
 	if c.YTStrategies == nil {
 		return errors.New("config: yt_strategies is required, a JSON array ([] turns direct YouTube off)")
@@ -180,6 +223,8 @@ func values(c config, blob string) [][3]string {
 		{"latest_version", "NUMBER", strconv.Itoa(c.LatestVersion)},
 		{"update_url", "STRING", c.UpdateURL},
 		{"apk_url", "STRING", c.APKURL},
+		{"apk_urls", "STRING", c.apkURLsValue()},
+		{"latest_name", "STRING", c.LatestName},
 		{"daily_quota_mb", "NUMBER", strconv.Itoa(c.DailyQuotaMB)},
 		{"yt_strategies", "STRING", c.ytValue()},
 		{"dial_event_bp", "NUMBER", strconv.Itoa(c.DialEventBP)},
@@ -207,8 +252,8 @@ func push(rc *rcClient, t template, etag string, appID string, c config, blob st
 	if err != nil {
 		return fmt.Errorf("publish: %w", err)
 	}
-	fmt.Fprintf(out, "published version %s: min_version %d, latest_version %d, update_url %s, apk_url %s, daily_quota_mb %d, yt_strategies %s, dial_event_bp %d, endpoints set (%s)\n",
-		ver, c.MinVersion, c.LatestVersion, c.UpdateURL, c.APKURL, c.DailyQuotaMB, c.ytValue(), c.DialEventBP, debugCondition)
+	fmt.Fprintf(out, "published version %s: min_version %d, latest_version %d, latest_name %s, update_url %s, apk_url %s, apk_urls %s, daily_quota_mb %d, yt_strategies %s, dial_event_bp %d, endpoints set (%s)\n",
+		ver, c.MinVersion, c.LatestVersion, c.LatestName, c.UpdateURL, c.APKURL, c.apkURLsValue(), c.DailyQuotaMB, c.ytValue(), c.DialEventBP, debugCondition)
 	return nil
 }
 
@@ -239,8 +284,8 @@ func promote(rc *rcClient, t template, etag string, out io.Writer) error {
 		return fmt.Errorf("publish: %w", err)
 	}
 	get := func(k string) string { s, _ := t.value(k, ""); return s }
-	fmt.Fprintf(out, "published version %s: defaults = %s: min_version %s, latest_version %s, update_url %s, apk_url %s, daily_quota_mb %s, yt_strategies %s, dial_event_bp %s, endpoints as checked\n",
-		ver, debugCondition, get("min_version"), get("latest_version"), get("update_url"), get("apk_url"), get("daily_quota_mb"), get("yt_strategies"), get("dial_event_bp"))
+	fmt.Fprintf(out, "published version %s: defaults = %s: min_version %s, latest_version %s, latest_name %s, update_url %s, apk_url %s, apk_urls %s, daily_quota_mb %s, yt_strategies %s, dial_event_bp %s, endpoints as checked\n",
+		ver, debugCondition, get("min_version"), get("latest_version"), get("latest_name"), get("update_url"), get("apk_url"), get("apk_urls"), get("daily_quota_mb"), get("yt_strategies"), get("dial_event_bp"))
 	return nil
 }
 
@@ -320,7 +365,8 @@ func pull(t template, key []byte, out io.Writer) {
 
 // Secrets come in through the environment (make passes -e without a value):
 // RC_KEY = rc.key, VDS_ENDPOINTS = vds.endpoints from local.properties,
-// INVITE = an invite code for check and promote.
+// INVITE = an invite code for check and promote. APP_VERSION (push) is no
+// secret: the build in the tree, see checkBuild.
 func main() {
 	rcDir := flag.String("rc", "/rc", "the rc/ directory")
 	gsPath := flag.String("gs", "/google-services.json", "android/app/google-services.json")
@@ -351,6 +397,9 @@ func run(rcDir, gsPath, saPath, credPath string, args []string) error {
 	switch args[0] {
 	case "push":
 		if cfg, err = loadConfig(filepath.Join(rcDir, "config.json")); err != nil {
+			return err
+		}
+		if err := cfg.checkBuild(os.Getenv("APP_VERSION")); err != nil {
 			return err
 		}
 		eps, src, err := loadEndpoints(rcDir, os.Getenv("VDS_ENDPOINTS"))

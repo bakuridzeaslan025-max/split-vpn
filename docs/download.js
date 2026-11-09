@@ -61,9 +61,11 @@ export function probe(url, {fetch, signal, bytes = PROBE_BYTES, now = () => Date
   });
 }
 
-// All requests at once under one 4 s timeout: per mirror a HEAD on each APK name and
-// one probe.bin. Opening the APK needs no user activation, but past ~5 s after the tap
-// Chrome asks before a repeat download from the page.
+// The choice over what the probes have told so far; undefined while it still waits
+// for one of them. probes: one per mirror with probe, in MIRRORS order: heads {name:
+// HTTP status or "net"}, passed (true or false once ended), http, bytes, alive. The
+// app's self-update (Updater.decide) ports this as it is: test/pick-vectors.json is
+// run by both.
 // A name passes on a mirror with HEAD 200 there and a passed probe.bin. The first
 // passing one in order wins, checked: the versioned name on every mirror before any
 // fixed one, since a mirror still deploying the new release serves the old APK under
@@ -71,8 +73,37 @@ export function probe(url, {fetch, signal, bytes = PROBE_BYTES, now = () => Date
 // With no pass, the deadline sorts out probe.bin downloads still running: alive if a
 // chunk came within the last aliveMs (a slow link), stalled otherwise (a throttled
 // host goes silent after its first ~16 KB). The alive mirror with the most bytes is
-// opened unchecked; a stalled one never is. Returns the URL to open and whether it
-// was checked.
+// opened unchecked; a stalled one never is.
+export function decide({mirrors = MIRRORS, versioned = null, probes}) {
+  const names = versioned ? [versioned, FIXED] : [FIXED];
+  const probed = mirrors.filter(m => m.probe);
+  for (const n of names) {
+    for (const [i, p] of probes.entries()) {
+      if (p.heads[n] == null) return undefined;
+      if (p.heads[n] !== 200) continue;
+      if (p.passed == null) return undefined;
+      if (p.passed) return {url: probed[i].base + n, checked: true};
+    }
+  }
+  if (probes.some(p => p.passed == null)) return undefined;
+  let target = null;
+  probes.forEach((p, i) => {
+    if (!p.passed && !p.alive) return;
+    const name = names.find(n => p.heads[n] === 200) || (p.heads[FIXED] === "net" ? FIXED : null);
+    if (name && (!target || p.bytes > target.bytes)) target = {url: probed[i].base + name, bytes: p.bytes};
+  });
+  if (target) return {url: target.url, checked: false};
+  // Nothing answered at all: GitHub is likely unreachable, and opening Releases would
+  // only swap this page for the browser's error page.
+  const reachable = probes.some(p => p.http || names.some(n => p.heads[n] !== "net"));
+  return {url: reachable ? lastResort(mirrors, versioned) : null, checked: false};
+}
+
+// All requests at once under one 4 s timeout: per mirror a HEAD on each APK name and
+// one probe.bin. Opening the APK needs no user activation, but past ~5 s after the tap
+// Chrome asks before a repeat download from the page. The deadline aborts whatever
+// still runs, so decide() has every answer by then. Returns the URL to open and
+// whether it was checked.
 export async function pickUrl({mirrors = MIRRORS, versioned = null, fetch, streams,
     timeoutMs = PROBE_TIMEOUT_MS, bytes = PROBE_BYTES, aliveMs = ALIVE_MS, now = () => Date.now()}) {
   // Without body streams every probe would fail; throwing takes the click handler's
@@ -81,38 +112,30 @@ export async function pickUrl({mirrors = MIRRORS, versioned = null, fetch, strea
   const abort = new AbortController();
   const {signal} = abort;
   const names = versioned ? [versioned, FIXED] : [FIXED];
+  let settle;
+  const decided = new Promise(r => { settle = r; });
+  const check = () => {
+    const d = decide({mirrors, versioned, probes: probed.map(p =>
+      ({heads: p.heads, passed: p.passed, http: p.state.http, bytes: p.state.bytes, alive: p.alive}))});
+    if (d) settle(d);
+  };
   const probed = mirrors.filter(m => m.probe).map(m => {
-    const p = {base: m.base, heads: {}, status: {}, state: {}, alive: false};
+    const p = {heads: {}, passed: undefined, state: {}, alive: false};
     for (const n of names) {
-      p.heads[n] = fetch(m.base + n, {method: "HEAD", cache: "no-store", signal}).then(r => r.status, () => "net");
+      fetch(m.base + n, {method: "HEAD", cache: "no-store", signal}).then(r => r.status, () => "net")
+        .then(s => { p.heads[n] = s; check(); });
     }
-    p.passed = probe(m.base + PROBE_FILE, {fetch, signal, bytes, now, state: p.state});
+    probe(m.base + PROBE_FILE, {fetch, signal, bytes, now, state: p.state}).then(ok => { p.passed = ok; check(); });
     return p;
   });
   const timer = setTimeout(() => {
     for (const p of probed) p.alive = !p.state.ended && p.state.last !== null && now() - p.state.last <= aliveMs;
     abort.abort();
   }, timeoutMs);
+  // No mirror to probe: nothing would call it.
+  check();
   try {
-    for (const n of names) {
-      for (const p of probed) {
-        p.status[n] = await p.heads[n];
-        if (p.status[n] === 200 && await p.passed) return {url: p.base + n, checked: true};
-      }
-    }
-    // Probes still running end at the deadline at the latest.
-    const passed = await Promise.all(probed.map(p => p.passed));
-    let target = null;
-    probed.forEach((p, i) => {
-      if (!passed[i] && !p.alive) return;
-      const name = names.find(n => p.status[n] === 200) || (p.status[FIXED] === "net" ? FIXED : null);
-      if (name && (!target || p.state.bytes > target.bytes)) target = {url: p.base + name, bytes: p.state.bytes};
-    });
-    if (target) return {url: target.url, checked: false};
-    // Nothing answered at all: GitHub is likely unreachable, and opening Releases would
-    // only swap this page for the browser's error page.
-    const reachable = probed.some(p => p.state.http || names.some(n => p.status[n] !== "net"));
-    return {url: reachable ? lastResort(mirrors, versioned) : null, checked: false};
+    return await decided;
   } finally {
     clearTimeout(timer);
     abort.abort();

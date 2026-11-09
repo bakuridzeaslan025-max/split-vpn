@@ -161,7 +161,9 @@ func debugTemplate(t *testing.T, eps ...endpoint) string {
     "apk_url": {"defaultValue": {"value": ""}, "conditionalValues": {"build_debug": {"value": "https://github.com/bakuridzeaslan025-max/split-vpn/releases/latest/download/split-vpn.apk"}}, "valueType": "STRING"},
     "daily_quota_mb": {"defaultValue": {"useInAppDefault": true}, "conditionalValues": {"build_debug": {"value": "1024"}}, "valueType": "NUMBER"},
     "yt_strategies": {"defaultValue": {"value": "[]"}, "conditionalValues": {"build_debug": {"value": "[{\"id\":\"none\",\"spec\":\"\"}]"}}, "valueType": "STRING"},
-    "dial_event_bp": {"defaultValue": {"value": "0"}, "conditionalValues": {"build_debug": {"value": "25"}}, "valueType": "NUMBER"}
+    "dial_event_bp": {"defaultValue": {"value": "0"}, "conditionalValues": {"build_debug": {"value": "25"}}, "valueType": "NUMBER"},
+    "apk_urls": {"defaultValue": {"useInAppDefault": true}, "conditionalValues": {"build_debug": {"value": "[]"}}, "valueType": "STRING"},
+    "latest_name": {"defaultValue": {"useInAppDefault": true}, "conditionalValues": {"build_debug": {"value": "0.5.8"}}, "valueType": "STRING"}
   }
 }`, blob)
 }
@@ -191,7 +193,7 @@ func TestPromoteWhenAllWork(t *testing.T) {
 		t.Fatalf("calls %v, want %v", f.calls, want)
 	}
 	got := template(f.put)
-	for _, k := range []string{"endpoints", "min_version", "latest_version", "update_url", "apk_url", "daily_quota_mb", "yt_strategies", "dial_event_bp"} {
+	for _, k := range []string{"endpoints", "min_version", "latest_version", "update_url", "apk_url", "apk_urls", "latest_name", "daily_quota_mb", "yt_strategies", "dial_event_bp"} {
 		d, _ := got.value(k, "")
 		dbg, ok := got.value(k, debugCondition)
 		if !ok || d != dbg {
@@ -386,8 +388,8 @@ func TestPromoteSameEndpointsSkipsCheck(t *testing.T) {
 		t.Fatalf("calls %v", f.calls)
 	}
 	got := template(f.put)
-	for _, k := range []string{"min_version", "latest_version", "update_url", "apk_url", "daily_quota_mb", "yt_strategies"} {
-		if d, _ := got.value(k, ""); d != map[string]string{"min_version": "114", "latest_version": "115", "update_url": "https://o.github.io/r/", "apk_url": releasesPrefix + "latest/download/split-vpn.apk", "daily_quota_mb": "1024", "yt_strategies": `[{"id":"none","spec":""}]`}[k] {
+	for _, k := range []string{"min_version", "latest_version", "latest_name", "update_url", "apk_url", "apk_urls", "daily_quota_mb", "yt_strategies"} {
+		if d, _ := got.value(k, ""); d != map[string]string{"min_version": "114", "latest_version": "115", "latest_name": "0.5.8", "update_url": "https://o.github.io/r/", "apk_url": releasesPrefix + "latest/download/split-vpn.apk", "apk_urls": "[]", "daily_quota_mb": "1024", "yt_strategies": `[{"id":"none","spec":""}]`}[k] {
 			t.Errorf("%s: default %q", k, d)
 		}
 	}

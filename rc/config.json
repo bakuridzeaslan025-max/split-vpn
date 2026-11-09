@@ -1,8 +1,14 @@
 {
   "min_version": 119,
   "latest_version": 138,
+  "latest_name": "0.12.3",
   "update_url": "https://bakuridzeaslan025-max.github.io/split-vpn/",
   "apk_url": "https://github.com/bakuridzeaslan025-max/split-vpn/releases/latest/download/split-vpn.apk",
+  "apk_urls": [
+    {"base": "https://bakuridzeaslan025-max.github.io/split-vpn-dl/", "probe": true},
+    {"base": "https://split-vpn-dl-547fcb.gitlab.io/", "probe": true},
+    {"base": "https://github.com/bakuridzeaslan025-max/split-vpn/releases/latest/download/", "probe": false}
+  ],
   "daily_quota_mb": 2048,
   "dial_event_bp": 1000,
   "yt_strategies": [

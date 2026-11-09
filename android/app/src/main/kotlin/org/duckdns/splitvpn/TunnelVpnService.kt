@@ -146,7 +146,10 @@ internal object GoBackend : Backend {
         val quota = rc.getValue("daily_quota_mb").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString()?.trim()?.toLongOrNull()
         val yt = rc.getValue("yt_strategies").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString()
         val bp = RemoteConfig.parseDialEventBp(rc.getValue("dial_event_bp").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString())
-        return RcValues(rc.getString("endpoints"), rc.getLong("min_version"), rc.getLong("latest_version"), rc.getString("update_url"), quota, yt, rc.getString("apk_url"), bp)
+        return RcValues(
+            rc.getString("endpoints"), rc.getLong("min_version"), rc.getLong("latest_version"), rc.getString("update_url"), quota, yt,
+            rc.getString("apk_url"), bp, rc.getString("apk_urls"), rc.getString("latest_name"),
+        )
     }
     override fun setQuota(used: Long, limit: Long) = tunnel.Tunnel.setQuota(used, limit)
     override fun usage() = tunnel.Tunnel.usage()

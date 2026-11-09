@@ -1,7 +1,8 @@
 // Tests for ../download.js: node:test only, no DOM and no npm packages (make -C android page-test).
 import {test, mock, afterEach} from "node:test";
 import assert from "node:assert/strict";
-import {probe, pickUrl, attach, releaseInfo, lastResort, MIRRORS, FIXED, PROBE_FILE} from "../download.js";
+import {readFileSync} from "node:fs";
+import {probe, decide, pickUrl, attach, releaseInfo, lastResort, MIRRORS, FIXED, PROBE_FILE} from "../download.js";
 
 const A = {base: "https://a.test/", probe: true};
 const B = {base: "https://b.test/", probe: true};
@@ -157,6 +158,21 @@ test("probe: 16 700 bytes and then a stall fails once aborted", async () => {
   await flush();
   assert.equal(result.value, false);
   assert.equal(state.ended, true);
+});
+
+// Shared with the app's UpdaterTest: the page and self-update choose alike.
+test("decide: the shared vectors", () => {
+  const vec = JSON.parse(readFileSync(new URL("./pick-vectors.json", import.meta.url)));
+  for (const c of vec.cases) {
+    const versioned = c.versioned === undefined ? vec.versioned : c.versioned;
+    const probes = c.probes.map(p => ({...p, heads: {[versioned]: p.heads.v, [FIXED]: p.heads.f}}));
+    const got = decide({mirrors: vec.mirrors, versioned, probes});
+    assert.deepEqual(got === undefined ? "pending" : got, c.want, c.name);
+  }
+});
+
+test("pickUrl: no mirror to probe decides at once", async () => {
+  assert.deepEqual(await pick({}, {mirrors: [R]}).result, {url: null, checked: false});
 });
 
 test("pickUrl: traffic is one probe.bin GET per Pages mirror and HEADs for the names", async () => {

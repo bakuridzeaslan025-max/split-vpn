@@ -59,7 +59,7 @@ class MainActivity : Activity() {
         const val EXTRA_UPDATE = "update"
 
         // Swapped in unit tests.
-        internal var update: (android.content.Context, Long, String, (Int) -> Unit) -> Updater.Result = Updater::update
+        internal var update: (android.content.Context, Versions, (Int) -> Unit) -> Updater.Result = Updater::update
         internal var background: (Runnable) -> Unit = { Thread(it, "Update").start() }
 
         // Set on the first auto-switch to the keep-alive tab so it never repeats.
@@ -649,13 +649,13 @@ class MainActivity : Activity() {
     private fun startUpdate() {
         val v = versions ?: return
         // Self-update turned off in Remote Config: no report, just the page.
-        if (v.apk.isEmpty()) return openDownloadPage()
+        if (!Updater.enabled(v)) return openDownloadPage()
         if (updating) return
         updating = true
         progress = -1
         render()
         background(Runnable {
-            val r = update(applicationContext, v.latest, v.apk) { p ->
+            val r = update(applicationContext, v) { p ->
                 runOnUiThread {
                     if (!updating || isDestroyed) return@runOnUiThread
                     progress = p
@@ -665,9 +665,9 @@ class MainActivity : Activity() {
             }
             // Here, not in onUpdateResult: that one is skipped for a destroyed activity.
             when (r) {
-                Updater.Result.STARTED -> Updater.event(applicationContext, "started")
+                Updater.Result.STARTED -> Updater.event(applicationContext, "started", Updater.lastDetail, Updater.lastMirror)
                 Updater.Result.NEED_PERMISSION -> Updater.event(applicationContext, "need_permission")
-                Updater.Result.FAILED -> Updater.event(applicationContext, "failed", Updater.lastKind?.tag)
+                Updater.Result.FAILED -> Updater.event(applicationContext, "failed", Updater.lastDetail ?: Updater.lastKind?.tag, Updater.lastMirror)
                 Updater.Result.BAD_URL -> Updater.event(applicationContext, "failed", "url")
                 Updater.Result.UP_TO_DATE, Updater.Result.DISABLED, Updater.Result.BUSY -> Unit
             }
@@ -677,7 +677,8 @@ class MainActivity : Activity() {
 
     private fun onUpdateResult(r: Updater.Result, v: Versions) {
         updating = false
-        val line = "update: $r" + (Updater.lastFailure?.takeIf { r == Updater.Result.FAILED || r == Updater.Result.BAD_URL }?.let { " ($it)" } ?: "")
+        val line = "update: $r" + (Updater.lastFailure?.takeIf { r == Updater.Result.FAILED || r == Updater.Result.BAD_URL }?.let { " ($it)" } ?: "") +
+            (Updater.lastDetail?.takeIf { r == Updater.Result.FAILED || r == Updater.Result.STARTED }?.let { ", mirrors $it" } ?: "")
         AppLog.i(line)
         vpn.log(line)
         when (r) {

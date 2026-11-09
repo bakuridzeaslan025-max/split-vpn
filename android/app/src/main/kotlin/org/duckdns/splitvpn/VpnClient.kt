@@ -40,6 +40,8 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
         const val KEY_LATEST_VERSION = "latest_version"
         const val KEY_UPDATE_URL = "update_url"
         const val KEY_APK_URL = "apk_url"
+        const val KEY_APK_URLS = "apk_urls"
+        const val KEY_LATEST_NAME = "latest_name"
         const val KEY_USED = "used"
         const val KEY_LIMIT = "limit"
         const val KEY_DAY = "day"
@@ -58,6 +60,8 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
                     putLong(KEY_LATEST_VERSION, versions.latest)
                     putString(KEY_UPDATE_URL, versions.url)
                     putString(KEY_APK_URL, versions.apk)
+                    putString(KEY_APK_URLS, versions.apks)
+                    putString(KEY_LATEST_NAME, versions.name)
                     putLong(KEY_USED, usage.used)
                     putLong(KEY_LIMIT, usage.limit)
                     putLong(KEY_DAY, usage.day)
@@ -75,7 +79,10 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
                 msg.data.getStringArrayList(KEY_LOG) ?: emptyList(),
                 msg.data.getLong(KEY_SINCE),
                 Waiting.values().getOrNull(msg.data.getInt(KEY_WAITING, -1)),
-                Versions(msg.data.getLong(KEY_MIN_VERSION), msg.data.getLong(KEY_LATEST_VERSION), msg.data.getString(KEY_UPDATE_URL).orEmpty(), msg.data.getString(KEY_APK_URL).orEmpty()),
+                Versions(
+                    msg.data.getLong(KEY_MIN_VERSION), msg.data.getLong(KEY_LATEST_VERSION), msg.data.getString(KEY_UPDATE_URL).orEmpty(),
+                    msg.data.getString(KEY_APK_URL).orEmpty(), msg.data.getString(KEY_APK_URLS).orEmpty(), msg.data.getString(KEY_LATEST_NAME).orEmpty(),
+                ),
                 Usage(msg.data.getLong(KEY_USED), msg.data.getLong(KEY_LIMIT), msg.data.getLong(KEY_DAY)),
                 msg.data.getString(KEY_DIRECT),
             )

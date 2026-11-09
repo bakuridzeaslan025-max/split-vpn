@@ -78,6 +78,8 @@ RC_RUN = SA=$$($(call RC_PROP,rc\.sa)); \
 		-w /rc/tool $(GO_ALPINE) go run .
 
 .PHONY: rc-push rc-pull rc-rollback rc-test rc-check rc-promote
+# The build in the tree: rc-push right after its publish-local must carry its versionName.
+rc-push: RC_ARGS = -e APP_VERSION=$(VERSION_CODE):$(VERSION_NAME)
 rc-push:
 	@$(RC_RUN) push
 
@@ -123,6 +125,7 @@ page-test:
 # Then rc-push with latest_version of the new release.
 REPO := bakuridzeaslan025-max/split-vpn
 VERSION_NAME := $(shell sed -n 's/^ *versionName = "\(.*\)"/\1/p' app/build.gradle.kts)
+VERSION_CODE := $(shell sed -n 's/^ *versionCode = \([0-9]*\).*/\1/p' app/build.gradle.kts)
 REL_APK := build/split-vpn-$(VERSION_NAME).apk
 REL_ASSETS := $(REL_APK) $(REL_APK).sha256 build/split-vpn.apk
 # SHA-256 of the upload key's certificate, also in README.
