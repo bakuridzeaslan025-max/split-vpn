@@ -96,13 +96,13 @@ class MainActivity : Activity() {
     private val vendors = listOf(
         Vendor(
             listOf("xiaomi", "redmi", "poco"),
-            "Автозапуск → включить для Split VPN. Экономия энергии → «Без ограничений». " +
-                "В недавних приложениях: зажать карточку → закрепить (замок), иначе «Закрыть всё» убьёт VPN.",
+            "Автозапуск\u00A0→ включить для Split VPN. Экономия энергии\u00A0→ «Без ограничений». " +
+                "В недавних приложениях: зажать карточку\u00A0→ закрепить (замок), иначе «Закрыть всё» убьёт VPN.",
             listOf(ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")),
         ),
         Vendor(
             listOf("huawei", "honor"),
-            "Запуск приложений → Split VPN → «Управлять вручную» → включить все три пункта.",
+            "Запуск приложений\u00A0→ Split VPN\u00A0→ «Управлять вручную»\u00A0→ включить все три пункта.",
             listOf(
                 ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"),
                 ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.optimize.process.ProtectActivity"),
@@ -110,7 +110,7 @@ class MainActivity : Activity() {
         ),
         Vendor(
             listOf("oppo", "realme", "oneplus"),
-            "Автозапуск → включить. Батарея → Split VPN → «Разрешить фоновую активность».",
+            "Автозапуск\u00A0→ включить. Батарея\u00A0→ Split VPN\u00A0→ «Разрешить фоновую активность».",
             listOf(
                 ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity"),
                 ComponentName("com.oppo.safe", "com.oppo.safe.permission.startup.StartupAppListActivity"),
@@ -119,12 +119,12 @@ class MainActivity : Activity() {
         ),
         Vendor(
             listOf("vivo", "iqoo"),
-            "Автозапуск → включить. Батарея → «Высокое энергопотребление в фоне» → разрешить.",
+            "Автозапуск\u00A0→ включить. Батарея\u00A0→ «Высокое энергопотребление в фоне»\u00A0→ разрешить.",
             listOf(ComponentName("com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity")),
         ),
         Vendor(
             listOf("samsung"),
-            "Батарея → Split VPN → «Без ограничений». Убрать из «Спящих приложений».",
+            "Батарея\u00A0→ Split VPN\u00A0→ «Без ограничений». Убрать из «Спящих приложений».",
             listOf(ComponentName("com.samsung.android.lool", "com.samsung.android.sm.ui.battery.BatteryActivity")),
         ),
     )
@@ -327,7 +327,7 @@ class MainActivity : Activity() {
         Updater.takePending(this)?.let { runCatching { startActivity(it) } }
         val ignoring = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
         findViewById<TextView>(R.id.batteryStatus).text =
-            if (ignoring) "✓ Оптимизация батареи отключена" else "Оптимизация батареи включена"
+            if (ignoring) "✓\u00A0Оптимизация батареи отключена" else "Оптимизация батареи включена"
         findViewById<View>(R.id.batteryButton).visibility = if (ignoring) View.GONE else View.VISIBLE
     }
 
@@ -407,7 +407,7 @@ class MainActivity : Activity() {
         val pings = mutableMapOf<String, String>()
         for (line in log) {
             val m = PROBE_LINE.find(line) ?: continue
-            pings[m.groupValues[1]] = m.groupValues[2]
+            pings[m.groupValues[1]] = m.groupValues[2].replace(' ', '\u00A0')
         }
         val list = findViewById<LinearLayout>(R.id.serviceList)
         for ((i, svc) in Services.ALL.withIndex()) {
@@ -793,16 +793,17 @@ class MainActivity : Activity() {
             }
         }, LinearLayout.LayoutParams(-1, dp(46)))
         menu.addView(TextView(this).apply {
-            text = "Политика конфиденциальности ↗"
+            text = "Политика конфиденциальности\u00A0↗"
             textSize = 14f
             gravity = Gravity.CENTER_VERTICAL
             setTextColor(ink)
-            setPadding(side, 0, side, 0)
+            setPadding(side, dp(6), side, dp(6))
+            minHeight = dp(46)
             setOnClickListener {
                 popup.dismiss()
                 startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(PRIVACY_URL)))
             }
-        }, LinearLayout.LayoutParams(-1, dp(46)))
+        }, LinearLayout.LayoutParams(-1, -2))
         menu.addView(TextView(this).apply {
             text = "Версия ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
             textSize = 10f
@@ -879,7 +880,7 @@ class MainActivity : Activity() {
             setPadding(side, dp(6), side, dp(6))
             minimumHeight = dp(46)
             addView(TextView(this@MainActivity).apply {
-                text = "Уведомление в шторке ↗"
+                text = "Уведомление в шторке\u00A0↗"
                 textSize = 14f
                 setTextColor(ink)
             })
