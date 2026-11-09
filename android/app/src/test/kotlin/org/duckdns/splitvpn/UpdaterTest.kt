@@ -634,6 +634,8 @@ class UpdaterTest {
         val ms = mirrors(mapOf("/a/split-vpn.apk" to { _, s -> s.reply("HTTP/1.1 404 Not Found\r\nContent-Length: 0") }))
         val s = select(ms, versioned = null)
         assertEquals(listOf(Updater.Candidate(ms[1].base + Updater.FIXED, 2)), s.decision.candidates)
+        // The choice can come before a's 404 is recorded; backups() waits for every probe.
+        s.backups()
         assertEquals(mapOf(1 to "head404"), s.tags())
     }
 
