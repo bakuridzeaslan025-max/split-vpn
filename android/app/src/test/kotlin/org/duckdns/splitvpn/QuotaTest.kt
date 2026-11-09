@@ -295,10 +295,10 @@ class QuotaTest {
 
     @Test
     fun formatsForPeople() {
-        assertEquals("0 МБ", Quota.format(0))
-        assertEquals("350 МБ", Quota.format(350 * mb))
-        assertEquals("1,2 ГБ", Quota.format(1229 * mb))
-        assertEquals("2 ГБ", Quota.format(2048 * mb))
+        assertEquals("0\u00A0МБ", Quota.format(0))
+        assertEquals("350\u00A0МБ", Quota.format(350 * mb))
+        assertEquals("1,2\u00A0ГБ", Quota.format(1229 * mb))
+        assertEquals("2\u00A0ГБ", Quota.format(2048 * mb))
     }
 
     private fun launchUi(): MainActivity {
@@ -312,7 +312,7 @@ class QuotaTest {
 
     private fun MainActivity.assertQuotaOutUi() {
         assertEquals(
-            "Сегодня через VPN: 2 ГБ из 2 ГБ, снова после 00:00",
+            "Сегодня через VPN: 2\u00A0ГБ из 2\u00A0ГБ, снова после 00:00",
             findViewById<TextView>(R.id.usageText).text.toString(),
         )
         assertEquals(getColor(R.color.simple_blue), findViewById<TextView>(R.id.hintText).currentTextColor)
@@ -322,7 +322,7 @@ class QuotaTest {
     }
 
     private fun MainActivity.assertFreshDayUi() {
-        assertEquals("Сегодня через VPN: 0 МБ из 2 ГБ", findViewById<TextView>(R.id.usageText).text.toString())
+        assertEquals("Сегодня через VPN: 0\u00A0МБ из 2\u00A0ГБ", findViewById<TextView>(R.id.usageText).text.toString())
         assertEquals(View.GONE, findViewById<View>(R.id.errorBox).visibility)
         assertEquals("Подключить", findViewById<TextView>(R.id.buttonLabel).text.toString())
         assertTrue(findViewById<View>(R.id.toggleButton).isEnabled)
@@ -360,7 +360,7 @@ class QuotaTest {
     fun usageLineHasNoMidnightNoteBeforeTheLimit() {
         Quota.save(app, 300 * mb, day)
         val a = launchUi()
-        assertEquals("Сегодня через VPN: 300 МБ из 2 ГБ", a.findViewById<TextView>(R.id.usageText).text.toString())
+        assertEquals("Сегодня через VPN: 300\u00A0МБ из 2\u00A0ГБ", a.findViewById<TextView>(R.id.usageText).text.toString())
         assertEquals("Подключить", a.findViewById<TextView>(R.id.buttonLabel).text.toString())
         assertTrue(a.findViewById<View>(R.id.toggleButton).isEnabled)
     }

@@ -105,7 +105,7 @@ class MainActivityTest {
     fun pingFromLogShowsOnConnectedService() {
         val a = launch()
         connect("Telegram: 817 мс")
-        assertEquals("817 мс", a.note("telegram"))
+        assertEquals("817\u00A0мс", a.note("telegram"))
     }
 
     @Test
@@ -126,7 +126,7 @@ class MainActivityTest {
     fun lastProbeWins() {
         val a = launch()
         connect("Telegram: 817 мс", "Telegram: ошибка: TimeoutException", "Telegram: 42 мс")
-        assertEquals("42 мс", a.note("telegram"))
+        assertEquals("42\u00A0мс", a.note("telegram"))
     }
 
     @Test
@@ -151,7 +151,7 @@ class MainActivityTest {
         val a = launch()
         Services.ALL.forEach { prefs.edit().putBoolean(Services.prefKey(it.id), true).commit() }
         connect(*Services.ALL.map { "${it.title}: 100 мс" }.toTypedArray())
-        for (svc in Services.ALL) assertEquals(svc.id, "100 мс", a.note(svc.id))
+        for (svc in Services.ALL) assertEquals(svc.id, "100\u00A0мс", a.note(svc.id))
     }
 
     @Test
@@ -344,7 +344,7 @@ class MainActivityTest {
         prefs.edit().putBoolean(Services.prefKey("youtube"), true).commit()
         val a = launch()
         connect("YouTube: 120 мс")
-        assertEquals("120 мс", a.note("youtube"))
+        assertEquals("120\u00A0мс", a.note("youtube"))
         verdict("testing")
         assertEquals("ищу обход…", a.note("youtube"))
         verdict("works")
@@ -356,7 +356,7 @@ class MainActivityTest {
         assertEquals("YouTube напрямую", a.note("youtube"))
         TunnelState.setWaiting(null)
         verdict("fails")
-        assertEquals("120 мс", a.note("youtube"))
+        assertEquals("120\u00A0мс", a.note("youtube"))
         assertEquals(app.getColor(R.color.simple_dim), a.row("youtube").findViewById<TextView>(R.id.note).currentTextColor)
         verdict("works")
         TunnelState.set(VpnState.DISCONNECTED)

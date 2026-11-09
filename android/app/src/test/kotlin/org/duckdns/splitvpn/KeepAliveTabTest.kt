@@ -80,7 +80,7 @@ class KeepAliveTabTest {
         shadowOf(app.getSystemService(PowerManager::class.java))
             .setIgnoringBatteryOptimizations(app.packageName, true)
         val activity = open()
-        assertEquals("✓ Оптимизация батареи отключена", activity.findViewById<TextView>(R.id.batteryStatus).text.toString())
+        assertEquals("✓\u00A0Оптимизация батареи отключена", activity.findViewById<TextView>(R.id.batteryStatus).text.toString())
         assertEquals(View.GONE, activity.findViewById<View>(R.id.batteryButton).visibility)
     }
 }
