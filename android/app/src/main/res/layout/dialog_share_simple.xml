@@ -61,5 +61,5 @@
         android:fontFamily="sans-serif-medium"
         android:text="Отправить ссылку"
         android:textSize="15sp"
-        android:textColor="#FFFFFF" />
+        android:textColor="@color/on_blue" />
 </LinearLayout>

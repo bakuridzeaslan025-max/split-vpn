@@ -53,6 +53,6 @@
             android:fontFamily="sans-serif-medium"
             android:text="Продолжить"
             android:textSize="14sp"
-            android:textColor="#FFFFFF" />
+            android:textColor="@color/on_blue" />
     </LinearLayout>
 </LinearLayout>

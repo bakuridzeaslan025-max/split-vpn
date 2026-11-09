@@ -69,6 +69,20 @@ class KeepAliveTabTest {
     }
 
     @Test
+    fun loneStepHasNoNumber() {
+        ReflectionHelpers.setStaticField(Build::class.java, "MANUFACTURER", "Google")
+        assertEquals(View.GONE, open().findViewById<View>(R.id.batteryStepNum).visibility)
+    }
+
+    @Test
+    fun twoStepsAreNumbered() {
+        ReflectionHelpers.setStaticField(Build::class.java, "MANUFACTURER", "Xiaomi")
+        val activity = open()
+        assertEquals(View.VISIBLE, activity.findViewById<View>(R.id.batteryStepNum).visibility)
+        assertEquals(View.VISIBLE, activity.findViewById<View>(R.id.vendorBlock).visibility)
+    }
+
+    @Test
     fun batteryBlockAsksWhileOptimizationIsOn() {
         val activity = open()
         assertEquals("Оптимизация батареи включена", activity.findViewById<TextView>(R.id.batteryStatus).text.toString())
