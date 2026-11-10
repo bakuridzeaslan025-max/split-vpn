@@ -417,6 +417,12 @@ class TunnelVpnService : VpnService() {
         throw refusal ?: last
     }
 
+    // The UI's switch and the start thread both set Go: the saved value read and set
+    // in one go, so a switch during the start is not undone by the START's value.
+    private val adBlockLock = Any()
+
+    private fun applyAdBlock() = synchronized(adBlockLock) { backend.setAdBlock(vpnPrefs.getBoolean(KEY_ADBLOCK, false)) }
+
     private val clients = mutableSetOf<Messenger>()
     private val messenger = Messenger(Handler(Looper.getMainLooper()) { msg ->
         when (msg.what) {
@@ -429,6 +435,16 @@ class TunnelVpnService : VpnService() {
             }
             VpnClient.MSG_UNREGISTER -> msg.replyTo?.let { clients -= it }
             VpnClient.MSG_LOG -> msg.data.getString(VpnClient.KEY_LINE)?.let { AppLog.i("ui: $it") }
+            // Go checks the flag on every DNS query: no restart.
+            VpnClient.MSG_ADBLOCK -> {
+                val on = msg.data.getBoolean(VpnClient.KEY_ADBLOCK)
+                synchronized(adBlockLock) {
+                    vpnPrefs.edit().putBoolean(KEY_ADBLOCK, on).apply()
+                    backend.setAdBlock(on)
+                }
+                backend.userProperty(this, "adblock", if (on) "on" else "off")
+                AppLog.i("adblock: $on")
+            }
         }
         true
     })
@@ -1236,7 +1252,7 @@ class TunnelVpnService : VpnService() {
                 backend.setQuota(used, limitNow)
                 if (Quota.limit(this) != limitNow) mainHandler.post { onNewLimit() }
                 Quota.save(this, used, day)
-                backend.setAdBlock(adBlock)
+                applyAdBlock()
                 backend.setDirect(direct)
                 directOn = direct
                 try {
