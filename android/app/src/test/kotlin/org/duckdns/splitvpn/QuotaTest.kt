@@ -50,6 +50,7 @@ class QuotaTest {
     @After
     fun tearDown() {
         Quota.today = { java.time.LocalDate.now().toEpochDay() }
+        MainActivity.resetUpdateState()
         be.release()
         awaitServiceThreads()
         controller.destroy()

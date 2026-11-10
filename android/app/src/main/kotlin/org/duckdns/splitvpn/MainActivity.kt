@@ -61,6 +61,24 @@ class MainActivity : Activity() {
         internal var update: (android.content.Context, Versions, (Int) -> Unit) -> Updater.Result = Updater::update
         internal var background: (Runnable) -> Unit = { Thread(it, "Update").start() }
 
+        // The download outlives a recreated activity (theme, rotation, the
+        // system's night mode): its state is the process's, shown by the live one.
+        internal var updating = false
+        // Percent of the download, -1 while the size is unknown.
+        internal var progress = -1
+        private var shown: java.lang.ref.WeakReference<MainActivity>? = null
+        private val live get() = shown?.get()
+
+        internal fun resetUpdateState() {
+            updating = false
+            progress = -1
+            shown = null
+        }
+
+        private fun onMain(r: () -> Unit) {
+            if (Looper.myLooper() == Looper.getMainLooper()) r() else Handler(Looper.getMainLooper()).post(r)
+        }
+
         // Set on the first auto-switch to the keep-alive tab so it never repeats.
         private const val KEY_KEEPALIVE_SHOWN = "keepalive_shown"
         private const val KEY_TAB = "tab"
@@ -182,9 +200,6 @@ class MainActivity : Activity() {
     // Go's verdict on direct YouTube, see VpnClient.
     private var direct: String? = null
     private var started = false
-    private var updating = false
-    // Percent of the download, -1 while the size is unknown.
-    private var progress = -1
     private var installDialog: Dialog? = null
     private var updateWhenKnown = false
 
@@ -255,6 +270,7 @@ class MainActivity : Activity() {
             ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
         setContentView(R.layout.main_simple)
+        shown = java.lang.ref.WeakReference(this)
 
         findViewById<View>(R.id.root).setOnApplyWindowInsetsListener { v, insets ->
             // WindowInsets.Type is API 30 (and Insets 29); minSdk is 26.
@@ -430,11 +446,15 @@ class MainActivity : Activity() {
         shareDialog?.dismiss()
         installDialog?.dismiss()
         menuPopup?.dismiss()
+        if (shown?.get() === this) shown = null
         super.onDestroy()
     }
 
     override fun onStart() {
         super.onStart()
+        // A second instance (launcher, the update notification) may have taken it and gone.
+        shown = java.lang.ref.WeakReference(this)
+        renderBanner()
         vpn.bind()
         started = true
         ticker.post(tick)
@@ -879,23 +899,31 @@ class MainActivity : Activity() {
         updating = true
         progress = -1
         render()
+        // Not the activity: a recreated one would stay in memory for the whole download.
+        val app = applicationContext
         background(Runnable {
-            val r = update(applicationContext, v) { p ->
-                runOnUiThread {
-                    if (!updating || isDestroyed) return@runOnUiThread
-                    progress = p
-                    renderBanner()
+            var r = Updater.Result.FAILED
+            try {
+                r = update(app, v) { p ->
+                    onMain {
+                        if (updating) {
+                            progress = p
+                            live?.renderBanner()
+                        }
+                    }
                 }
+                // Here, not in onUpdateResult: that one is skipped with no activity on screen.
+                when (r) {
+                    Updater.Result.STARTED -> Updater.event(app, "started", Updater.lastDetail, Updater.lastMirror)
+                    Updater.Result.NEED_PERMISSION -> Updater.event(app, "need_permission")
+                    Updater.Result.FAILED -> Updater.event(app, "failed", Updater.lastDetail ?: Updater.lastKind?.tag, Updater.lastMirror)
+                    Updater.Result.BAD_URL -> Updater.event(app, "failed", "url")
+                    Updater.Result.UP_TO_DATE, Updater.Result.DISABLED, Updater.Result.BUSY -> Unit
+                }
+            } finally {
+                // Or "updating" sticks for the life of the process.
+                onMain { live?.onUpdateResult(r, v) ?: run { updating = false } }
             }
-            // Here, not in onUpdateResult: that one is skipped for a destroyed activity.
-            when (r) {
-                Updater.Result.STARTED -> Updater.event(applicationContext, "started", Updater.lastDetail, Updater.lastMirror)
-                Updater.Result.NEED_PERMISSION -> Updater.event(applicationContext, "need_permission")
-                Updater.Result.FAILED -> Updater.event(applicationContext, "failed", Updater.lastDetail ?: Updater.lastKind?.tag, Updater.lastMirror)
-                Updater.Result.BAD_URL -> Updater.event(applicationContext, "failed", "url")
-                Updater.Result.UP_TO_DATE, Updater.Result.DISABLED, Updater.Result.BUSY -> Unit
-            }
-            runOnUiThread { if (!isDestroyed) onUpdateResult(r, v) }
         })
     }
 

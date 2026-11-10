@@ -77,6 +77,7 @@ class MainActivityTest {
         Versions.debug = true
         MainActivity.update = Updater::update
         MainActivity.background = { Thread(it, "Update").start() }
+        MainActivity.resetUpdateState()
         activity?.destroy()
         service.destroy()
         ShadowLooper.idleMainLooper()
@@ -720,6 +721,50 @@ class MainActivityTest {
         assertTrue(a.findViewById<View>(R.id.bannerAction).isEnabled)
         assertEquals(View.VISIBLE, a.findViewById<View>(R.id.bannerClose).visibility)
         assertNull(nextActivity())
+    }
+
+    // A theme switch mid-download: the new activity keeps the progress and gets the result.
+    @Test
+    fun updateProgressSurvivesARecreatedActivity() {
+        Versions.debug = false
+        val report = java.util.concurrent.atomic.AtomicReference<(Int) -> Unit>()
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val started = java.util.concurrent.CountDownLatch(1)
+        val done = java.util.concurrent.CountDownLatch(1)
+        MainActivity.update = { _, _, r ->
+            calls.incrementAndGet()
+            report.set(r)
+            started.countDown()
+            done.await()
+            Updater.Result.STARTED
+        }
+        MainActivity.background = { Thread(it, "Update").start() }
+        try {
+            rc(latest = newer)
+            val a = launch()
+            a.findViewById<View>(R.id.bannerAction).performClick()
+            assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            activity!!.recreate()
+            ShadowLooper.idleMainLooper()
+            val b = activity!!.get()
+            assertTrue(a !== b)
+            assertEquals("Скачивается…", b.text(R.id.bannerAction))
+            b.findViewById<View>(R.id.bannerAction).performClick()
+            report.get()(45)
+            ShadowLooper.idleMainLooper()
+            assertEquals("Скачивается… 45%", b.text(R.id.bannerAction))
+            done.countDown()
+            val end = System.nanoTime() + 5_000_000_000
+            while (MainActivity.updating && System.nanoTime() < end) {
+                Thread.sleep(5)
+                ShadowLooper.idleMainLooper()
+            }
+            assertFalse(MainActivity.updating)
+            assertEquals(1, calls.get())
+            assertEquals("Обновить", b.text(R.id.bannerAction))
+        } finally {
+            done.countDown()
+        }
     }
 
     private fun continueHint() {
