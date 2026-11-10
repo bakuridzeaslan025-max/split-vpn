@@ -339,34 +339,9 @@
                         android:id="@+id/vendorSteps"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="6dp"
+                        android:layout_marginTop="10dp"
                         android:orientation="vertical" />
 
-                    <LinearLayout
-                        android:id="@+id/vendorButton"
-                        android:layout_width="wrap_content"
-                        android:layout_height="36dp"
-                        android:layout_marginTop="12dp"
-                        android:gravity="center_vertical"
-                        android:paddingStart="16dp"
-                        android:paddingEnd="14dp">
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:fontFamily="sans-serif-medium"
-                            android:text="Открыть настройки"
-                            android:textSize="14sp"
-                            android:textColor="@color/on_surface" />
-
-                        <ImageView
-                            android:layout_width="18dp"
-                            android:layout_height="18dp"
-                            android:layout_marginStart="6dp"
-                            android:src="@drawable/ic_open_in_new"
-                            android:tint="@color/on_surface"
-                            android:importantForAccessibility="no" />
-                    </LinearLayout>
                 </LinearLayout>
             </LinearLayout>
 

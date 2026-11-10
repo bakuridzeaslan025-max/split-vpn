@@ -113,7 +113,15 @@ class MainActivity : Activity() {
         "cloudflare" to listOf("AI", "DC"),
     )
 
-    private data class Vendor(val match: List<String>, val steps: List<String>, val intents: List<ComponentName>)
+    // battery: a MIUI power page, which reads the package from the battery request's
+    // data and extras. Other pages get a bare component: Android 13+ drops an explicit
+    // intent that matches none of the target's filters.
+    private class Page(val component: ComponentName, val battery: Boolean = false)
+
+    // pages: the first that opens wins; none listed means the app's own system page.
+    private class Link(val label: String, val pages: List<Page> = emptyList())
+    private class Step(val text: String, val link: Link? = null)
+    private class Vendor(val match: List<String>, val steps: List<Step>)
 
     // Vendor ROMs (MIUI, EMUI, ColorOS, One UI…) kill foreground services on
     // "clear all" or in battery saver. Nothing in code prevents that; the user
@@ -122,50 +130,75 @@ class MainActivity : Activity() {
         Vendor(
             listOf("xiaomi", "redmi", "poco"),
             listOf(
-                "Автозапуск → включить для Split VPN",
-                "Экономия энергии → «Без ограничений»",
-                "В недавних приложениях зажмите карточку Split VPN и закрепите замком — иначе «Закрыть всё» выключит VPN",
+                Step(
+                    "Автозапуск → включить для Split VPN",
+                    Link("Открыть автозапуск", listOf(Page(ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")))),
+                ),
+                // MIUI's own power keeper, apart from Android's whitelist the battery card checks.
+                Step(
+                    "Экономия энергии → «Без ограничений»",
+                    Link(
+                        "Открыть экономию энергии",
+                        listOf(
+                            // HyperOS: where it routes ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS.
+                            Page(ComponentName("com.miui.securitycenter", "com.miui.powercenter.legacypowerrank.PowerDetailActivity"), battery = true),
+                            Page(ComponentName("com.miui.powerkeeper", "com.miui.powerkeeper.ui.HiddenAppsConfigActivity"), battery = true),
+                        ),
+                    ),
+                ),
+                Step("В недавних приложениях зажмите карточку Split VPN и закрепите замком — иначе «Закрыть всё» выключит VPN"),
             ),
-            listOf(ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")),
         ),
         Vendor(
             listOf("huawei", "honor"),
             listOf(
-                "Запуск приложений → Split VPN",
-                "«Управлять вручную» → включить все три пункта",
-            ),
-            listOf(
-                ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"),
-                ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.optimize.process.ProtectActivity"),
+                Step(
+                    "Запуск приложений → Split VPN → «Управлять вручную»",
+                    Link(
+                        "Открыть запуск приложений",
+                        listOf(
+                            Page(ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity")),
+                            Page(ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.optimize.process.ProtectActivity")),
+                        ),
+                    ),
+                ),
+                Step("Включите все три переключателя: автозапуск, косвенный запуск, работа в фоне"),
             ),
         ),
         Vendor(
             listOf("oppo", "realme", "oneplus"),
             listOf(
-                "Автозапуск → включить",
-                "Батарея → Split VPN → «Разрешить фоновую активность»",
-            ),
-            listOf(
-                ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity"),
-                ComponentName("com.oppo.safe", "com.oppo.safe.permission.startup.StartupAppListActivity"),
-                ComponentName("com.oneplus.security", "com.oneplus.security.chainlaunch.view.ChainLaunchAppListActivity"),
+                Step(
+                    "Автозапуск → включить для Split VPN",
+                    Link(
+                        "Открыть автозапуск",
+                        listOf(
+                            Page(ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity")),
+                            Page(ComponentName("com.oppo.safe", "com.oppo.safe.permission.startup.StartupAppListActivity")),
+                            Page(ComponentName("com.oneplus.security", "com.oneplus.security.chainlaunch.view.ChainLaunchAppListActivity")),
+                        ),
+                    ),
+                ),
+                Step("Батарея → Split VPN → «Разрешить работу в фоне»"),
             ),
         ),
         Vendor(
             listOf("vivo", "iqoo"),
             listOf(
-                "Автозапуск → включить",
-                "Батарея → «Высокое энергопотребление в фоне» → разрешить",
+                Step(
+                    "Автозапуск → включить для Split VPN",
+                    Link("Открыть автозапуск", listOf(Page(ComponentName("com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity")))),
+                ),
+                Step("Батарея → Split VPN → «Разрешить высокое энергопотребление в фоне»"),
             ),
-            listOf(ComponentName("com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity")),
         ),
+        // One UI keeps the app's battery mode on its app info page.
         Vendor(
             listOf("samsung"),
             listOf(
-                "Батарея → Split VPN → «Без ограничений»",
-                "Уберите Split VPN из «Спящих приложений»",
+                Step("Батарея → «Без ограничений»", Link("Открыть батарею приложения")),
+                Step("Там же отключите «Переводить в спящий режим»"),
             ),
-            listOf(ComponentName("com.samsung.android.lool", "com.samsung.android.sm.ui.battery.BatteryActivity")),
         ),
     )
 
@@ -331,9 +364,7 @@ class MainActivity : Activity() {
         findViewById<View>(R.id.batteryOk).background = box(getColor(R.color.surface_lowest), radius = 22f)
         findViewById<View>(R.id.batteryButton).apply {
             background = box(getColor(R.color.on_warning_container), radius = 18f)
-            setOnClickListener {
-                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
-            }
+            setOnClickListener { requestBatteryWhitelist() }
         }
         val vendor = vendors.firstOrNull { v -> v.match.any { Build.MANUFACTURER.lowercase().contains(it) } }
         val vendorBlock = findViewById<View>(R.id.vendorBlock)
@@ -343,10 +374,8 @@ class MainActivity : Activity() {
             vendorBlock.background = box(getColor(R.color.surface_lowest), radius = 22f)
             findViewById<TextView>(R.id.vendorTitle).text = "Настройки ${brandName()}"
             val steps = findViewById<LinearLayout>(R.id.vendorSteps)
-            for ((i, step) in vendor.steps.withIndex()) steps.addView(stepRow(i + 1, step))
-            findViewById<View>(R.id.vendorButton).apply {
-                background = box(getColor(R.color.surface_lowest), getColor(R.color.outline), 18f)
-                setOnClickListener { openVendorSettings(vendor) }
+            for ((i, step) in vendor.steps.withIndex()) {
+                steps.addView(stepRow(i + 1, step), LinearLayout.LayoutParams(-1, -2).apply { if (i > 0) topMargin = dp(14) })
             }
         }
 
@@ -406,21 +435,85 @@ class MainActivity : Activity() {
         )
     }
 
-    private fun stepRow(n: Int, text: String) = LinearLayout(this).apply {
+    private fun stepRow(n: Int, step: Step) = LinearLayout(this).apply {
         val ink = getColor(R.color.on_surface)
         addView(TextView(this@MainActivity).apply {
-            this.text = "$n."
+            text = "$n."
             textSize = 13f
             setTextColor(ink)
             setLineSpacing(0f, 1.45f)
             minWidth = dp(18)
         })
-        addView(TextView(this@MainActivity).apply {
-            this.text = text
+        val body = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+        body.addView(TextView(this@MainActivity).apply {
+            text = step.text
             textSize = 13f
             setTextColor(ink)
             setLineSpacing(0f, 1.45f)
-        }, LinearLayout.LayoutParams(0, -2, 1f))
+        })
+        // A page this phone lacks: no link at all rather than one that opens the wrong screen.
+        val link = step.link?.takeIf { opens(it) }
+        if (link != null) {
+            val view = linkView(link)
+            body.addView(view, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(6) })
+            // The whole step takes the tap (48dp+ without padding the link); the ripple stays on the link.
+            // Only on a new size: a fresh delegate mid-gesture would drop the finger's UP.
+            addOnLayoutChangeListener { row, l, t, r, b, ol, ot, or, ob ->
+                if (r - l != or - ol || b - t != ob - ot || row.touchDelegate == null) {
+                    row.touchDelegate = android.view.TouchDelegate(android.graphics.Rect(0, 0, r - l, b - t), view)
+                }
+            }
+        }
+        addView(body, LinearLayout.LayoutParams(0, -2, 1f))
+    }
+
+    private fun linkView(link: Link) = TextView(this).apply {
+        val ink = getColor(R.color.primary)
+        textSize = 14f
+        typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+        setTextColor(ink)
+        val icon = getDrawable(R.drawable.ic_open_in_new)!!.mutate().apply { setTint(ink) }
+        // 6dp after the last word, and never alone on a line: a word joiner holds it there.
+        // 16dp at the 14sp of the label: it grows with the font scale like the text.
+        val size = (textSize * 16 / 14).toInt()
+        val gap = android.graphics.drawable.InsetDrawable(icon, dp(6), 0, 0, 0).apply { setBounds(0, 0, dp(6) + size, size) }
+        text = android.text.SpannableString(link.label + "\u2060\uFFFC").apply {
+            setSpan(android.text.style.ImageSpan(gap, android.text.style.ImageSpan.ALIGN_BOTTOM), length - 1, length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        contentDescription = "${link.label}, откроются настройки телефона"
+        accessibilityDelegate = object : View.AccessibilityDelegate() {
+            override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+                super.onInitializeAccessibilityNodeInfo(host, info)
+                info.className = android.widget.Button::class.java.name
+            }
+        }
+        val ripple = TypedValue()
+        theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true)
+        setBackgroundResource(ripple.resourceId)
+        setOnClickListener { openLink(link) }
+    }
+
+    private fun opens(link: Link) = link.pages.isEmpty() || link.pages.any { canStart(it) }
+
+    // Resolving finds non-exported activities too, which only throw on start.
+    private fun canStart(page: Page) = packageManager.resolveActivity(Intent().setComponent(page.component), 0)
+        ?.activityInfo?.let { it.exported && it.permission == null } == true
+
+    private fun pageIntent(page: Page): Intent {
+        if (!page.battery) return Intent().setComponent(page.component)
+        return Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+            .setComponent(page.component)
+            .putExtra("package_name", packageName)
+            .putExtra("package_label", "Split VPN")
+    }
+
+    private fun openLink(link: Link) {
+        if (link.pages.isEmpty()) return openAppDetails()
+        openVendorSettings(link.pages)
+    }
+
+    private fun openAppDetails() {
+        runCatching { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -1049,13 +1142,22 @@ class MainActivity : Activity() {
     }
 
     // Vendor activities are undocumented and move between ROM versions;
-    // fall back to the app's own settings page. Not resolveActivity(): without
-    // <queries> it is always null on Android 11+, startActivity is not.
-    private fun openVendorSettings(v: Vendor) {
-        for (cn in v.intents) {
-            runCatching { startActivity(Intent().setComponent(cn)) }.onSuccess { return }
+    // fall back to the app's own settings page.
+    private fun openVendorSettings(pages: List<Page>) {
+        for (page in pages) {
+            if (canStart(page)) runCatching { startActivity(pageIntent(page)) }.onSuccess { return }
         }
-        startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        openAppDetails()
+    }
+
+    // HyperOS answers the request with its own battery page: "no restrictions" there
+    // sets its power keeper but not Android's whitelist this tab checks, so the
+    // warning stayed. Ask the stock dialog by name first.
+    private fun requestBatteryWhitelist() {
+        val request = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+        val stock = ComponentName("com.android.settings", "com.android.settings.fuelgauge.RequestIgnoreBatteryOptimizations")
+        runCatching { startActivity(Intent(request).setComponent(stock)) }.onSuccess { return }
+        runCatching { startActivity(request) }
     }
 
     private fun shareLog() {
