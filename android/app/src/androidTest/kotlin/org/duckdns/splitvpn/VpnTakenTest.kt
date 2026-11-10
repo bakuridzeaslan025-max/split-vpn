@@ -74,12 +74,12 @@ class VpnTakenTest {
         assertEquals(TunnelVpnService.ERR_VPN_TAKEN, n.notification.extras.getCharSequence("android.text")?.toString())
 
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-            val shown = "Разрешение VPN занято другим приложением. Нажмите «Подключить», чтобы вернуть его"
+            val shown = "Разрешение VPN занято другим приложением"
             assertTrue("no '$shown' on screen", vpn.device.wait(Until.hasObject(By.text(shown)), 10_000))
             scenario.onActivity { a ->
-                assertEquals(View.VISIBLE, a.findViewById<View>(R.id.errorBox).visibility)
-                assertEquals(shown, a.findViewById<TextView>(R.id.errorText).text.toString())
-                assertEquals(View.GONE, a.findViewById<View>(R.id.errorAction).visibility)
+                assertEquals(View.VISIBLE, a.findViewById<View>(R.id.banner).visibility)
+                assertEquals(shown, a.findViewById<TextView>(R.id.bannerText).text.toString())
+                assertEquals("Повторить", a.findViewById<TextView>(R.id.bannerAction).text.toString())
             }
         }
 
