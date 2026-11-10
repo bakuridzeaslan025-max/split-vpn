@@ -157,6 +157,8 @@ class MainActivity : Activity() {
                     Link(
                         "Открыть запуск приложений",
                         listOf(
+                            // MagicOS: Huawei's page under Honor's own package.
+                            Page(ComponentName("com.hihonor.systemmanager", "com.hihonor.systemmanager.startupmgr.ui.StartupNormalAppListActivity")),
                             Page(ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity")),
                             Page(ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.optimize.process.ProtectActivity")),
                         ),
@@ -174,6 +176,7 @@ class MainActivity : Activity() {
                         "Открыть автозапуск",
                         listOf(
                             Page(ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity")),
+                            Page(ComponentName("com.coloros.safecenter", "com.coloros.safecenter.startupapp.StartupAppListActivity")),
                             Page(ComponentName("com.oppo.safe", "com.oppo.safe.permission.startup.StartupAppListActivity")),
                             Page(ComponentName("com.oneplus.security", "com.oneplus.security.chainlaunch.view.ChainLaunchAppListActivity")),
                         ),
@@ -187,7 +190,15 @@ class MainActivity : Activity() {
             listOf(
                 Step(
                     "Автозапуск → включить для Split VPN",
-                    Link("Открыть автозапуск", listOf(Page(ComponentName("com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity")))),
+                    Link(
+                        "Открыть автозапуск",
+                        listOf(
+                            Page(ComponentName("com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity")),
+                            // iQOO and older Funtouch.
+                            Page(ComponentName("com.iqoo.secure", "com.iqoo.secure.ui.phoneoptimize.BgStartUpManager")),
+                            Page(ComponentName("com.iqoo.secure", "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity")),
+                        ),
+                    ),
                 ),
                 Step("Батарея → Split VPN → «Разрешить высокое энергопотребление в фоне»"),
             ),

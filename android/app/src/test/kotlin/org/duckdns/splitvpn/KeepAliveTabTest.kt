@@ -219,6 +219,17 @@ class KeepAliveTabTest {
         assertNull(started?.component)
     }
 
+    // Honor's MagicOS moved Huawei's page under its own package.
+    @Test
+    fun honorFindsItsOwnPackage() {
+        ReflectionHelpers.setStaticField(Build::class.java, "MANUFACTURER", "HONOR")
+        val honor = ComponentName("com.hihonor.systemmanager", "com.hihonor.systemmanager.startupmgr.ui.StartupNormalAppListActivity")
+        installed(honor)
+        val activity = open()
+        activity.link(0)!!.performClick()
+        assertEquals(honor, shadowOf(activity).nextStartedActivity?.component)
+    }
+
     @Test
     fun samsungLinksTheAppsOwnPage() {
         ReflectionHelpers.setStaticField(Build::class.java, "MANUFACTURER", "samsung")
