@@ -44,10 +44,12 @@
 
     <ImageView
         android:id="@+id/qr"
-        android:layout_width="220dp"
-        android:layout_height="220dp"
+        android:layout_width="236dp"
+        android:layout_height="236dp"
         android:layout_gravity="center_horizontal"
         android:layout_marginTop="20dp"
+        android:padding="8dp"
+        android:background="@color/qr_backing"
         android:contentDescription="QR-код ссылки на скачивание"
         android:scaleType="fitCenter" />
 

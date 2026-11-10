@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Depth by lightness, not shadow: background → cards → chips and menus. -->
+<resources>
+    <color name="background">#131314</color>
+    <!-- Lighter than background on purpose: the role is "card" in both themes. -->
+    <color name="surface_lowest">#1E1F20</color>
+    <color name="surface_container">#2A2B2D</color>
+    <color name="surface_container_high">#303134</color>
+    <color name="surface_container_highest">#3C3D40</color>
+    <color name="on_surface">#E3E3E3</color>
+    <color name="on_surface_variant">#A8ABAF</color>
+    <color name="outline">#8E918F</color>
+    <color name="outline_variant">#34363A</color>
+
+    <color name="primary">#8AB4F8</color>
+    <color name="on_primary">#062E6F</color>
+    <color name="primary_container">#10305E</color>
+    <color name="on_primary_container">#D3E3FD</color>
+
+    <color name="error_container">#601410</color>
+    <color name="on_error_container">#F9DEDC</color>
+
+    <color name="success">#6DD58C</color>
+    <color name="success_container">#0F3D1F</color>
+    <color name="on_success_container">#B7F0C6</color>
+    <color name="warning">#FBBC04</color>
+    <color name="warning_container">#3D2E00</color>
+    <color name="on_warning_container">#FFE08A</color>
+
+    <color name="menu_container">#303134</color>
+    <color name="menu_item_selected">#3C3D40</color>
+    <color name="switch_thumb_off">#8E918F</color>
+    <fraction name="scrim">50%</fraction>
+</resources>

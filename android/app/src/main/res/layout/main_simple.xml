@@ -269,7 +269,7 @@
                         android:fontFamily="sans-serif-medium"
                         android:text="Отключить оптимизацию"
                         android:textSize="14sp"
-                        android:textColor="@color/on_warning_button" />
+                        android:textColor="@color/warning_container" />
                 </LinearLayout>
             </LinearLayout>
 
@@ -472,6 +472,47 @@
                         android:layout_width="24dp"
                         android:layout_height="24dp"
                         android:src="@drawable/ic_open_in_new"
+                        android:tint="@color/on_surface_variant"
+                        android:importantForAccessibility="no" />
+                </LinearLayout>
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:background="@color/outline_variant" />
+
+                <LinearLayout
+                    android:id="@+id/themeRow"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="56dp"
+                    android:gravity="center_vertical"
+                    android:paddingStart="18dp"
+                    android:paddingEnd="14dp"
+                    android:paddingTop="12dp"
+                    android:paddingBottom="12dp">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:layout_marginEnd="16dp"
+                        android:text="Тема"
+                        android:textSize="16sp"
+                        android:textColor="@color/on_surface" />
+
+                    <TextView
+                        android:id="@+id/themeValue"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textSize="14sp"
+                        android:textColor="@color/on_surface_variant" />
+
+                    <ImageView
+                        android:layout_width="20dp"
+                        android:layout_height="20dp"
+                        android:layout_marginStart="2dp"
+                        android:src="@drawable/ic_expand_more"
                         android:tint="@color/on_surface_variant"
                         android:importantForAccessibility="no" />
                 </LinearLayout>

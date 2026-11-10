@@ -314,6 +314,128 @@ class MainActivityTest {
         assertEquals(Intent.ACTION_VIEW, nextActivity().action)
     }
 
+    private fun MainActivity.night() =
+        resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
+
+    @Test
+    fun themeFollowsTheSystemByDefault() {
+        val a = launch()
+        assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_NO, a.night())
+        assertEquals("Как в системе", settings().text(R.id.themeValue))
+    }
+
+    // The 0.5 skins lived under "theme": a stale "light" must not pin the light theme.
+    @Test
+    fun oldThemeKeyIsIgnored() {
+        val a = launch("light")
+        assertEquals("Как в системе", settings().text(R.id.themeValue))
+        assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_NO, a.night())
+    }
+
+    @Test
+    @org.robolectric.annotation.Config(qualifiers = "night")
+    fun themeFollowsANightSystem() {
+        val a = launch()
+        assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_YES, a.night())
+        assertEquals(0xFF131314.toInt(), a.getColor(R.color.background))
+    }
+
+    @Test
+    fun darkThemeOverridesALightSystem() {
+        prefs.edit().putString("theme_mode", "dark").commit()
+        val a = launch()
+        assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_YES, a.night())
+        assertEquals(0xFF131314.toInt(), a.getColor(R.color.background))
+        assertEquals("Тёмная", settings().text(R.id.themeValue))
+    }
+
+    @Test
+    @org.robolectric.annotation.Config(qualifiers = "night")
+    fun lightThemeOverridesANightSystem() {
+        prefs.edit().putString("theme_mode", "light").commit()
+        val a = launch()
+        assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_NO, a.night())
+        assertEquals(0xFFF2F2F2.toInt(), a.getColor(R.color.background))
+    }
+
+    @Test
+    fun themeMenuSavesTheChoice() {
+        launch()
+        val a = settings()
+        a.findViewById<View>(R.id.themeRow).performClick()
+        val menu = shadowOf(app).latestPopupWindow.contentView as LinearLayout
+        assertEquals(3, menu.childCount)
+        assertTrue(menu.getChildAt(0).isSelected)
+        menu.getChildAt(2).performClick()
+        assertEquals("dark", prefs.getString("theme_mode", null))
+        assertFalse(shadowOf(app).latestPopupWindow.isShowing)
+        // Applied at once: the activity comes back dark, on the same tab.
+        ShadowLooper.idleMainLooper()
+        val b = activity!!.get()
+        assertTrue(a !== b)
+        assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_YES, b.night())
+        assertEquals(View.VISIBLE, b.findViewById<View>(R.id.pageSettings).visibility)
+    }
+
+    private val uiModes get() = shadowOf(app.getSystemService(android.app.UiModeManager::class.java))
+
+    @Test
+    fun themeBackToTheSystemForgetsTheChoice() {
+        prefs.edit().putString("theme_mode", "dark").commit()
+        launch()
+        val a = settings()
+        assertEquals("Тема: Тёмная", a.findViewById<View>(R.id.themeRow).contentDescription)
+        a.findViewById<View>(R.id.themeRow).performClick()
+        (shadowOf(app).latestPopupWindow.contentView as LinearLayout).getChildAt(0).performClick()
+        ShadowLooper.idleMainLooper()
+        assertFalse(prefs.contains("theme_mode"))
+        assertEquals(android.app.UiModeManager.MODE_NIGHT_AUTO, uiModes.applicationNightMode)
+        assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_NO, activity!!.get().night())
+    }
+
+    @Test
+    fun pickingTheCurrentThemeKeepsTheActivity() {
+        launch()
+        val a = settings()
+        a.findViewById<View>(R.id.themeRow).performClick()
+        (shadowOf(app).latestPopupWindow.contentView as LinearLayout).getChildAt(0).performClick()
+        ShadowLooper.idleMainLooper()
+        assertTrue(a === activity!!.get())
+    }
+
+    @Test
+    fun junkThemeValueFollowsTheSystem() {
+        prefs.edit().putString("theme_mode", "sepia").commit()
+        val a = launch()
+        assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_NO, a.night())
+        assertEquals("Как в системе", settings().text(R.id.themeValue))
+    }
+
+    // The splash reads the system's copy; a cold start puts it back from the pref.
+    @Test
+    fun coldStartSyncsTheSystemNightMode() {
+        prefs.edit().putString("theme_mode", "dark").commit()
+        launch()
+        assertEquals(android.app.UiModeManager.MODE_NIGHT_YES, uiModes.applicationNightMode)
+    }
+
+    @Test
+    @org.robolectric.annotation.Config(qualifiers = "fr-xlarge")
+    fun themeOverrideKeepsTheRestOfTheConfiguration() {
+        prefs.edit().putString("theme_mode", "dark").commit()
+        val a = launch()
+        assertEquals("fr", a.resources.configuration.locales[0].language)
+        assertTrue(a.resources.configuration.smallestScreenWidthDp >= 600)
+    }
+
+    @Test
+    fun menuOutlineIsDrawnOverTheItems() {
+        launch()
+        val a = settings()
+        a.findViewById<View>(R.id.themeRow).performClick()
+        assertNotNull((shadowOf(app).latestPopupWindow.contentView as LinearLayout).foreground)
+    }
+
     private fun MainActivity.mode() = row("youtube").findViewById<TextView>(R.id.ytMode)
 
     // The old "YouTube напрямую" switch is the mode: both on was direct, as it ran.

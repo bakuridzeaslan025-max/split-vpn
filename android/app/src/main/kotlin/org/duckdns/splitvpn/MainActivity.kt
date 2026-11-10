@@ -4,13 +4,16 @@ import android.Manifest
 import android.app.Activity
 import android.app.Dialog
 import android.app.NotificationManager
+import android.app.UiModeManager
 import android.content.ClipData
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
@@ -64,13 +67,13 @@ class MainActivity : Activity() {
         private const val KEY_INVITE = "invite"
         private const val KEY_ADBLOCK = "adblock"
         private const val KEY_DIRECT = "yt_direct"
+        // "light" or "dark"; absent follows the system. Not "theme": 0.5 kept
+        // the long-gone terminal skins there, "light" among them.
+        private const val KEY_THEME = "theme_mode"
         // latest_version whose banner was closed; a newer one shows again.
         private const val KEY_UPDATE_DISMISSED = "update_dismissed"
 
         private const val PRIVACY_URL = "https://bakuridzeaslan025-max.github.io/split-vpn-privacy/"
-
-        // The dialogs' scrim: black at 32 %.
-        private const val SCRIM = 0.32f
 
         private val PROBE_LINE = Regex("""^\S+\s+(.+?): (\d+ мс|ошибка)""")
     }
@@ -217,6 +220,17 @@ class MainActivity : Activity() {
         if (started) ticker.post(tick)
     }
 
+    // No AppCompat for setDefaultNightMode: the activity overrides its own uiMode.
+    override fun attachBaseContext(base: Context) {
+        super.attachBaseContext(base)
+        val night = when (base.getSharedPreferences(Services.PREFS, MODE_PRIVATE).getString(KEY_THEME, null)) {
+            "light" -> Configuration.UI_MODE_NIGHT_NO
+            "dark" -> Configuration.UI_MODE_NIGHT_YES
+            else -> return
+        }
+        applyOverrideConfiguration(Configuration().apply { uiMode = night })
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         Crash.init(this, "ui")
         // Smoke test for the crash reporting, debug only:
@@ -289,7 +303,11 @@ class MainActivity : Activity() {
         invite = savedInstanceState?.getString(KEY_INVITE)
         showTab(savedInstanceState?.getString(KEY_TAB) ?: "vpn")
         render()
-        if (savedInstanceState == null) onUpdateIntent(intent)
+        if (savedInstanceState == null) {
+            onUpdateIntent(intent)
+            // Cleared app data wipes the pref but maybe not the system's copy.
+            syncNightMode()
+        }
     }
 
     private fun initSettings() {
@@ -341,8 +359,35 @@ class MainActivity : Activity() {
             }
         }
         findViewById<View>(R.id.notificationRow).setOnClickListener { openNotificationSettings() }
+        val theme = prefs.getString(KEY_THEME, null)
+        val themes = listOf(null to "Как в системе", "light" to "Светлая", "dark" to "Тёмная")
+        val themeName = (themes.firstOrNull { it.first == theme } ?: themes[0]).second
+        findViewById<TextView>(R.id.themeValue).text = themeName
+        findViewById<View>(R.id.themeRow).contentDescription = "Тема: $themeName"
+        findViewById<View>(R.id.themeRow).setOnClickListener { row ->
+            showMenu(row, themes.map { (mode, title) -> MenuItem(title, null, mode == theme) { applyTheme(mode) } }, Gravity.END)
+        }
         findViewById<View>(R.id.privacyLink).setOnClickListener { openUrl(PRIVACY_URL) }
         findViewById<TextView>(R.id.versionText).text = "Split VPN · версия ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
+    }
+
+    private fun applyTheme(mode: String?) {
+        if (mode == prefs.getString(KEY_THEME, null)) return
+        prefs.edit().putString(KEY_THEME, mode).apply()
+        syncNightMode()
+        recreate()
+    }
+
+    // Also the splash screen on 12+, which starts before attachBaseContext.
+    private fun syncNightMode() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        getSystemService(UiModeManager::class.java)?.setApplicationNightMode(
+            when (prefs.getString(KEY_THEME, null)) {
+                "light" -> UiModeManager.MODE_NIGHT_NO
+                "dark" -> UiModeManager.MODE_NIGHT_YES
+                else -> UiModeManager.MODE_NIGHT_AUTO
+            }
+        )
     }
 
     private fun stepRow(n: Int, text: String) = LinearLayout(this).apply {
@@ -544,6 +589,7 @@ class MainActivity : Activity() {
 
     private fun renderSwitch(seg: View, knob: View, on: Boolean) {
         seg.background = box(getColor(if (on) R.color.primary else R.color.surface_container_highest), radius = 16f)
+        knob.backgroundTintList = tint(if (on) R.color.on_primary else R.color.switch_thumb_off)
         knob.layoutParams = (knob.layoutParams as FrameLayout.LayoutParams).apply {
             gravity = if (on) Gravity.END else Gravity.START
         }
@@ -594,36 +640,51 @@ class MainActivity : Activity() {
         setOnClickListener { if (editable) showModeMenu(this) }
     }
 
+    private class MenuItem(val title: String, val caption: String?, val selected: Boolean, val onPick: () -> Unit)
+
     private fun showModeMenu(anchor: View) {
         val current = directMode
-        val menu = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = box(getColor(R.color.surface_lowest), radius = 16f)
-            // The selected item's fill must not stick out of the corners.
-            clipToOutline = true
-            elevation = dp(3f)
-        }
-        val popup = PopupWindow(menu, dp(288), ViewGroup.LayoutParams.WRAP_CONTENT, true)
         val modes = listOf(
             Triple(true, "Напрямую", "Обход замедления провайдера. Почти не тратит лимит."),
             Triple(false, "Через VPN", "Если напрямую скорости не хватает. Тратит лимит."),
         )
-        for ((on, title, caption) in modes) {
-            val selected = on == current
+        showMenu(anchor, modes.map { (on, title, caption) ->
+            MenuItem(title, caption, on == current) {
+                if (editable) {
+                    prefs.edit().putBoolean(KEY_DIRECT, on).apply()
+                    renderServices()
+                }
+            }
+        })
+    }
+
+    private fun showMenu(anchor: View, items: List<MenuItem>, align: Int = Gravity.START) {
+        val menu = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = box(getColor(R.color.menu_container), radius = 16f)
+            // No shadow shows in the dark: the outline keeps the menu off the card.
+            // A foreground, or the selected item's fill covers it.
+            foreground = box(Color.TRANSPARENT, getColor(R.color.outline_variant), 16f)
+            // The selected item's fill must not stick out of the corners.
+            clipToOutline = true
+            elevation = dp(3f)
+        }
+        val popup = PopupWindow(menu, dp(if (items.any { it.caption != null }) 288 else 220), ViewGroup.LayoutParams.WRAP_CONTENT, true)
+        for (item in items) {
             menu.addView(LinearLayout(this).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(16), dp(12), dp(16), dp(12))
-                minimumHeight = dp(56)
-                if (selected) setBackgroundColor(getColor(R.color.surface_container))
+                minimumHeight = dp(if (item.caption != null) 56 else 48)
+                if (item.selected) setBackgroundColor(getColor(R.color.menu_item_selected))
                 addView(LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.VERTICAL
                     addView(TextView(this@MainActivity).apply {
-                        text = title
+                        text = item.title
                         textSize = 15f
                         setTextColor(getColor(R.color.on_surface))
                     })
-                    addView(TextView(this@MainActivity).apply {
-                        text = caption
+                    if (item.caption != null) addView(TextView(this@MainActivity).apply {
+                        text = item.caption
                         textSize = 12f
                         setTextColor(getColor(R.color.on_surface_variant))
                     })
@@ -631,21 +692,19 @@ class MainActivity : Activity() {
                 addView(ImageView(this@MainActivity).apply {
                     setImageResource(R.drawable.ic_check)
                     imageTintList = tint(R.color.primary)
-                    visibility = if (selected) View.VISIBLE else View.INVISIBLE
+                    visibility = if (item.selected) View.VISIBLE else View.INVISIBLE
                     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 }, LinearLayout.LayoutParams(dp(20), dp(20)))
-                isSelected = selected
+                isSelected = item.selected
                 setOnClickListener {
                     popup.dismiss()
-                    if (!editable) return@setOnClickListener
-                    prefs.edit().putBoolean(KEY_DIRECT, on).apply()
-                    renderServices()
+                    item.onPick()
                 }
             })
         }
         menuPopup = popup
         popup.elevation = dp(3f)
-        popup.showAsDropDown(anchor, 0, dp(4))
+        popup.showAsDropDown(anchor, 0, dp(4), align)
     }
 
     private fun renderStatus() {
@@ -668,7 +727,7 @@ class MainActivity : Activity() {
         val inert = busy || quotaOut || updateRequired
         dot.background = box(if (waitingNow) getColor(R.color.warning) else if (on) green else if (busy) grey else getColor(R.color.on_surface_variant), radius = 4f)
         findViewById<View>(R.id.buttonDot).background =
-            box(if (waitingNow) getColor(R.color.warning) else if (on) green else if (inert) grey else getColor(R.color.on_primary), radius = 5f)
+            box(if (waitingNow) getColor(R.color.warning) else if (on) green else if (inert) grey else getColor(R.color.on_main_button), radius = 5f)
         findViewById<TextView>(R.id.buttonLabel).apply {
             text = if (quotaOut) "Лимит на сегодня исчерпан" else when (state) {
                 VpnState.CONNECTING -> "Подключение…"
@@ -677,13 +736,13 @@ class MainActivity : Activity() {
                 VpnState.ERROR -> if (offlineRetry) "Выключить" else "Подключить"
                 VpnState.DISCONNECTED -> "Подключить"
             }
-            setTextColor(getColor(if (on) R.color.on_surface else if (inert) R.color.on_surface_variant else R.color.on_primary))
+            setTextColor(getColor(if (on) R.color.on_surface else if (inert) R.color.on_surface_variant else R.color.on_main_button))
         }
         button.isEnabled = !inert
         button.background = when {
             on -> box(getColor(R.color.surface_lowest), getColor(R.color.outline), 30f)
             inert -> box(getColor(R.color.surface_container_high), radius = 30f)
-            else -> box(getColor(R.color.primary), radius = 30f)
+            else -> box(getColor(R.color.main_button), radius = 30f)
         }
     }
 
@@ -867,7 +926,7 @@ class MainActivity : Activity() {
         dialog.setContentView(R.layout.dialog_install_simple)
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            setDimAmount(SCRIM)
+            setDimAmount(resources.getFraction(R.fraction.scrim, 1, 1))
             setLayout(resources.displayMetrics.widthPixels - dp(48), ViewGroup.LayoutParams.WRAP_CONTENT)
         }
         dialog.findViewById<View>(R.id.cancel).setOnClickListener { dialog.dismiss() }
@@ -890,7 +949,7 @@ class MainActivity : Activity() {
         dialog.setContentView(R.layout.dialog_invite_simple)
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            setDimAmount(SCRIM)
+            setDimAmount(resources.getFraction(R.fraction.scrim, 1, 1))
             setLayout(resources.displayMetrics.widthPixels - dp(48), ViewGroup.LayoutParams.WRAP_CONTENT)
             setSoftInputMode(
                 WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE or WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
@@ -916,7 +975,7 @@ class MainActivity : Activity() {
         dialog.setContentView(R.layout.dialog_share_simple)
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            setDimAmount(SCRIM)
+            setDimAmount(resources.getFraction(R.fraction.scrim, 1, 1))
             setLayout(resources.displayMetrics.widthPixels - dp(48), ViewGroup.LayoutParams.WRAP_CONTENT)
         }
         dialog.findViewById<ImageView>(R.id.qr).setImageBitmap(qr(url, dp(220)))
