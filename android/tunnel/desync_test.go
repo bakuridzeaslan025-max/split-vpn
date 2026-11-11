@@ -370,7 +370,7 @@ func TestTryDesync_WaitsForTheHello(t *testing.T) {
 		peer.Close()
 	}()
 	_, port, got := helloServer(t, "127.0.0.1", len(unrecord(h)), "", 0)
-	if _, done := tryDesync(app, h[:60], "www.youtube.com", ip, port, time.Now()); !done {
+	if _, _, _, done := tryDesync(app, h[:60], "www.youtube.com", ip, port, time.Now(), testCred); !done {
 		t.Fatal("whole hello not tried")
 	}
 	if b := <-got; !bytes.Equal(unrecord(b), unrecord(h)) {
@@ -382,7 +382,7 @@ func TestTryDesync_WaitsForTheHello(t *testing.T) {
 	app2, peer2 := net.Pipe()
 	defer app2.Close()
 	defer peer2.Close()
-	first, done := tryDesync(app2, h[:60], "www.youtube.com", ip, 1, time.Now())
+	first, _, _, done := tryDesync(app2, h[:60], "www.youtube.com", ip, 1, time.Now(), testCred)
 	if done || len(first) != 60 {
 		t.Fatalf("incomplete hello: done %v, %d bytes", done, len(first))
 	}
@@ -390,6 +390,26 @@ func TestTryDesync_WaitsForTheHello(t *testing.T) {
 	defer p.mu.Unlock()
 	if p.attempts != 1 || p.fails != 0 {
 		t.Fatalf("attempts %d fails %d: the cut short one must not count", p.attempts, p.fails)
+	}
+}
+
+// A hello cut short to a direct only address: closed, not relayed (the
+// relay does not reach it, and its session would not be watched).
+func TestTryDesync_IncompleteHelloDirectOnlyClosed(t *testing.T) {
+	withConns(t)
+	captureLog(t)
+	p := directWith(t, `[{"id":"rec2","spec":"rec=host+1,midsld;cut=host+1,midsld"}]`)
+	defer func(w time.Duration) { helloWait = w }(helloWait)
+	helloWait = 100 * time.Millisecond
+	p.mu.Lock()
+	p.putLocked("127.0.0.1").muteUntil = time.Now().Add(silentFor)
+	p.mu.Unlock()
+	app, peer := net.Pipe()
+	defer app.Close()
+	defer peer.Close()
+	h := clientHello(t, "www.youtube.com")
+	if _, _, _, done := tryDesync(app, h[:60], "www.youtube.com", net.IPv4(127, 0, 0, 1), 1, time.Now(), testCred); !done {
+		t.Fatal("left to the relay")
 	}
 }
 
@@ -407,7 +427,7 @@ func TestTryDesync_ConnectFailureIsNotTheStrategys(t *testing.T) {
 	h := clientHello(t, "www.youtube.com")
 	for range 3 {
 		app, peer := net.Pipe()
-		if _, done := tryDesync(app, h, "www.youtube.com", net.IPv4(127, 0, 0, 1), port, time.Now()); done {
+		if _, _, _, done := tryDesync(app, h, "www.youtube.com", net.IPv4(127, 0, 0, 1), port, time.Now(), testCred); done {
 			t.Fatal("no connection, yet served")
 		}
 		app.Close()
@@ -415,8 +435,9 @@ func TestTryDesync_ConnectFailureIsNotTheStrategys(t *testing.T) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.fails != 0 || p.attempts != 0 || p.cur != "rec2" || !p.silent.has("127.0.0.1") {
-		t.Fatalf("fails %d, attempts %d, on %s, silent %v", p.fails, p.attempts, p.cur, p.silent.has("127.0.0.1"))
+	silent := p.silentLocked("127.0.0.1", p.now())
+	if p.fails != 0 || p.attempts != 0 || p.cur != "rec2" || !silent {
+		t.Fatalf("fails %d, attempts %d, on %s, silent %v", p.fails, p.attempts, p.cur, silent)
 	}
 }
 
@@ -441,7 +462,7 @@ func TestTryDesync_ClosedWhileWaitingIsNotCounted(t *testing.T) {
 	defer peer.Close()
 	done := make(chan bool, 1)
 	go func() {
-		_, d := tryDesync(app, h, "www.youtube.com", net.IPv4(127, 0, 0, 1), uint16(ln.Addr().(*net.TCPAddr).Port), time.Now())
+		_, _, _, d := tryDesync(app, h, "www.youtube.com", net.IPv4(127, 0, 0, 1), uint16(ln.Addr().(*net.TCPAddr).Port), time.Now(), testCred)
 		done <- d
 	}()
 	time.Sleep(200 * time.Millisecond)
@@ -475,7 +496,7 @@ func TestTryDesync_NotCountedInQuota(t *testing.T) {
 		io.ReadFull(peer, make([]byte, 7+200<<10))
 		peer.Close()
 	}()
-	if _, done := tryDesync(app, h, "rr1---sn-x.googlevideo.com", net.IPv4(127, 0, 0, 1), port, time.Now()); !done {
+	if _, _, _, done := tryDesync(app, h, "rr1---sn-x.googlevideo.com", net.IPv4(127, 0, 0, 1), port, time.Now(), testCred); !done {
 		t.Fatal("not direct")
 	}
 	if u := Usage(); u != 0 {
@@ -487,7 +508,7 @@ func TestTryDesync_NotCountedInQuota(t *testing.T) {
 // rebuild's Start): theirs stays theirs, the picker goes by id, not index.
 func TestSetStrategies_SwapUnderAConnection(t *testing.T) {
 	p := directWith(t, planStrategies)
-	st, gen := p.pick("1.1.1.1")
+	st, gen, _ := p.pick("1.1.1.1", "")
 	if st.id != "rec2" {
 		t.Fatalf("picked %s", st.id)
 	}
@@ -495,8 +516,8 @@ func TestSetStrategies_SwapUnderAConnection(t *testing.T) {
 	if st.id != "rec2" || st.norm != "rec=host+1,midsld;cut=host+1,midsld" {
 		t.Fatal("the connection's strategy changed under it")
 	}
-	p.result(gen, st.id, "1.1.1.1", p.now(), false, "x")
-	if st2, _ := p.pick("1.1.1.1"); st2 == nil || st2.id != "new" {
+	p.result(gen, st.id, "1.1.1.1", "", p.now(), false, "x")
+	if st2, _, _ := p.pick("1.1.1.1", ""); st2 == nil || st2.id != "new" {
 		t.Fatalf("after the swap: %v", st2)
 	}
 }

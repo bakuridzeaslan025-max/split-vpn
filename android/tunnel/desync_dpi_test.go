@@ -184,7 +184,7 @@ func TestHandleTCP_FakeDPI(t *testing.T) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.ok.has(hostIP.String()) {
+	if a := p.addrLocked(hostIP.String()); a == nil || !a.curOK {
 		t.Fatal("rec2's success not counted")
 	}
 }

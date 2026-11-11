@@ -588,6 +588,35 @@ class AnalyticsEventsTest {
             .forEach { (raw, want) -> assertEquals("$raw", want, RemoteConfig.parseDialEventBp(raw)) }
     }
 
+    @Test
+    fun ytRaceMsGoesToGoOnStartAndFetch() {
+        prefs.edit().putInt(RemoteConfig.KEY_YT_RACE_MS, 900).commit()
+        be.config = RcValues("", 0, 0, "", ytRaceMs = 0)
+        be.blockConfig = true
+        start()
+        assertEquals(900, be.raceMs)
+        be.release()
+        awaitServiceThreads()
+        assertEquals(0, be.raceMs)
+    }
+
+    // No key: Go's own value, not the last one fetched.
+    @Test
+    fun ytRaceMsWithoutTheKeyIsGosDefault() {
+        prefs.edit().putInt(RemoteConfig.KEY_YT_RACE_MS, 0).commit()
+        be.config = RcValues("", 0, 0, "")
+        start()
+        awaitServiceThreads()
+        assertEquals(-1, be.raceMs)
+        assertFalse(prefs.contains(RemoteConfig.KEY_YT_RACE_MS))
+    }
+
+    @Test
+    fun ytRaceMsParse() {
+        mapOf(null to null, "" to null, "x" to null, "-1" to null, "1.5" to null, "0" to 0, " 600 " to 600, "1000" to 1000)
+            .forEach { (raw, want) -> assertEquals("$raw", want, RemoteConfig.parseYtRaceMs(raw)) }
+    }
+
     // 0.11 and older read the fields by name: the label is ignored.
     @Test
     fun oldParserIgnoresTheLabel() {

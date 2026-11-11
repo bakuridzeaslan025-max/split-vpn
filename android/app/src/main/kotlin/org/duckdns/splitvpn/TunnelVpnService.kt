@@ -59,6 +59,8 @@ internal interface Backend {
     fun setEndpointId(id: String)
     /** Remote Config's dial_event_bp: the share of relay handshakes Go reports (Host.DialEvent). */
     fun setDialEvents(bp: Int)
+    /** Remote Config's yt_race_ms for direct YouTube's relay leg; -1: Go's built-in value. */
+    fun setRaceMs(ms: Int)
     fun networkChanged()
     fun networkLost()
     /** Drops Go's DNS cache only; the relay's health is networkChanged's business. */
@@ -146,9 +148,10 @@ internal object GoBackend : Backend {
         val quota = rc.getValue("daily_quota_mb").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString()?.trim()?.toLongOrNull()
         val yt = rc.getValue("yt_strategies").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString()
         val bp = RemoteConfig.parseDialEventBp(rc.getValue("dial_event_bp").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString())
+        val race = RemoteConfig.parseYtRaceMs(rc.getValue("yt_race_ms").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString())
         return RcValues(
             rc.getString("endpoints"), rc.getLong("min_version"), rc.getLong("latest_version"), rc.getString("update_url"), quota, yt,
-            rc.getString("apk_url"), bp, rc.getString("apk_urls"), rc.getString("latest_name"),
+            rc.getString("apk_url"), bp, rc.getString("apk_urls"), rc.getString("latest_name"), race,
         )
     }
     override fun setQuota(used: Long, limit: Long) = tunnel.Tunnel.setQuota(used, limit)
@@ -184,6 +187,7 @@ internal object GoBackend : Backend {
     override fun setEndpoint(ep: TunnelVpnService.Endpoint, suspect: Boolean) = tunnel.Tunnel.setEndpoint(ep.addr, ep.host, ep.path, ep.id, suspect)
     override fun setEndpointId(id: String) = tunnel.Tunnel.setEndpointID(id)
     override fun setDialEvents(bp: Int) = tunnel.Tunnel.setDialEvents(bp.toLong())
+    override fun setRaceMs(ms: Int) = tunnel.Tunnel.setRaceMs(ms.toLong())
     override fun networkChanged() = tunnel.Tunnel.networkChanged()
     override fun networkLost() = tunnel.Tunnel.networkLost()
     override fun dnsChanged() = tunnel.Tunnel.dnsChanged()
@@ -967,6 +971,8 @@ class TunnelVpnService : VpnService() {
         val limit = Quota.limit(this)
         RemoteConfig.apply(this, v, decrypt, testRc)
         backend.setDialEvents(RemoteConfig.dialEventBp(this))
+        // The way back to no race works without a restart.
+        backend.setRaceMs(RemoteConfig.ytRaceMs(this))
         val after = Endpoints.cached(this, testRc)
         if (after != null) mainHandler.post { onNewList(changed = after != before) }
         if (RemoteConfig.versions(this) != versions) mainHandler.post { onNewVersions() }
@@ -1143,6 +1149,7 @@ class TunnelVpnService : VpnService() {
         // Go dropped whole as broken.
         directOff = !directOn || backend.strategyCount() == 0
         backend.setDialEvents(RemoteConfig.dialEventBp(this))
+        backend.setRaceMs(RemoteConfig.ytRaceMs(this))
         // RC serves the same value on every fetch: a report the first time only.
         if (dropped.isNotEmpty()) AppLog.e("yt_strategies: dropped $dropped", expected = !RemoteConfig.firstDrop(this, yt, RemoteConfig.KEY_DROPPED_YT))
         anyEndpoint("start") {

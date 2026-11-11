@@ -60,13 +60,19 @@ func (p *pickState) verdict() string {
 
 // try is one connection to ip: picked, then its result, a moment later.
 func try(p *pickState, ip string, ok bool) string {
-	st, gen := p.pick(ip)
+	id, _ := tryAs(p, ip, "", ok)
+	return id
+}
+
+// tryAs is try for a connection named name; race is the relay leg's delay.
+func tryAs(p *pickState, ip, name string, ok bool) (id string, race time.Duration) {
+	st, gen, race := p.pick(ip, name)
 	if st == nil {
-		return "relay"
+		return "relay", race
 	}
 	advance(p, time.Second)
-	p.result(gen, st.id, ip, p.now().Add(-time.Second), ok, "silence")
-	return st.id
+	p.result(gen, st.id, ip, name, p.now().Add(-time.Second), ok, "silence")
+	return st.id, race
 }
 
 func readMap(t *testing.T, file string) map[string]netEntry {
@@ -92,12 +98,12 @@ func TestPick_BurstCountsOnce(t *testing.T) {
 	var burst []conn
 	start := p.now()
 	for range 6 {
-		st, gen := p.pick("1.1.1.1")
+		st, gen, _ := p.pick("1.1.1.1", "")
 		burst = append(burst, conn{st.id, gen})
 	}
 	advance(p, 3*time.Second)
 	for _, c := range burst {
-		p.result(c.gen, c.id, "1.1.1.1", start, false, "x")
+		p.result(c.gen, c.id, "1.1.1.1", "", start, false, "x")
 	}
 	if p.curID() != "rec2" {
 		t.Fatal("one burst moved the strategy on")
@@ -195,7 +201,7 @@ func TestPick_EarlyDeathOnlyWhenTheServerClosedFirst(t *testing.T) {
 	p, _, _ := picking(t)
 	try(p, "1.1.1.1", true)
 	try(p, "2.2.2.2", true)
-	st, gen := p.pick("1.1.1.1")
+	st, gen, _ := p.pick("1.1.1.1", "")
 	died := finish{start: p.now(), dur: time.Second, down: 2 << 10, up: 600, serverFirst: true, why: "x"}
 
 	short := died
@@ -222,7 +228,7 @@ func TestPick_EarlyDeathOnlyWhenTheServerClosedFirst(t *testing.T) {
 	}
 	// Both addresses it got through died early: still the winner, and the
 	// card must not flip to "testing" and back.
-	st, gen = p.pick("2.2.2.2")
+	st, gen, _ = p.pick("2.2.2.2", "")
 	p.finished(gen, st.id, "2.2.2.2", "www.youtube.com", finish{start: p.now(), dur: time.Second, down: 2 << 10, up: 600, serverFirst: true})
 	if v := p.verdict(); v != verdictWorks {
 		t.Fatalf("verdict %s", v)
@@ -234,7 +240,7 @@ func TestPick_Throttled(t *testing.T) {
 	try(p, "1.1.1.1", true)
 	try(p, "2.2.2.2", true)
 	video := func(down, peak int64) {
-		st, gen := p.pick("1.1.1.1")
+		st, gen, _ := p.pick("1.1.1.1", "")
 		p.finished(gen, st.id, "1.1.1.1", "rr1---sn-x.googlevideo.com", finish{start: p.now(), dur: time.Minute, down: down, up: 4 << 10, peak: peak})
 	}
 	// A fast network: chunks of 1–2 MB in under a second each, pauses
@@ -285,20 +291,20 @@ func TestPick_StopStartKeepsIt(t *testing.T) {
 	p.started(file)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.fails != 1 || p.ok.len() != 1 || p.raw != "cell:25001" {
-		t.Fatalf("lost on restart: fails %d, ok %d, key %q", p.fails, p.ok.len(), p.raw)
+	if p.fails != 1 || p.okCountLocked() != 1 || p.raw != "cell:25001" {
+		t.Fatalf("lost on restart: fails %d, ok %d, key %q", p.fails, p.okCountLocked(), p.raw)
 	}
 }
 
 // Results of connections from the network before do not count.
 func TestPick_OldNetworkDoesNotCount(t *testing.T) {
 	p, _, _ := picking(t)
-	st, gen := p.pick("1.1.1.1")
+	st, gen, _ := p.pick("1.1.1.1", "")
 	p.setNetKey("cell:25002")
-	p.result(gen, st.id, "1.1.1.1", p.now(), false, "x")
-	p.result(gen, st.id, "2.2.2.2", p.now().Add(time.Second), false, "x")
-	p.result(gen, st.id, "2.2.2.2", p.now().Add(time.Second), true, "")
-	if p.fails != 0 || p.attempts != 0 || p.ok.len() != 0 {
+	p.result(gen, st.id, "1.1.1.1", "", p.now(), false, "x")
+	p.result(gen, st.id, "2.2.2.2", "", p.now().Add(time.Second), false, "x")
+	p.result(gen, st.id, "2.2.2.2", "", p.now().Add(time.Second), true, "")
+	if p.fails != 0 || p.attempts != 0 || p.okCountLocked() != 0 {
 		t.Fatal("an old network's result counted")
 	}
 }
@@ -434,7 +440,7 @@ func TestPick_WeekOverIsTold(t *testing.T) {
 		try(p, "1.1.1.1", false)
 	}
 	advance(p, noneFor)
-	p.pick("1.1.1.1")
+	p.pick("1.1.1.1", "")
 	if v := fp.verdicts(); v[len(v)-1] == verdictFails {
 		t.Fatalf("host still thinks %v", v)
 	}
@@ -442,11 +448,11 @@ func TestPick_WeekOverIsTold(t *testing.T) {
 
 // fail1 is one direct try to ip with its result at once; what the log hears.
 func fail1(p *pickState, ip string, ok bool) (int, bool) {
-	st, gen := p.pick(ip)
+	st, gen, _ := p.pick(ip, "")
 	if st == nil {
 		return 0, false
 	}
-	return p.result(gen, st.id, ip, p.now(), ok, "x")
+	return p.result(gen, st.id, ip, "", p.now(), ok, "x")
 }
 
 func (p *pickState) tallyNow() tally {
@@ -471,12 +477,12 @@ func TestPick_FailLinesThrottled(t *testing.T) {
 		t.Fatalf("after the gap: %d %v", since, log)
 	}
 	advance(p, time.Second)
-	_, gen := p.pick("4.4.4.4")
+	_, gen, _ := p.pick("4.4.4.4", "")
 	if _, log := p.unreachable(gen, "4.4.4.4"); log {
 		t.Fatal("unreachable within the gap logged")
 	}
 	advance(p, failLogGap)
-	_, gen = p.pick("5.5.5.5")
+	_, gen, _ = p.pick("5.5.5.5", "")
 	if since, log := p.unreachable(gen, "5.5.5.5"); !log || since != 0 {
 		t.Fatalf("unreachable after the gap: %d %v", since, log)
 	}
@@ -493,18 +499,20 @@ func TestPick_Summary(t *testing.T) {
 	try(p, "2.2.2.2", true)
 	try(p, "3.3.3.3", false)
 	try(p, "3.3.3.3", true) // silent: straight to relay
-	st, gen := p.pick("1.1.1.1")
+	st, gen, _ := p.pick("1.1.1.1", "")
 	p.finished(gen, st.id, "1.1.1.1", "rr1.googlevideo.com", finish{dur: 10 * time.Second, up: 900, down: 100, why: "rr1.googlevideo.com, EOF"})
 	p.finished(gen, st.id, "1.1.1.1", "rr1.googlevideo.com", finish{dur: 10 * time.Second, up: 0, down: 100, why: "preconnect"})
+	p.countRace(gen, func(t *tally) { t.raced += 2; t.relayWon++; t.late++ })
+	p.countRace(gen-1, func(t *tally) { t.raced++ })
 	p.stopped()
 	p.stopped()
-	want := "sni desync: on cell:25001: 2 direct ok (1 empty, last: rr1.googlevideo.com, EOF), 1 failed, 1 straight to relay"
+	want := "sni desync: on cell:25001: 2 direct ok (1 empty, last: rr1.googlevideo.com, EOF), 1 failed, 1 straight to relay, 2 raced (1 relay won, 1 direct late)"
 	if n := slices.Index(out.lines, want); n < 0 || slices.Index(out.lines[n+1:], want) >= 0 {
 		t.Fatalf("lines %q", out.lines)
 	}
 	try(p, "1.1.1.1", true)
 	p.setNetKey("cell:25002")
-	want = "sni desync: on cell:25001: 3 direct ok (1 empty, last: rr1.googlevideo.com, EOF), 1 failed, 1 straight to relay"
+	want = "sni desync: on cell:25001: 3 direct ok (1 empty, last: rr1.googlevideo.com, EOF), 1 failed, 1 straight to relay, 2 raced (1 relay won, 1 direct late)"
 	if !slices.Contains(out.lines, want) {
 		t.Fatalf("lines %q", out.lines)
 	}
@@ -527,9 +535,9 @@ func TestPick_Summary(t *testing.T) {
 
 func TestPick_OldNetworkNotTallied(t *testing.T) {
 	p, _, _ := picking(t)
-	st, gen := p.pick("1.1.1.1")
+	st, gen, _ := p.pick("1.1.1.1", "")
 	p.setNetKey("cell:25002")
-	if _, log := p.result(gen, st.id, "1.1.1.1", p.now(), false, "x"); log {
+	if _, log := p.result(gen, st.id, "1.1.1.1", "", p.now(), false, "x"); log {
 		t.Fatal("old network's failure logged")
 	}
 	if _, log := p.unreachable(gen, "1.1.1.1"); log {
@@ -624,9 +632,9 @@ func TestNoHello_WatchedBeforeConfirmed(t *testing.T) {
 		t.Fatalf("fails %d after the mark", p.fails)
 	}
 	// A try begun before the mark, reported after it, is not the strategy's.
-	st, gen := p.pick("2.2.2.2")
+	st, gen, _ := p.pick("2.2.2.2", "")
 	p.markDead(p.gen, "2.2.2.2")
-	p.result(gen, st.id, "2.2.2.2", p.now(), false, "silence")
+	p.result(gen, st.id, "2.2.2.2", "", p.now(), false, "silence")
 	if p.fails != 0 {
 		t.Fatalf("fails %d for a dead address", p.fails)
 	}
@@ -662,8 +670,8 @@ func TestRecheck(t *testing.T) {
 	if _, again := p.recheckDue("1.1.1.1"); again {
 		t.Fatal("due twice")
 	}
-	advance(p, deadFor-time.Minute)
-	p.recheckDone(gen, "1.1.1.1", false)
+	advance(p, deadFor-deadRecheck-time.Minute)
+	p.recheckDone(gen, "1.1.1.1", false, false)
 	advance(p, time.Hour)
 	if !p.deadNow("1.1.1.1") {
 		t.Fatal("silence did not extend the mark")
@@ -672,7 +680,7 @@ func TestRecheck(t *testing.T) {
 	if !due {
 		t.Fatalf("not due after %s", deadRecheck)
 	}
-	p.recheckDone(gen, "1.1.1.1", true)
+	p.recheckDone(gen, "1.1.1.1", false, true)
 	if p.deadNow("1.1.1.1") || readMap(t, file)["cell:25001"].Dead["1.1.1.1"] != 0 {
 		t.Fatal("still dead after an answer")
 	}
@@ -705,5 +713,435 @@ func TestMarkDead_SurvivesWinner(t *testing.T) {
 	e := readMap(t, file)["cell:25001"]
 	if e.Win == "" || e.Dead["9.9.9.9"] == 0 {
 		t.Fatalf("map entry %+v", e)
+	}
+}
+
+func TestVideoCluster(t *testing.T) {
+	for name, want := range map[string]string{
+		"rr3---sn-oj5hn5-5g.googlevideo.com":   "sn-oj5hn5",
+		"rr1---sn-5hne6nsz.googlevideo.com":    "sn-5hne6nsz",
+		"RR3---SN-OJ5HN5-5T.GoogleVideo.com.":  "sn-oj5hn5",
+		"rr3---sn-oj5hn5-5g.googlevideo.com.x": "",
+		"rr3---sn-oj5hn5.example.com":          "",
+		"redirector.googlevideo.com":           "",
+		"rr3-sn-oj5hn5.googlevideo.com":        "",
+		"rr3---sn-.googlevideo.com":            "",
+		"rr3---xx-oj5hn5.googlevideo.com":      "",
+		"a.rr3---sn-oj5hn5.googlevideo.com":    "",
+		"":                                     "",
+	} {
+		if got := videoCluster(name); got != want {
+			t.Errorf("%q: %q, want %q", name, got, want)
+		}
+	}
+}
+
+// Nodes of one cluster under its three suffixes, and another cluster.
+const (
+	node1, node2, node3, node4 = "rr1---sn-oj5hn5-5g.googlevideo.com", "rr2---sn-oj5hn5-59.googlevideo.com",
+		"rr3---sn-oj5hn5-5t.googlevideo.com", "rr4---sn-oj5hn5-5g.googlevideo.com"
+	otherNode = "rr1---sn-gvnuxaxjvh-axqz.googlevideo.com"
+)
+
+// winner confirms rec2 on names outside any cluster.
+func winner(p *pickState) {
+	tryAs(p, "1.1.1.1", "www.youtube.com", true)
+	tryAs(p, "2.2.2.2", "youtubei.googleapis.com", true)
+}
+
+func raceOf(p *pickState, ip, name string) time.Duration {
+	_, _, race := p.pick(ip, name)
+	return race
+}
+
+// One silent address is no sign; the second makes the cluster's new
+// addresses race the relay at once, the direct try still made.
+func TestCluster_TwoSilentRaceAtOnce(t *testing.T) {
+	p, _, _ := picking(t)
+	out := captureLog(t)
+	winner(p)
+	tryAs(p, "10.0.0.1", node1, false)
+	if r := raceOf(p, "10.0.0.3", node3); r != raceAfter {
+		t.Fatalf("one silent: race after %s", r)
+	}
+	tryAs(p, "10.0.0.1", node1, false) // the same one again: still one
+	tryAs(p, "10.0.0.2", node2, false)
+	if !slices.Contains(out.lines, "sni desync: cluster sn-oj5hn5 silent (2 addresses) → relay races at once") {
+		t.Fatalf("lines %q", out.lines)
+	}
+	st, _, race := p.pick("10.0.0.3", node3)
+	if st == nil || race != 0 {
+		t.Fatalf("silent cluster: %v, race after %s", st, race)
+	}
+	if r := raceOf(p, "10.0.0.9", otherNode); r != raceAfter {
+		t.Fatalf("another cluster: race after %s", r)
+	}
+	if r := raceOf(p, "10.0.0.3", "www.youtube.com"); r != raceAfter {
+		t.Fatalf("no cluster: race after %s", r)
+	}
+}
+
+// Silent half an hour apart: the first one's mark is over, not a cluster.
+func TestCluster_SilentFarApart(t *testing.T) {
+	p, _, _ := picking(t)
+	winner(p)
+	tryAs(p, "10.0.0.1", node1, false)
+	advance(p, silentFor)
+	tryAs(p, "10.0.0.2", node2, false)
+	if r := raceOf(p, "10.0.0.3", node3); r != raceAfter {
+		t.Fatalf("race after %s", r)
+	}
+	// The second one took the first one's place.
+	tryAs(p, "10.0.0.3", node3, false)
+	if r := raceOf(p, "10.0.0.4", node4); r != 0 {
+		t.Fatalf("two silent now: race after %s", r)
+	}
+}
+
+// Wi-Fi → LTE: two of the cluster's addresses (the other network's
+// caches) silent before any got through; the working one still answers
+// direct and lifts the mark, whichever side served it.
+func TestCluster_NetworkSwitchOkLifts(t *testing.T) {
+	p, _, _ := picking(t)
+	p.setNetKey("cell:25020")
+	winner(p)
+	tryAs(p, "78.37.65.14", node1, false)
+	tryAs(p, "78.37.65.15", node2, false)
+	id, race := tryAs(p, "178.66.83.10", node3, true)
+	if id == "relay" || race != 0 {
+		t.Fatalf("working node: %s, race after %s", id, race)
+	}
+	if r := raceOf(p, "178.66.83.11", node4); r != raceAfter {
+		t.Fatalf("after the ok: race after %s", r)
+	}
+	tryAs(p, "78.37.65.16", node4, false)
+	if r := raceOf(p, "178.66.83.12", node1); r != raceAfter {
+		t.Fatalf("an ok cluster silent again: race after %s", r)
+	}
+}
+
+// An ok counts for the cluster under any strategy; a strategy's change
+// keeps what is known of the nodes, another network forgets it.
+func TestCluster_KeptTillNetworkChange(t *testing.T) {
+	p, _, _ := picking(t)
+	winner(p)
+	st, gen, _ := p.pick("10.0.0.9", otherNode)
+	p.mu.Lock()
+	p.cur = "dis-mid"
+	p.mu.Unlock()
+	p.result(gen, st.id, "10.0.0.9", otherNode, p.now(), true, "")
+	p.mu.Lock()
+	p.cur = st.id
+	ok := p.okClusters.has("sn-gvnuxaxjvh")
+	p.mu.Unlock()
+	if !ok {
+		t.Fatal("an ok of another strategy not counted")
+	}
+	tryAs(p, "10.0.0.1", node1, false)
+	tryAs(p, "10.0.0.2", node2, false)
+	p.mu.Lock()
+	p.failLocked("x")
+	p.restartLocked()
+	kept := p.clusterSilent.has("sn-oj5hn5") && p.okClusters.has("sn-gvnuxaxjvh") && p.clusterFirst["sn-oj5hn5"] != ""
+	p.resetLocked()
+	gone := p.clusterSilent.len() == 0 && p.okClusters.len() == 0 && len(p.clusterFirst) == 0
+	p.mu.Unlock()
+	if !kept || !gone {
+		t.Fatalf("kept %v, gone %v", kept, gone)
+	}
+}
+
+// yt_race_ms: none is 600 ms, TTL 1 strategies 300 more, 0 no race at all.
+func TestPick_RaceDelay(t *testing.T) {
+	p, _, _ := picking(t)
+	t.Cleanup(func() { SetRaceMs(-1) })
+	winner(p)
+	tryAs(p, "10.0.0.1", node1, false)
+	tryAs(p, "10.0.0.2", node2, false)
+	if r := raceOf(p, "10.0.0.5", "www.youtube.com"); r != 600*time.Millisecond {
+		t.Fatalf("no key: %s", r)
+	}
+	SetRaceMs(1000)
+	if r := raceOf(p, "10.0.0.5", "www.youtube.com"); r != time.Second {
+		t.Fatalf("1000: %s", r)
+	}
+	SetRaceMs(0)
+	if r := raceOf(p, "10.0.0.5", "www.youtube.com"); r >= 0 {
+		t.Fatalf("0: %s", r)
+	}
+	if r := raceOf(p, "10.0.0.3", node3); r >= 0 {
+		t.Fatalf("0, silent cluster: %s", r)
+	}
+	SetRaceMs(-5)
+	SetStrategies(`[{"id":"dis-mid","spec":"cut=host+1,midsld;ttl1=2"}]`)
+	if r := raceOf(p, "10.0.0.5", "www.youtube.com"); r != 900*time.Millisecond {
+		t.Fatalf("ttl1: %s", r)
+	}
+	if r := raceOf(p, "10.0.0.3", node3); r != 0 {
+		t.Fatalf("ttl1, silent cluster: %s", r)
+	}
+}
+
+// addr is what the picker knows of ip, zero if nothing.
+func (p *pickState) addr(ip string) addrInfo {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if a := p.addrLocked(ip); a != nil {
+		return *a
+	}
+	return addrInfo{}
+}
+
+// diedEarly: a direct session of cur to ip got its ServerHello and died.
+func diedEarly(p *pickState, ip, name string) {
+	p.finished(p.gen, p.curID(), ip, name, finish{start: p.now(), dur: time.Second, down: 2 << 10, up: 600, serverFirst: true, why: "x"})
+}
+
+// directOnly: ip answered direct, then the relay was silent to it.
+func directOnly(t *testing.T, p *pickState, ip, name string) {
+	t.Helper()
+	tryAs(p, ip, name, true)
+	gen, watched := p.silentNow(ip)
+	if !watched || !p.relayNoAnswer(gen, ip, false) {
+		t.Fatalf("watched %v", watched)
+	}
+}
+
+// Tele2 LTE: its own cache answered direct, died early, and the relay from
+// abroad does not reach it. Direct only, not dead; it races no leg and
+// its early deaths stay direct.
+func TestAddr_RelaySilentAfterHelloIsDirectOnly(t *testing.T) {
+	p, _, file := picking(t)
+	out := captureLog(t)
+	winner(p)
+	const ip = "178.66.83.79"
+	tryAs(p, ip, node1, true)
+	diedEarly(p, ip, node1)
+	if got, _ := tryAs(p, ip, node1, true); got != "relay" {
+		t.Fatalf("after the early death: %s", got)
+	}
+	gen, watched := p.silentNow(ip)
+	if !watched || !p.relayNoAnswer(gen, ip, false) {
+		t.Fatalf("watched %v", watched)
+	}
+	if p.deadNow(ip) || readMap(t, file)["cell:25001"].Dead[ip] != 0 || !p.mutedNow(ip) {
+		t.Fatalf("dead %v, muted %v", p.deadNow(ip), p.mutedNow(ip))
+	}
+	if !slices.Contains(out.lines, "sni desync: 178.66.83.79: relay does not reach it → direct only") {
+		t.Fatalf("lines %q", out.lines)
+	}
+	if _, watched := p.silentNow(ip); watched {
+		t.Fatal("watched while direct only")
+	}
+	for range 2 {
+		st, _, race := p.pick(ip, node1)
+		if st == nil || race >= 0 {
+			t.Fatalf("direct only: %v, race after %s", st, race)
+		}
+		diedEarly(p, ip, node1)
+	}
+}
+
+// One that never answered direct, the relay silent with the VDS alive:
+// dead, as before; a fast end of its session is not enough for that.
+func TestAddr_RelaySilentWithoutHelloIsDead(t *testing.T) {
+	p, _, _ := picking(t)
+	tryAs(p, "1.1.1.1", node1, false)
+	gen, watched := p.silentNow("1.1.1.1")
+	if !watched {
+		t.Fatal("not watched")
+	}
+	if p.relayNoAnswer(gen, "1.1.1.1", true) || p.deadNow("1.1.1.1") {
+		t.Fatal("dead by a fast end")
+	}
+	if !p.relayNoAnswer(gen, "1.1.1.1", false) || !p.deadNow("1.1.1.1") || p.mutedNow("1.1.1.1") {
+		t.Fatal("not dead")
+	}
+}
+
+// Direct only and the direct try fails too (no ServerHello, or no TCP):
+// dead at once, not the strategy's, and the first refused connection
+// probes it: one miss heals at once.
+func TestAddr_DirectOnlyFailsIsDead(t *testing.T) {
+	p, _, file := picking(t)
+	out := captureLog(t)
+	winner(p)
+	directOnly(t, p, "3.3.3.3", node1)
+	fails, attempts := p.fails, p.attempts
+	tryAs(p, "3.3.3.3", node1, false)
+	if !p.deadNow("3.3.3.3") || readMap(t, file)["cell:25001"].Dead["3.3.3.3"] == 0 {
+		t.Fatal("not dead")
+	}
+	if p.fails != fails || p.attempts != attempts {
+		t.Fatalf("fails %d, attempts %d: counted", p.fails, p.attempts)
+	}
+	if !slices.Contains(out.lines, "sni desync: 3.3.3.3: direct fails too, relay never reached it → dead") {
+		t.Fatalf("lines %q", out.lines)
+	}
+	gen, due := p.recheckDue("3.3.3.3")
+	if !due {
+		t.Fatal("no recheck at once")
+	}
+	p.recheckDone(gen, "3.3.3.3", true, false)
+	if p.deadNow("3.3.3.3") || readMap(t, file)["cell:25001"].Dead["3.3.3.3"] != 0 || p.addr("3.3.3.3").hello {
+		t.Fatalf("after the recheck: %+v", p.addr("3.3.3.3"))
+	}
+
+	directOnly(t, p, "4.4.4.4", node2)
+	_, gen, _ = p.pick("4.4.4.4", node2)
+	p.unreachable(gen, "4.4.4.4")
+	if !p.deadNow("4.4.4.4") {
+		t.Fatal("no TCP: not dead")
+	}
+}
+
+// A network whose caches the relay does not reach: their early deaths are
+// no strategy's, the winner stays.
+func TestAddr_DirectOnlyEarlyDeaths(t *testing.T) {
+	p, _, _ := picking(t)
+	winner(p)
+	for _, ip := range []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"} {
+		directOnly(t, p, ip, node1)
+		advance(p, time.Second)
+		diedEarly(p, ip, node1)
+		if got, _ := tryAs(p, ip, node1, true); got == "relay" {
+			t.Fatalf("%s by relay", ip)
+		}
+	}
+	if p.fails != 0 || p.curID() != "rec2" || p.verdict() != verdictWorks || p.tallyNow().empty != 3 {
+		t.Fatalf("fails %d, on %s, %s, %+v", p.fails, p.curID(), p.verdict(), p.tallyNow())
+	}
+}
+
+// Direct only lasts silentFor: then an early death goes by relay again.
+func TestAddr_DirectOnlyEnds(t *testing.T) {
+	p, _, _ := picking(t)
+	winner(p)
+	directOnly(t, p, "3.3.3.3", node1)
+	advance(p, silentFor)
+	if _, watched := p.silentNow("3.3.3.3"); !watched || p.mutedNow("3.3.3.3") {
+		t.Fatal("still direct only")
+	}
+	diedEarly(p, "3.3.3.3", node1)
+	if got, _ := tryAs(p, "3.3.3.3", node1, true); got != "relay" {
+		t.Fatalf("early death: %s", got)
+	}
+}
+
+// One that answers direct races no leg, even in a silent cluster; others do.
+func TestAddr_HelloNoRace(t *testing.T) {
+	p, _, _ := picking(t)
+	winner(p)
+	tryAs(p, "10.0.0.3", node3, true)
+	p.mu.Lock()
+	p.clusterSilent.put("sn-oj5hn5", p.now().Add(silentFor))
+	p.mu.Unlock()
+	if r := raceOf(p, "10.0.0.3", node3); r >= 0 {
+		t.Fatalf("hello, silent cluster: race after %s", r)
+	}
+	if r := raceOf(p, "10.0.0.1", node1); r != 0 {
+		t.Fatalf("silent cluster: race after %s", r)
+	}
+	tryAs(p, "10.0.0.4", "www.youtube.com", true)
+	if r := raceOf(p, "10.0.0.4", "www.youtube.com"); r >= 0 {
+		t.Fatalf("hello: race after %s", r)
+	}
+	if r := raceOf(p, "10.0.0.5", "www.youtube.com"); r != raceAfter {
+		t.Fatalf("another: race after %s", r)
+	}
+}
+
+// Another strategy forgets what cur did; what is known of the addresses
+// stays. Another network forgets it all but its dead from the map.
+func TestAddr_StrategyAndNetworkChange(t *testing.T) {
+	p, _, _ := picking(t)
+	winner(p)
+	directOnly(t, p, "3.3.3.3", node1)
+	tryAs(p, "4.4.4.4", "", false)
+	p.markDead(p.gen, "5.5.5.5")
+	p.mu.Lock()
+	p.ips["1.1.1.1"].failed = 1
+	p.fails = needFailsWon - 1
+	p.failLocked("x")
+	p.mu.Unlock()
+	if p.curID() == "rec2" {
+		t.Fatal("strategy kept")
+	}
+	if a := p.addr("1.1.1.1"); a.curOK || a.failed != 0 || !a.hello {
+		t.Fatalf("1.1.1.1 %+v", a)
+	}
+	if !p.mutedNow("3.3.3.3") || !p.addr("3.3.3.3").hello || !p.now().Before(p.addr("4.4.4.4").relayUntil) || !p.deadNow("5.5.5.5") {
+		t.Fatal("lost on a strategy change")
+	}
+	p.setNetKey("cell:25002")
+	for _, ip := range []string{"1.1.1.1", "3.3.3.3", "4.4.4.4", "5.5.5.5"} {
+		if a := p.addr(ip); a != (addrInfo{}) {
+			t.Fatalf("%s on a new network: %+v", ip, a)
+		}
+	}
+	p.setNetKey("cell:25001")
+	if !p.deadNow("5.5.5.5") || p.addr("3.3.3.3") != (addrInfo{}) {
+		t.Fatal("back: not as in the map")
+	}
+}
+
+// What is pending outlives addrMemory addresses that got through.
+func TestAddr_EvictionKeepsPending(t *testing.T) {
+	p, _, _ := picking(t)
+	winner(p)
+	tryAs(p, "9.0.0.1", "", false)
+	directOnly(t, p, "9.0.0.2", "")
+	p.markDead(p.gen, "9.0.0.3")
+	for i := range addrMemory {
+		tryAs(p, fmt.Sprintf("10.9.0.%d", i), "", true)
+	}
+	if !p.now().Before(p.addr("9.0.0.1").relayUntil) || !p.mutedNow("9.0.0.2") || !p.deadNow("9.0.0.3") {
+		t.Fatal("dropped")
+	}
+	p.mu.Lock()
+	n := len(p.ips)
+	p.mu.Unlock()
+	if n != addrMemory+1 || p.addr("1.1.1.1") != (addrInfo{}) {
+		t.Fatalf("%d kept", n)
+	}
+}
+
+// A burst of connections to a direct only address that all fail to
+// connect: dead by the first, the rest only counted; a direct answer to
+// the recheck brings it back direct.
+func TestAddr_UnreachableBurstUnderMute(t *testing.T) {
+	p, _, _ := picking(t)
+	winner(p)
+	directOnly(t, p, "4.4.4.4", node2)
+	_, gen, _ := p.pick("4.4.4.4", node2)
+	p.unreachable(gen, "4.4.4.4")
+	p.unreachable(gen, "4.4.4.4")
+	g, due := p.recheckDue("4.4.4.4")
+	if !due {
+		t.Fatal("not due")
+	}
+	p.recheckDone(g, "4.4.4.4", true, false)
+	if st, _, _ := p.pick("4.4.4.4", node2); st == nil {
+		t.Fatalf("lifted by a direct probe, yet by relay: %+v", p.addr("4.4.4.4"))
+	}
+}
+
+// Never answered direct: one miss under the winner sends it by relay, the
+// relay is silent too, dead. A direct answer to the recheck ends its time
+// by relay with the mark.
+func TestAddr_DirectLiftEndsRelay(t *testing.T) {
+	p, _, _ := picking(t)
+	winner(p)
+	tryAs(p, "7.7.7.7", node1, false)
+	gen, _ := p.silentNow("7.7.7.7")
+	p.relayNoAnswer(gen, "7.7.7.7", false)
+	advance(p, deadRecheck)
+	g, due := p.recheckDue("7.7.7.7")
+	if !due {
+		t.Fatal("not due")
+	}
+	p.recheckDone(g, "7.7.7.7", true, false)
+	if st, _, _ := p.pick("7.7.7.7", node1); st == nil {
+		t.Fatalf("lifted by a direct probe, yet by relay: %+v", p.addr("7.7.7.7"))
 	}
 }

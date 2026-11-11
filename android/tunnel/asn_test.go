@@ -176,7 +176,8 @@ func TestSetNetKey_WifiAsksForTheProvider(t *testing.T) {
 	p.started(p.file)
 	time.Sleep(100 * time.Millisecond)
 	p.mu.Lock()
-	kept := p.ok.has("1.1.1.1")
+	a := p.addrLocked("1.1.1.1")
+	kept := a != nil && a.curOK
 	p.mu.Unlock()
 	if !kept || asked.Load() != 1 {
 		t.Fatalf("after a restart: kept %v, asked %d times", kept, asked.Load())

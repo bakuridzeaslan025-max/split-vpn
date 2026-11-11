@@ -104,6 +104,94 @@ func (a *addrs) has(ip string) bool { _, ok := a.m[ip]; return ok }
 func (a *addrs) del(ip string)      { delete(a.m, ip) }
 func (a *addrs) len() int           { return len(a.m) }
 
+// addrInfo is what the picker knows of one address on this network.
+type addrInfo struct {
+	hello      bool      // a real direct try got its ServerHello since the relay last proved useless to it
+	curOK      bool      // cur got through to it
+	noHello    bool      // the last direct try got no ServerHello: its relay sessions are watched
+	relayUntil time.Time // pick sends it by relay until then
+	muteUntil  time.Time // the relay was silent to it with the VDS alive, direct answered: direct only
+	deadUntil  time.Time // its connections refused until then
+	checked    time.Time // a dead one's last probe, see recheckDue
+	failed     int       // failures counted against cur, forgiven if it turns dead
+	used       uint64
+}
+
+// addrLocked is ip's entry, nil if none. A dead one past its time is
+// dropped here.
+func (p *pickState) addrLocked(ip string) *addrInfo {
+	a := p.ips[ip]
+	if a != nil && !a.deadUntil.IsZero() && !p.now().Before(a.deadUntil) {
+		delete(p.ips, ip)
+		return nil
+	}
+	return a
+}
+
+// putLocked is ip's entry, a new one if none. addrMemory of them are kept
+// besides the dead ones: the least recently used of those with nothing
+// pending goes first, then the least recently used of the rest. The dead
+// are never dropped for room.
+func (p *pickState) putLocked(ip string) *addrInfo {
+	if a := p.addrLocked(ip); a != nil {
+		return a
+	}
+	if p.ips == nil {
+		p.ips = map[string]*addrInfo{}
+	}
+	p.tick++
+	a := &addrInfo{used: p.tick}
+	p.ips[ip] = a
+	now := p.now()
+	n := 0
+	for _, e := range p.ips {
+		if !now.Before(e.deadUntil) {
+			n++
+		}
+	}
+	if n <= addrMemory {
+		return a
+	}
+	drop, dropIdle := "", false
+	for k, e := range p.ips {
+		if k == ip || now.Before(e.deadUntil) {
+			continue
+		}
+		idle := !now.Before(e.relayUntil) && !now.Before(e.muteUntil)
+		if drop == "" || idle && !dropIdle || idle == dropIdle && e.used < p.ips[drop].used {
+			drop, dropIdle = k, idle
+		}
+	}
+	delete(p.ips, drop)
+	return a
+}
+
+func (p *pickState) usedLocked(a *addrInfo) {
+	p.tick++
+	a.used = p.tick
+}
+
+// clearLocked forgets the failures counted against cur, and with curOK
+// where it got through: a new strategy starts from nothing.
+func (p *pickState) clearLocked(curOK bool) {
+	for _, a := range p.ips {
+		a.failed = 0
+		if curOK {
+			a.curOK = false
+		}
+	}
+}
+
+func (p *pickState) okCountLocked() int {
+	n := 0
+	for _, a := range p.ips {
+		if a.curOK {
+			n++
+		}
+	}
+	return n
+}
+
 type netEntry struct {
 	Win  string `json:"win,omitempty"`
 	None bool   `json:"none,omitempty"`
@@ -133,18 +221,22 @@ type pickState struct {
 	passed    bool   // cur got through here at least once
 	confirmed bool   // found now: got through to two addresses
 	fails     int
-	lastFail  time.Time      // connections started before it are the same burst
-	tried     int            // strategies failed in a row
-	ok        addrs          // where cur got through
-	silent    addrs          // relay until
-	dead      addrs          // silent through the relay too: connections refused until
-	failed    map[string]int // ip → failures counted against cur, forgiven if it turns dead
-	noHello   addrs          // the direct try got no ServerHello back: its relay session is watched
-	checked   addrs          // dead ones by when they were last probed, see recheckDue
+	lastFail  time.Time // connections started before it are the same burst
+	tried     int       // strategies failed in a row
+	ips       map[string]*addrInfo
+	tick      uint64 // addrInfo.used
 	noneUntil time.Time
 	slow      int
 	attempts  int
 	lastWin   string // any network's latest winner: where a nameless one starts
+
+	// googlevideo clusters (videoCluster) whose new addresses race the
+	// relay at once: two of their addresses silent now, none got through
+	// on this network. Only another network forgets them: a strategy's
+	// change says nothing about the nodes.
+	clusterFirst  map[string]string // cluster → its first silent address
+	clusterSilent addrs             // cluster → racing at once until
+	okClusters    addrs             // clusters an address of which got through
 
 	// What the release log says about this network's direct tries:
 	// counts, not a line per connection.
@@ -165,12 +257,15 @@ type tally struct {
 	ok, failed, skipped int
 	empty               int    // got the ServerHello, asked, got next to nothing
 	lastEmpty           string // how the latest of those ended
+	// Relay legs started, sessions they served, and direct answers that
+	// came after the relay took the session: those are in ok too.
+	raced, relayWon, late int
 }
 
 var picker = &pickState{now: time.Now}
 
-// deadWait: a silent address's relay session with no byte back this long
-// is dead both ways. A var for the tests.
+// deadWait: a watched address's relay session with no byte back this long
+// says the relay does not reach it, see relayNoAnswer. A var for the tests.
 var deadWait = 4 * time.Second
 
 // started: Start's turn. The map is read once per process (Stop and Start
@@ -256,8 +351,17 @@ func (p *pickState) summaryLocked() {
 	if t.empty > 0 {
 		empty = fmt.Sprintf(" (%d empty, last: %s)", t.empty, t.lastEmpty)
 	}
-	log.Printf("sni desync: on %s: %d direct ok%s, %d failed, %d straight to relay",
-		p.nameLocked(), t.ok, empty, t.failed, t.skipped)
+	log.Printf("sni desync: on %s: %d direct ok%s, %d failed, %d straight to relay, %d raced (%d relay won, %d direct late)",
+		p.nameLocked(), t.ok, empty, t.failed, t.skipped, t.raced, t.relayWon, t.late)
+}
+
+// countRace tallies a race of this network.
+func (p *pickState) countRace(gen uint64, count func(t *tally)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if gen == p.gen {
+		count(&p.tally)
+	}
 }
 
 // stopped: Stop's turn. The tally goes on (Start keeps the memory), the
@@ -296,8 +400,8 @@ func (p *pickState) resetLocked() {
 	p.cur, p.won, p.confirmed = "", false, false
 	p.fails, p.tried, p.slow, p.attempts = 0, 0, 0, 0
 	p.lastFail, p.noneUntil = time.Time{}, time.Time{}
-	p.ok, p.silent, p.dead, p.failed, p.passed = addrs{}, addrs{}, addrs{}, nil, false
-	p.noHello, p.checked = addrs{}, addrs{}
+	p.ips, p.tick, p.passed = nil, 0, false
+	p.clusterFirst, p.clusterSilent, p.okClusters = nil, addrs{}, addrs{}
 	p.tally, p.summarized, p.okSinceFail, p.lastFailLog = tally{}, tally{}, 0, time.Time{}
 }
 
@@ -314,7 +418,7 @@ func (p *pickState) applyLocked() {
 			}
 			for ip, until := range e.Dead {
 				if t := time.Unix(until, 0); p.now().Before(t) {
-					p.dead.put(ip, t)
+					p.putLocked(ip).deadUntil = t
 				}
 			}
 			if e.Win != "" && hasID(list, e.Win) {
@@ -382,12 +486,13 @@ func (p *pickState) lookupASN(gen uint64, raw string) {
 	p.unlockAndTell()
 }
 
-// pick is the strategy for a new connection to ip, nil for the relay; gen
-// goes back with its result.
-func (p *pickState) pick(ip string) (*strategy, uint64) {
+// pick is the strategy for a new connection to ip named name, nil for the
+// relay; gen goes back with its result. race is when a relay leg races the
+// direct try: negative never, 0 at once.
+func (p *pickState) pick(ip, name string) (st *strategy, gen uint64, race time.Duration) {
 	list := strategiesNow()
 	if !directOn.Load() || len(list) == 0 {
-		return nil, 0
+		return nil, 0, -1
 	}
 	p.mu.Lock()
 	// The week's end changes the verdict.
@@ -395,42 +500,166 @@ func (p *pickState) pick(ip string) (*strategy, uint64) {
 	now := p.now()
 	if !p.noneUntil.IsZero() {
 		if now.Before(p.noneUntil) {
-			return nil, 0
+			return nil, 0, -1
 		}
 		p.noneUntil, p.tried = time.Time{}, 0
 		log.Printf("sni desync: %s, a week without a strategy is over, trying from %s", p.nameLocked(), p.cur)
 	}
-	if until, ok := p.silent.get(ip); ok {
-		if now.Before(until) {
+	a := p.addrLocked(ip)
+	if a != nil {
+		p.usedLocked(a)
+		if now.Before(a.relayUntil) {
 			p.tally.skipped++
-			return nil, 0
+			return nil, 0, -1
 		}
-		p.silent.del(ip)
 	}
 	i := slices.IndexFunc(list, func(s strategy) bool { return s.id == p.cur })
 	if i < 0 {
 		p.restartLocked()
 		i = slices.IndexFunc(list, func(s strategy) bool { return s.id == p.cur })
 	}
-	return &list[i], p.gen
+	race = raceBase()
+	switch {
+	case race < 0:
+	// It answers direct: a leg would only take the session from it.
+	case a != nil && (a.hello || now.Before(a.muteUntil)):
+		race = -1
+	case p.clusterSilentLocked(videoCluster(name), now):
+		race = 0
+	case len(list[i].ttl1) > 0:
+		race += raceTTL1
+	}
+	return &list[i], p.gen, race
 }
 
-// silentNow: ip goes by relay because the direct path got no ServerHello
-// from it: the winner never got through to it, or the try had no ServerHello
-// (also before the winner is confirmed). gen goes back with markDead.
+// videoCluster is the group of googlevideo's cache nodes a name belongs
+// to: rr3---sn-oj5hn5-5g.googlevideo.com → sn-oj5hn5; "" for other names.
+// Not the whole node name: one group shows up under several suffixes.
+func videoCluster(name string) string {
+	host, ok := strings.CutSuffix(strings.ToLower(strings.TrimSuffix(name, ".")), ".googlevideo.com")
+	if !ok || strings.Contains(host, ".") {
+		return ""
+	}
+	_, node, ok := strings.Cut(host, "---")
+	tok, isNode := strings.CutPrefix(node, "sn-")
+	if !ok || !isNode {
+		return ""
+	}
+	tok, _, _ = strings.Cut(tok, "-")
+	if tok == "" {
+		return ""
+	}
+	return "sn-" + tok
+}
+
+func (p *pickState) clusterSilentLocked(c string, now time.Time) bool {
+	until, ok := p.clusterSilent.get(c)
+	return c != "" && ok && now.Before(until)
+}
+
+// silentLocked: ip goes by relay now.
+func (p *pickState) silentLocked(ip string, now time.Time) bool {
+	a := p.addrLocked(ip)
+	return a != nil && now.Before(a.relayUntil)
+}
+
+// clusterSilencedLocked: ip of cluster c just turned silent. The second
+// address of a cluster silent at once, with none of it ever through here,
+// makes the whole cluster race the relay at once; each later one extends
+// that. One silent address is no sign: a live cluster has those too.
+func (p *pickState) clusterSilencedLocked(c, ip string, now time.Time) {
+	if c == "" || p.okClusters.has(c) {
+		return
+	}
+	if p.clusterSilentLocked(c, now) {
+		p.clusterSilent.put(c, now.Add(silentFor))
+		return
+	}
+	if first, ok := p.clusterFirst[c]; ok && p.silentLocked(first, now) {
+		if first != ip {
+			p.clusterSilent.put(c, now.Add(silentFor))
+			log.Printf("sni desync: cluster %s silent (2 addresses) → relay races at once", c)
+		}
+		return
+	}
+	// The first one's mark is over: this one takes its place.
+	if p.clusterFirst == nil {
+		p.clusterFirst = map[string]string{}
+	}
+	if _, in := p.clusterFirst[c]; !in && len(p.clusterFirst) >= addrMemory {
+		for k := range p.clusterFirst {
+			delete(p.clusterFirst, k)
+			break
+		}
+	}
+	p.clusterFirst[c] = ip
+}
+
+// silentNow: ip's relayed sessions are watched (gen goes back with
+// relayNoAnswer). It goes by relay because the direct path got no
+// ServerHello from it: the winner never got through to it, or the try had
+// no ServerHello (also before the winner is confirmed). Or it answered
+// direct: a leg that won by the VDS's 101 may serve a node the relay does
+// not reach, the session would hang till the VDS times out. Not while it
+// is direct only.
 func (p *pickState) silentNow(ip string) (uint64, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	until, ok := p.silent.get(ip)
-	return p.gen, ok && p.now().Before(until) || p.noHello.has(ip)
+	now := p.now()
+	a := p.addrLocked(ip)
+	return p.gen, a != nil && (now.Before(a.relayUntil) || a.noHello || a.hello) && !now.Before(a.muteUntil)
+}
+
+func (p *pickState) mutedNow(ip string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a := p.addrLocked(ip)
+	return a != nil && p.now().Before(a.muteUntil)
+}
+
+// helloNow: a real direct try to ip got its ServerHello, see addrInfo.hello.
+func (p *pickState) helloNow(ip string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a := p.addrLocked(ip)
+	return a != nil && a.hello
+}
+
+// relayNoAnswer: a watched relayed session to ip got no byte back while
+// the VDS answered (eof: its relay side ended it first, before deadWait).
+// One that answered direct is not dead, the relay does not reach it (an
+// ISP's own cache seen from abroad): direct only for silentFor. One that
+// never did is dead, unless the end was fast: one reset of a node must not
+// refuse a blocked Google node the relay usually serves. Reports whether
+// ip's sessions are to be closed.
+func (p *pickState) relayNoAnswer(gen uint64, ip string, eof bool) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if gen != p.gen {
+		return false
+	}
+	now := p.now()
+	a := p.addrLocked(ip)
+	switch {
+	case a != nil && now.Before(a.deadUntil):
+		return true
+	case a != nil && now.Before(a.muteUntil):
+		return false
+	case a != nil && a.hello:
+		log.Printf("sni desync: %s: relay does not reach it → direct only", ip)
+		a.muteUntil, a.relayUntil = now.Add(silentFor), time.Time{}
+		return true
+	case eof:
+		return false
+	}
+	p.markDeadLocked(ip)
+	return true
 }
 
 // markDead: a silent address the relay does not reach either, such as a
 // Google cache inside one ISP's network seen from another network. Its
-// connections get refused for deadFor, on this network even after a
-// restart: a fast error instead of the player's 30 s handshake timeout.
-// A repeated mark does not extend it (recheckDone does). Its failures
-// are not the strategy's.
+// connections get refused for deadFor, see deadLocked. A repeated mark
+// does not extend it (recheckDone does).
 // Reports whether ip is dead on this network now.
 func (p *pickState) markDead(gen uint64, ip string) bool {
 	p.mu.Lock()
@@ -438,21 +667,33 @@ func (p *pickState) markDead(gen uint64, ip string) bool {
 	if gen != p.gen {
 		return false
 	}
-	now := p.now()
-	if until, ok := p.dead.get(ip); ok && now.Before(until) {
-		return true
+	p.markDeadLocked(ip)
+	return true
+}
+
+func (p *pickState) markDeadLocked(ip string) {
+	if a := p.addrLocked(ip); a != nil && p.now().Before(a.deadUntil) {
+		return
 	}
 	log.Printf("sni desync: %s silent through the relay too → closing, refusing connections for %s", ip, deadFor)
-	until := now.Add(deadFor)
-	p.dead.put(ip, until)
 	// The check that found it dead is as fresh as a recheck.
-	p.checked.put(ip, now)
-	if n := p.failed[ip]; n > 0 {
-		delete(p.failed, ip)
-		p.fails = max(p.fails-n, 0)
+	p.deadLocked(ip).checked = p.now()
+}
+
+// deadLocked: ip's connections get refused for deadFor, on this network
+// even after a restart: a fast error instead of the player's 30 s
+// handshake timeout. Its failures are not the strategy's.
+func (p *pickState) deadLocked(ip string) *addrInfo {
+	now := p.now()
+	until := now.Add(deadFor)
+	a := p.putLocked(ip)
+	a.deadUntil, a.hello, a.muteUntil, a.checked = until, false, time.Time{}, time.Time{}
+	if a.failed > 0 {
+		p.fails = max(p.fails-a.failed, 0)
+		a.failed = 0
 	}
 	if p.key == "" {
-		return true
+		return a
 	}
 	e := p.nets[p.key]
 	dead := map[string]int64{ip: until.Unix()}
@@ -479,64 +720,100 @@ func (p *pickState) markDead(gen uint64, ip string) bool {
 	}
 	p.nets[p.key] = e
 	p.writeLocked()
-	return true
+	return a
+}
+
+// liftLocked: dead ip answered how, it is no longer dead here nor in the
+// map. An answer direct also ends its time by relay: the relay is what
+// found it dead.
+func (p *pickState) liftLocked(ip, how string, direct bool) {
+	log.Printf("sni desync: %s answers %s → no longer dead", ip, how)
+	a := p.ips[ip]
+	a.deadUntil, a.checked = time.Time{}, time.Time{}
+	if direct {
+		a.relayUntil = time.Time{}
+	}
+	if e, ok := p.nets[p.key]; ok && p.key != "" {
+		delete(e.Dead, ip)
+		p.nets[p.key] = e
+		p.writeLocked()
+	}
 }
 
 func (p *pickState) deadNow(ip string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	until, ok := p.dead.get(ip)
-	return ok && p.now().Before(until)
+	a := p.addrLocked(ip)
+	return a != nil && p.now().Before(a.deadUntil)
 }
 
 // recheckDue: the player asks for a dead address that was not probed for
-// deadRecheck (or since it came from the map). True once per due time: the
-// caller probes it and reports with recheckDone.
+// deadRecheck (or since it came from the map, or turned dead without a
+// probe). True once per due time: the caller probes it and reports with
+// recheckDone.
 func (p *pickState) recheckDue(ip string) (uint64, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.now()
-	if at, ok := p.checked.get(ip); ok && now.Sub(at) < deadRecheck {
+	a := p.addrLocked(ip)
+	if a == nil || !now.Before(a.deadUntil) || now.Sub(a.checked) < deadRecheck {
 		return 0, false
 	}
-	p.checked.put(ip, now)
+	a.checked = now
 	return p.gen, true
 }
 
-// recheckDone: alive, the address is no longer dead; silent (with the VDS
-// answering others meanwhile), it stays dead for deadFor from now. Both
-// written to the map.
-func (p *pickState) recheckDone(gen uint64, ip string, alive bool) {
+// directProbe is the strategy a recheck tries a dead address with
+// directly, nil while direct tries are off here; gen as pick's. Not a try:
+// it counts for nothing, neither the strategy nor the verdict.
+func (p *pickState) directProbe() (*strategy, uint64) {
+	list := strategiesNow()
+	if !directOn.Load() || len(list) == 0 {
+		return nil, 0
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if gen != p.gen || !p.dead.has(ip) {
+	i := slices.IndexFunc(list, func(s strategy) bool { return s.id == p.cur })
+	if i < 0 || p.now().Before(p.noneUntil) {
+		return nil, 0
+	}
+	return &list[i], p.gen
+}
+
+// recheckDone: direct or relay, the probe that got an answer: the address
+// is no longer dead. Neither (both probes sent, the VDS answering others
+// meanwhile): it stays dead for deadFor from now. Both written to the map.
+func (p *pickState) recheckDone(gen uint64, ip string, direct, relay bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a := p.addrLocked(ip)
+	if gen != p.gen || a == nil || !p.now().Before(a.deadUntil) {
 		return
 	}
-	until := p.now().Add(deadFor)
-	if alive {
-		log.Printf("sni desync: %s answers through the relay again → no longer dead", ip)
-		p.dead.del(ip)
-	} else {
-		p.dead.put(ip, until)
+	switch {
+	case direct:
+		p.liftLocked(ip, "a direct probe", true)
+		return
+	case relay:
+		p.liftLocked(ip, "through the relay again", false)
+		return
 	}
+	a.deadUntil = p.now().Add(deadFor)
 	if p.key == "" {
 		return
 	}
-	e := p.nets[p.key]
-	if alive {
-		delete(e.Dead, ip)
-	} else if e.Dead != nil {
-		e.Dead[ip] = until.Unix()
+	if e := p.nets[p.key]; e.Dead != nil {
+		e.Dead[ip] = a.deadUntil.Unix()
+		p.writeLocked()
 	}
-	p.nets[p.key] = e
-	p.writeLocked()
 }
 
 // restartLocked: the current strategy is gone from Remote Config's list
 // (or the list was empty): start this network again where the map says.
 func (p *pickState) restartLocked() {
 	p.won, p.confirmed, p.passed = false, false, false
-	p.fails, p.tried, p.ok, p.failed = 0, 0, addrs{}, nil
+	p.fails, p.tried = 0, 0
+	p.clearLocked(true)
 	p.applyLocked()
 }
 
@@ -548,37 +825,71 @@ func (p *pickState) unreachable(gen uint64, ip string) (since int, logFail bool)
 	if gen != p.gen {
 		return 0, false
 	}
-	p.silent.put(ip, p.now().Add(silentFor))
+	now := p.now()
+	switch a := p.putLocked(ip); {
+	// One of a burst, after another turned it dead.
+	case now.Before(a.deadUntil):
+	case now.Before(a.muteUntil):
+		p.directOnlyFailedLocked(ip)
+	default:
+		a.relayUntil = now.Add(silentFor)
+	}
 	return p.countLocked(false)
 }
 
-// result of a direct try: did the server answer the hello. start is when
-// the connection began: failures of one burst of parallel ones count once.
-// since and logFail: see countLocked.
-func (p *pickState) result(gen uint64, id, ip string, start time.Time, ok bool, why string) (since int, logFail bool) {
+// directOnlyFailedLocked: ip, direct only, failed direct too: it is dead.
+// Not probed yet: the first refused connection probes it, a single miss
+// heals within desyncWait.
+func (p *pickState) directOnlyFailedLocked(ip string) {
+	log.Printf("sni desync: %s: direct fails too, relay never reached it → dead", ip)
+	p.deadLocked(ip)
+}
+
+// result of a direct try to ip named name: did the server answer the
+// hello. start is when the connection began: failures of one burst of
+// parallel ones count once. since and logFail: see countLocked.
+func (p *pickState) result(gen uint64, id, ip, name string, start time.Time, ok bool, why string) (since int, logFail bool) {
 	p.mu.Lock()
 	defer p.unlockAndTell()
 	if gen != p.gen {
 		return 0, false
 	}
 	since, logFail = p.countLocked(ok)
+	c := videoCluster(name)
+	now := p.now()
+	a := p.putLocked(ip)
+	p.usedLocked(a)
 	if ok {
-		p.noHello.del(ip)
+		a.hello, a.noHello = true, false
+		if now.Before(a.deadUntil) {
+			p.liftLocked(ip, "direct", true)
+		}
+		// Whichever strategy, and even with the relay serving the session:
+		// the nodes are reachable.
+		if c != "" {
+			p.okClusters.put(c, time.Time{})
+			p.clusterSilent.del(c)
+		}
 	} else {
-		p.noHello.put(ip, time.Time{})
+		a.noHello = true
+		if now.Before(a.muteUntil) {
+			p.directOnlyFailedLocked(ip)
+			return
+		}
 	}
-	if id != p.cur || p.now().Before(p.noneUntil) {
+	if id != p.cur || now.Before(p.noneUntil) {
 		return
 	}
 	// A try begun before its address turned dead: not the strategy's.
-	if until, dead := p.dead.get(ip); !ok && dead && p.now().Before(until) {
+	if !ok && now.Before(a.deadUntil) {
 		return
 	}
 	p.attempts++
 	if ok {
-		p.fails, p.tried, p.passed, p.failed = 0, 0, true, nil
-		p.ok.put(ip, time.Time{})
-		if p.ok.len() >= 2 && !p.confirmed {
+		p.fails, p.tried, p.passed = 0, 0, true
+		p.clearLocked(false)
+		a.curOK = true
+		if p.okCountLocked() >= 2 && !p.confirmed {
 			p.confirmed, p.won, p.lastWin = true, true, id
 			log.Printf("sni desync: WINNER %s on %s (2 addresses)", id, p.nameLocked())
 			p.saveLocked(netEntry{Win: id})
@@ -587,18 +898,16 @@ func (p *pickState) result(gen uint64, id, ip string, start time.Time, ok bool, 
 	}
 	// Google's nodes get blocked by address too: a winner silent where it
 	// never got through blames the address, not the strategy.
-	if p.confirmed && !p.ok.has(ip) {
-		if !p.silent.has(ip) {
+	if p.confirmed && !a.curOK {
+		if !now.Before(a.relayUntil) {
 			log.Printf("sni desync: %s silent under %s → relay for %s", ip, id, silentFor)
 		}
-		p.silent.put(ip, p.now().Add(silentFor))
+		a.relayUntil = now.Add(silentFor)
+		p.clusterSilencedLocked(c, ip, now)
 		return
 	}
 	if !start.Before(p.lastFail) {
-		if p.failed == nil {
-			p.failed = map[string]int{}
-		}
-		p.failed[ip]++
+		a.failed++
 		p.failLocked(why)
 	}
 	return
@@ -621,7 +930,8 @@ func (p *pickState) failLocked(why string) {
 	prev := p.cur
 	i := slices.IndexFunc(list, func(s strategy) bool { return s.id == prev })
 	p.cur = list[(i+1)%len(list)].id
-	p.won, p.confirmed, p.passed, p.fails, p.ok, p.failed = false, false, false, 0, addrs{}, nil
+	p.won, p.confirmed, p.passed, p.fails = false, false, false, 0
+	p.clearLocked(true)
 	p.tried++
 	if p.tried >= len(list) {
 		p.noneLocked(fmt.Sprintf("all %d failed, last %s: %s", len(list), prev, why))
@@ -659,8 +969,14 @@ func (p *pickState) finished(gen uint64, id, ip, name string, f finish) {
 		p.tally.lastEmpty = f.why
 	}
 	if f.serverFirst && f.dur < earlyDeath && f.down < earlyDeathDown && f.up > earlyDeathUp {
-		p.ok.del(ip)
-		p.silent.put(ip, p.now().Add(silentFor))
+		a := p.putLocked(ip)
+		a.curOK = false
+		// Not the strategy's either: three of those would drop the winner
+		// on a network whose caches the relay does not reach.
+		if p.now().Before(a.muteUntil) {
+			return
+		}
+		a.relayUntil = p.now().Add(silentFor)
 		log.Printf("sni desync: %s died early under %s (%s) → relay for %s", ip, id, f.why, silentFor)
 		if id == p.cur && !p.now().Before(p.noneUntil) && !f.start.Before(p.lastFail) {
 			p.failLocked("died early")
