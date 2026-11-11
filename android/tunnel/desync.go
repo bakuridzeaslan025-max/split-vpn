@@ -24,6 +24,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	utls "github.com/refraction-networking/utls"
 )
 
 var desyncHosts = []string{
@@ -51,7 +53,45 @@ var (
 	// The whole wait for a ClientHello that came in two segments: its
 	// header already told the length, the rest is on its way.
 	helloWait = 300 * time.Millisecond
+	// No answer this long: a relay leg races the direct try and takes the
+	// session if its handshake is done first. ServerHello times are
+	// two-humped, few between 0.5 and 1 s; the slow hump, past
+	// raceAfter + the VDS handshake, goes by relay whole: the price in VDS
+	// traffic. Remote Config's yt_race_ms replaces it.
+	raceAfter = 600 * time.Millisecond
 )
+
+// TTL 1 strategies get their answer only after the kernel's RTO resends
+// the lost segment.
+const raceTTL1 = 300 * time.Millisecond
+
+// raceMs is yt_race_ms; -1 is raceAfter.
+var raceMs atomic.Int64
+
+func init() { raceMs.Store(-1) }
+
+// SetRaceMs sets Remote Config's yt_race_ms: how long a direct YouTube try
+// waits for the server before a relay leg races it, in ms (300 more for
+// TTL 1 strategies). 0 is no race at all, negative the built-in 600. New
+// connections read it.
+func SetRaceMs(ms int) { raceMs.Store(int64(max(ms, -1))) }
+
+// raceBase is the leg's delay before a strategy adds its own; negative:
+// no race.
+func raceBase() time.Duration {
+	switch ms := raceMs.Load(); {
+	case ms < 0:
+		return raceAfter
+	case ms == 0:
+		return -1
+	default:
+		return time.Duration(ms) * time.Millisecond
+	}
+}
+
+// racing counts tryDesync's goroutines (the direct try, the relay leg), for
+// the tests to wait for.
+var racing atomic.Int32
 
 // Strategies are data (Remote Config yt_strategies), parsed here and,
 // duplicated, in rc/tool/strategies.go: keep the two in step, the vector in
@@ -687,6 +727,26 @@ func dialDesync(name, dst string, hello []byte, st *strategy) (net.Conn, []byte,
 	return tr, ans[:n], fmt.Sprintf("%s, connect %s, first %d bytes after %s", desc, tConn.Round(time.Millisecond), n, tFirst.Round(time.Millisecond)), nil
 }
 
+// probeDirect: does ip:port answer a Chrome hello sent directly the way st
+// says with a ServerHello within desyncWait. A probe of a dead address,
+// not a try: nothing is counted.
+func probeDirect(ip string, port uint16, st *strategy) bool {
+	uc := utls.UClient(nil, &utls.Config{ServerName: probeName}, chromeHello)
+	if err := uc.BuildHandshakeState(); err != nil {
+		return false
+	}
+	h := uc.HandshakeState.Hello.Raw
+	rec := append([]byte{0x16, 3, 1, byte(len(h) >> 8), byte(len(h))}, h...)
+	c, _, _, err := dialDesync(probeName, net.JoinHostPort(ip, strconv.Itoa(int(port))), rec, st)
+	if err != nil {
+		return false
+	}
+	c.Close()
+	return true
+}
+
+const probeName = "redirector.googlevideo.com"
+
 // countConn is the direct socket past the hello: bytes both ways, the
 // peak rate down and how each side ended. Read runs in one goroutine and
 // CloseWrite in the other; both are read only after relay returns.
@@ -787,15 +847,62 @@ func completeHello(c net.Conn, b []byte, deadline time.Time) ([]byte, bool) {
 	return b, len(b) >= want
 }
 
+// desyncVerdict tells the picker how a direct try went, also one whose
+// session the relay took meanwhile, and logs a failure.
+func desyncVerdict(gen uint64, st *strategy, ip, name, dst string, start time.Time, err error) {
+	var since int
+	var logFail bool
+	switch {
+	// No route out at all: this side is offline, which says nothing of
+	// the address (a muted one would turn dead, see unreachable).
+	case errors.Is(err, syscall.ENETUNREACH):
+	case errors.Is(err, errNoConnect):
+		since, logFail = picker.unreachable(gen, ip)
+	default:
+		since, logFail = picker.result(gen, st.id, ip, name, start, err == nil, fmt.Sprint(err))
+	}
+	if err == nil {
+		return
+	}
+	to := "relay"
+	if picker.deadNow(ip) {
+		to = "closed, dead"
+	}
+	switch {
+	case logFail:
+		log.Printf("sni desync %s → %s %s FAIL: %v → %s (%d ok since the last FAIL line)", name, dst, st.id, err, to, since)
+	case verbose.Load():
+		log.Printf("sni desync %s → %s %s FAIL: %v → %s", name, dst, st.id, err, to)
+	}
+}
+
+type desyncTry struct {
+	c    net.Conn
+	ans  []byte
+	desc string
+	err  error
+}
+
+func (r desyncTry) stopped() bool {
+	return errors.Is(r.err, errDesyncStopped) || errors.Is(r.err, net.ErrClosed)
+}
+
+type relayLeg struct {
+	c   net.Conn
+	err error
+}
+
 // tryDesync takes a YouTube connection direct if the picker says so.
 // done: the connection was served (or the tunnel is going away);
 // otherwise the caller relays it with the returned bytes, which may have
-// grown by the rest of the hello.
-func tryDesync(app net.Conn, first []byte, name string, dstIP net.IP, dstPort uint16, t0 time.Time) ([]byte, bool) {
+// grown by the rest of the hello. A relay leg that raced the direct try
+// comes back as leg, or its error as legErr: the caller goes on with that
+// one and dials no other.
+func tryDesync(app net.Conn, first []byte, name string, dstIP net.IP, dstPort uint16, t0 time.Time, cred []byte) (_ []byte, leg net.Conn, legErr error, done bool) {
 	ip := dstIP.String()
-	st, gen := picker.pick(ip)
+	st, gen, race := picker.pick(ip, name)
 	if st == nil {
-		return first, false
+		return first, nil, nil, false
 	}
 	if len(first) >= 5 && len(first) < 5+int(binary.BigEndian.Uint16(first[3:5])) {
 		var whole bool
@@ -803,46 +910,136 @@ func tryDesync(app net.Conn, first []byte, name string, dstIP net.IP, dstPort ui
 		waited := time.Since(t0).Round(time.Millisecond)
 		if !whole {
 			// Cut where it was cut short, the hello would be broken and the
-			// strategy blamed for it.
+			// strategy blamed for it. Direct only: the relay would not reach it
+			// either, and its session is not watched.
+			if picker.mutedNow(ip) {
+				log.Printf("sni desync: hello incomplete after %s, %s direct only → closed", waited, ip)
+				return first, nil, nil, true
+			}
 			log.Printf("sni desync: hello incomplete after %s → relay", waited)
-			return first, false
+			return first, nil, nil, false
 		}
 		log.Printf("sni desync: hello waited %s", waited)
 	}
 	dst := net.JoinHostPort(ip, strconv.Itoa(int(dstPort)))
 	start := time.Now()
-	dc, ans, desc, err := dialDesync(name, dst, first, st)
-	if errors.Is(err, errDesyncStopped) || errors.Is(err, net.ErrClosed) {
-		return first, true
-	}
-	var since int
-	var logFail bool
-	if errors.Is(err, errNoConnect) {
-		since, logFail = picker.unreachable(gen, ip)
-	} else {
-		since, logFail = picker.result(gen, st.id, ip, start, err == nil, fmt.Sprint(err))
-	}
-	if err != nil {
-		to := "relay"
-		if picker.deadNow(ip) {
-			to = "closed, dead"
+	r, leg, legErr := func() (desyncTry, net.Conn, error) {
+		// Closed once this race is decided: a result nobody waits for any
+		// more is its sender's to close.
+		decided := make(chan struct{})
+		defer close(decided)
+		direct := make(chan desyncTry)
+		racing.Add(1)
+		go func() {
+			defer racing.Add(-1)
+			defer guard("desync")
+			var r desyncTry
+			r.c, r.ans, r.desc, r.err = dialDesync(name, dst, first, st)
+			if !r.stopped() {
+				desyncVerdict(gen, st, ip, name, dst, start, r.err)
+			}
+			select {
+			case direct <- r:
+			case <-decided:
+				// The relay took the session: this try ran for its verdict only.
+				if r.c != nil {
+					r.c.Close()
+					picker.countRace(gen, func(t *tally) { t.late++ })
+				}
+			}
+		}()
+		var timer <-chan time.Time
+		if race >= 0 {
+			t := time.NewTimer(race)
+			defer t.Stop()
+			timer = t.C
 		}
-		switch {
-		case logFail:
-			log.Printf("sni desync %s → %s %s FAIL: %v → %s (%d ok since the last FAIL line)", name, dst, st.id, err, to, since)
-		case verbose.Load():
-			log.Printf("sni desync %s → %s %s FAIL: %v → %s", name, dst, st.id, err, to)
+		var legs chan relayLeg // nil: no leg on its way
+		var legErr error
+		for {
+			select {
+			case <-timer:
+				timer = nil
+				// A leg would only be refused (and might take the breaker's
+				// probe, then be cancelled): the dial after a failure as before.
+				if health.refusing() || overQuota() {
+					continue
+				}
+				picker.countRace(gen, func(t *tally) { t.raced++ })
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer cancel()
+				ch := make(chan relayLeg)
+				legs = ch
+				racing.Add(1)
+				go func() {
+					defer racing.Add(-1)
+					defer guard("race leg")
+					c, err := dialRelay(ctx, cred, dstIP, dstPort)
+					select {
+					case ch <- relayLeg{c, err}:
+					case <-decided:
+						if c != nil {
+							c.Close()
+						}
+					}
+				}()
+			case l := <-legs:
+				legs = nil
+				if l.err != nil {
+					// The direct try still has its full wait, as without a race.
+					legErr = l.err
+					continue
+				}
+				// Both came at once: an answered session stays direct.
+				select {
+				case r := <-direct:
+					if r.err == nil || r.stopped() {
+						l.c.Close()
+						return r, nil, nil
+					}
+				default:
+				}
+				picker.countRace(gen, func(t *tally) { t.relayWon++ })
+				if verbose.Load() {
+					log.Printf("sni desync %s → %s race: relay ready after %s", name, ip, time.Since(start).Round(time.Millisecond))
+				}
+				return desyncTry{}, l.c, nil
+			case r := <-direct:
+				switch {
+				case r.err == nil:
+					if legs != nil && verbose.Load() {
+						log.Printf("sni desync %s → %s race: direct won after %s, leg cancelled", name, ip, time.Since(start).Round(time.Millisecond))
+					}
+					return r, nil, nil
+				case r.stopped():
+					return r, nil, nil
+				case legs != nil:
+					// No second dial: the breaker and the refusals would count it twice.
+					l := <-legs
+					if l.err == nil {
+						picker.countRace(gen, func(t *tally) { t.relayWon++ })
+					}
+					return r, l.c, l.err
+				}
+				return r, nil, legErr
+			}
 		}
-		return first, false
+	}()
+	if r.stopped() {
+		return first, nil, nil, true
+	}
+	if r.c == nil {
+		return first, leg, legErr, false
 	}
 	if verbose.Load() {
-		log.Printf("sni desync %s → %s %s ok: %s", name, dst, st.id, desc)
+		log.Printf("sni desync %s → %s %s ok: %s", name, dst, st.id, r.desc)
 	}
-	out := &countConn{Conn: dc}
+	ans := r.ans
+	out := &countConn{Conn: r.c}
 	defer out.Close()
 	app.SetWriteDeadline(time.Now().Add(handshakeTimeout))
 	if _, err := app.Write(ans); err != nil {
-		return first, true
+		return first, nil, nil, true
 	}
 	app.SetWriteDeadline(time.Time{})
 	relay(app, out)
@@ -862,5 +1059,5 @@ func tryDesync(app net.Conn, first []byte, name string, dstIP net.IP, dstPort ui
 		serverFirst: out.serverFirst(), ours: errors.Is(out.readErr, net.ErrClosed),
 		why: fmt.Sprintf("%s, %v", name, out.readErr),
 	})
-	return first, true
+	return first, nil, nil, true
 }

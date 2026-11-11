@@ -3,8 +3,11 @@ package org.duckdns.splitvpn
 import android.content.Context
 
 /** Remote Config keys as fetched. */
-/** [dailyQuotaMb], [ytStrategies]: null when RC has no such key. [dialEventBp]: already [RemoteConfig.parseDialEventBp]'s. */
-internal data class RcValues(val endpoints: String, val minVersion: Long, val latestVersion: Long, val updateUrl: String, val dailyQuotaMb: Long? = null, val ytStrategies: String? = null, val apkUrl: String = "", val dialEventBp: Int = 0, val apkUrls: String = "", val latestName: String = "")
+/**
+ * [dailyQuotaMb], [ytStrategies]: null when RC has no such key. [dialEventBp]: already [RemoteConfig.parseDialEventBp]'s.
+ * [ytRaceMs]: [RemoteConfig.parseYtRaceMs]'s, null for the built-in value.
+ */
+internal data class RcValues(val endpoints: String, val minVersion: Long, val latestVersion: Long, val updateUrl: String, val dailyQuotaMb: Long? = null, val ytStrategies: String? = null, val apkUrl: String = "", val dialEventBp: Int = 0, val apkUrls: String = "", val latestName: String = "", val ytRaceMs: Int? = null)
 
 /**
  * The versions part of Remote Config; the UI gets it in VpnClient's snapshot.
@@ -42,6 +45,7 @@ internal object RemoteConfig {
     const val KEY_LATEST_NAME = "rc.latest_name"
     const val KEY_YT_STRATEGIES = "rc.yt_strategies"
     const val KEY_DIAL_EVENT_BP = "rc.dial_event_bp"
+    const val KEY_YT_RACE_MS = "rc.yt_race_ms"
     private const val KEY_DROPPED = "rc.dropped_endpoints"
     // Two checks of one value, each with its own memory: one key would
     // make them report each other's value as new, by turns.
@@ -75,6 +79,18 @@ internal object RemoteConfig {
         ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).getInt(KEY_DIAL_EVENT_BP, 0)
 
     /**
+     * yt_race_ms: how long a direct YouTube try waits for the server before
+     * a relay leg races it, in ms; 0 is no race at all (the way back to the
+     * old behavior). No key, no number or below 0: null, Go's built-in 600.
+     * Not like dial_event_bp: no key there is 0, here that would turn the race off.
+     */
+    fun parseYtRaceMs(raw: String?): Int? = raw?.trim()?.toIntOrNull()?.takeIf { it >= 0 }
+
+    /** For Go's SetRaceMs: -1 is its built-in value. */
+    fun ytRaceMs(ctx: Context): Int =
+        ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).getInt(KEY_YT_RACE_MS, -1)
+
+    /**
      * RC serves a broken blob on every fetch until someone publishes a fixed
      * one: a report for the first time this blob is seen, a breadcrumb after.
      */
@@ -93,7 +109,7 @@ internal object RemoteConfig {
             val apkUrls = v.apkUrls.trim().takeIf { it.isEmpty() || Updater.parseMirrors(it) != null } ?: "".also {
                 AppLog.e("remote config: apk_urls is no JSON array with a probed mirror, self-update takes apk_url", expected = !firstDrop(ctx, v.apkUrls, KEY_BAD_APK_URLS))
             }
-            ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).edit()
+            val edit = ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).edit()
                 .putLong(KEY_MIN_VERSION, v.minVersion)
                 .putLong(KEY_LATEST_VERSION, v.latestVersion)
                 .putString(KEY_UPDATE_URL, v.updateUrl)
@@ -101,7 +117,8 @@ internal object RemoteConfig {
                 .putString(KEY_APK_URLS, apkUrls)
                 .putString(KEY_LATEST_NAME, v.latestName.trim())
                 .putInt(KEY_DIAL_EVENT_BP, v.dialEventBp)
-                .apply()
+            if (v.ytRaceMs != null) edit.putInt(KEY_YT_RACE_MS, v.ytRaceMs) else edit.remove(KEY_YT_RACE_MS)
+            edit.apply()
             Quota.setLimitMb(ctx, v.dailyQuotaMb)
             // Each entry is Go's to judge (it drops the broken ones); a value
             // that is no list at all keeps what was there.

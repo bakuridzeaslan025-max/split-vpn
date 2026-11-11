@@ -73,6 +73,8 @@ internal class FakeBackend : Backend {
     override fun setEndpointId(id: String) { endpointIds += id }
     @Volatile var dialEvents: Int? = null
     override fun setDialEvents(bp: Int) { dialEvents = bp }
+    @Volatile var raceMs: Int? = null
+    override fun setRaceMs(ms: Int) { raceMs = ms }
     override fun networkChanged() { events += "networkChanged" }
     override fun networkLost() { events += "networkLost" }
     override fun dnsChanged() { events += "dnsChanged" }

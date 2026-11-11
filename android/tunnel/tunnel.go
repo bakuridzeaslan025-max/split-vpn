@@ -654,10 +654,11 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 			log.Printf("sni desync: %s dead, connection refused%s", ip, more)
 		}
 		// The player never waits on the check: it gets the refusal now. A
-		// check that cannot happen does not take the turn.
-		if !health.down() && !overQuota() {
-			if gen, ok := picker.recheckDue(ip); ok {
-				go recheckDead(gen, health.generation(), ip, cred)
+		// check that cannot happen either way does not take the turn.
+		relayOK := !health.down() && !overQuota()
+		if st, _ := picker.directProbe(); st != nil || relayOK {
+			if gen, ok := picker.recheckDue(ip, relayOK); ok {
+				go recheckDead(gen, health.generation(), ip, dstPort, cred)
 			}
 		}
 		r.Complete(true)
@@ -695,37 +696,44 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 	if name == "" {
 		name = "-"
 	}
+	var out net.Conn
+	var err error
+	// The relay's network and endpoint as of this session: the dead check
+	// must not blame the address for a switch of either. Before the direct
+	// try: a relay leg may race it.
+	hgen := health.generation()
 	// YouTube may get through without the relay, see desync.go.
 	if !direct && desyncByName(name) {
 		var done bool
-		if first, done = tryDesync(conn, first, name, dstIP, dstPort, t0); done {
+		if first, out, err, done = tryDesync(conn, first, name, dstIP, dstPort, t0, cred); done {
 			return
 		}
-		// Turned dead while this one tried direct.
+		// Turned dead while this one tried direct, or by its failure: direct
+		// only, the relay does not reach it.
 		if picker.deadNow(ip) {
+			if out != nil {
+				out.Close()
+			}
 			return
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	var out net.Conn
-	var err error
-	// The relay's network and endpoint as of this session: the dead check
-	// must not blame the address for a switch of either.
-	hgen := health.generation()
-	if direct {
-		out, err = dialDirect(ctx, "tcp", fmt.Sprintf("%s:%d", dstIP, dstPort))
-		if err == nil {
-			out = &trackedConn{Conn: out}
-			if !trackConn(out) {
-				out.Close()
-				err = errors.New("stopped")
+	if out == nil && err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if direct {
+			out, err = dialDirect(ctx, "tcp", fmt.Sprintf("%s:%d", dstIP, dstPort))
+			if err == nil {
+				out = &trackedConn{Conn: out}
+				if !trackConn(out) {
+					out.Close()
+					err = errors.New("stopped")
+				}
 			}
+		} else {
+			out, err = dialRelay(ctx, cred, dstIP, dstPort)
 		}
-	} else {
-		out, err = dialRelay(ctx, cred, dstIP, dstPort)
+		cancel()
 	}
-	cancel()
 	if err != nil {
 		// During an outage or over the quota, the relay's own lines tell the story.
 		if direct || !health.down() && !errors.Is(err, errQuota) {
@@ -743,11 +751,6 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 	// must never be refused.
 	lower := strings.ToLower(name)
 	video := !direct && directOn.Load() && strings.HasSuffix(lower, ".googlevideo.com") && strings.Contains(lower, "---sn-")
-	var gen uint64
-	var silent bool
-	if video {
-		gen, silent = picker.silentNow(ip)
-	}
 
 	if len(first) > 0 {
 		out.SetWriteDeadline(time.Now().Add(handshakeTimeout))
@@ -761,28 +764,42 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 		if verbose.Load() {
 			defer wc.logDone(name, dstIP)
 		}
-		if silent {
-			defer videoConns.add(ip, conn, wc)()
-			t := time.AfterFunc(deadWait, func() {
-				defer guard("dead check")
-				if wc.first.Load() == 0 {
-					checkDead(gen, hgen, ip, wc.start, cred)
-				}
-			})
-			defer t.Stop()
+		defer videoConns.add(ip, conn, wc)()
+		// Whether the address is silent is asked only now: a relay leg that
+		// raced the direct try took the session before its verdict. The
+		// picker's network must still be this session's: a new key (an ASN
+		// found) comes without NetworkLost.
+		gen0, _ := picker.silentNow(ip)
+		check := func() {
+			defer guard("dead check")
+			if gen, silent := picker.silentNow(ip); silent && gen == gen0 && wc.first.Load() == 0 {
+				checkDead(gen, hgen, ip, wc.start, cred, wc.relayEnd.Load())
+			}
 		}
+		t := time.AfterFunc(deadWait, check)
+		// Ended by the relay's side before deadWait, nothing back: the
+		// node's reset passed on, or the VDS could not reach it.
+		defer func() {
+			if t.Stop() && wc.relayEnd.Load() {
+				go check()
+			}
+		}()
 		out = wc
 	}
 	relay(conn, out)
 }
 
-// videoConns: relayed googlevideo sessions to silent addresses, so that all
-// of an address's go at once when it turns dead.
+// videoConns: relayed googlevideo sessions to cache nodes, so that all of
+// an address's go at once when it turns dead.
 var videoConns = connsByAddr{m: map[string]map[net.Conn]net.Conn{}}
 
 type connsByAddr struct {
 	mu sync.Mutex
 	m  map[string]map[net.Conn]net.Conn // ip → app side → relay side
+	// ip → first byte of its latest closed session that got one. A player
+	// opens a burst to a node; one may answer and close before the rest's
+	// deadWait runs out, and its answer must still count.
+	last map[string]time.Time
 }
 
 func (c *connsByAddr) add(ip string, app, out net.Conn) (remove func()) {
@@ -799,14 +816,43 @@ func (c *connsByAddr) add(ip string, app, out net.Conn) (remove func()) {
 		if len(c.m[ip]) == 0 {
 			delete(c.m, ip)
 		}
+		if wc, ok := out.(*watchConn); ok {
+			if f := wc.first.Load(); f > 0 {
+				c.keepAnswerLocked(ip, wc.start.Add(time.Duration(f)))
+			}
+		}
 	}
 }
 
-// answered: a session to ip got its first byte after since, the node is
-// alive and this one's silence is the path's.
+// keepAnswerLocked: a check's since is a silent session's start, about
+// deadWait before it fires; the check may then wait on a relay probe. An
+// answer older than answerKept can no longer clear one, so it is dropped.
+func (c *connsByAddr) keepAnswerLocked(ip string, at time.Time) {
+	if c.last == nil {
+		c.last = map[string]time.Time{}
+	}
+	old := time.Now().Add(-answerKept)
+	for k, t := range c.last {
+		if t.Before(old) {
+			delete(c.last, k)
+		}
+	}
+	if at.After(c.last[ip]) && !at.Before(old) {
+		c.last[ip] = at
+	}
+}
+
+// answered: a session to ip got its first byte after since, or up to
+// deadWait before it, the node is alive and this one's silence is the
+// path's. A player's sessions to a node overlap: one may get its bytes just
+// before another starts and stalls. Closed sessions count too.
 func (c *connsByAddr) answered(ip string, since time.Time) bool {
+	since = since.Add(-deadWait)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.last[ip].After(since) {
+		return true
+	}
 	for _, out := range c.m[ip] {
 		if wc, ok := out.(*watchConn); ok {
 			if f := wc.first.Load(); f > 0 && wc.start.Add(time.Duration(f)).After(since) {
@@ -831,13 +877,18 @@ func (c *connsByAddr) close(ip string) {
 // of sessions a player opens to one node.
 var deadChecks sync.Map
 
-// checkDead: a relayed session to a silent address got nothing back in
-// deadWait. The address is dead only if the VDS answers meanwhile: to
-// another session since this one's hello, or to a probe of its own. A
-// relay in trouble says nothing about the address.
-func checkDead(gen, hgen uint64, ip string, since time.Time, cred []byte) {
+// checkDead: a watched relayed session got nothing back in deadWait, or
+// eof: its relay side ended it with nothing back. The address is to blame
+// (see relayNoAnswer) only if the VDS answers meanwhile: to another
+// session since this one's hello, or to a probe of its own. A relay in
+// trouble says nothing about the address.
+func checkDead(gen, hgen uint64, ip string, since time.Time, cred []byte, eof bool) {
 	if picker.deadNow(ip) {
 		videoConns.close(ip)
+		return
+	}
+	// Nothing to blame it for: no probe of the VDS.
+	if eof && !picker.helloNow(ip) {
 		return
 	}
 	if _, busy := deadChecks.LoadOrStore(ip, true); busy {
@@ -853,35 +904,58 @@ func checkDead(gen, hgen uint64, ip string, since time.Time, cred []byte) {
 	if health.generation() != hgen || videoConns.answered(ip, since) {
 		return
 	}
-	if picker.markDead(gen, ip) {
+	if picker.relayNoAnswer(gen, ip, eof) {
 		videoConns.close(ip)
 	}
 }
 
-// recheckDead: a dead address the player asked for again. One hello to it
-// through the relay; any byte back within deadWait means it is alive.
-// Silence extends the mark only if the VDS answered others meanwhile.
-func recheckDead(gen, hgen uint64, ip string, cred []byte) {
+// recheckDead: a dead address the player asked for again, probed both
+// ways at once: directly under the current strategy, and through the
+// relay. Any answer means it is alive. Silence extends the mark only if
+// both probes went out and the VDS answered others meanwhile.
+func recheckDead(gen, hgen uint64, ip string, port uint16, cred []byte) {
 	defer guard("dead recheck")
+	var direct chan bool
+	if st, sgen := picker.directProbe(); st != nil && sgen == gen {
+		direct = make(chan bool, 1)
+		go func() {
+			defer guard("dead recheck direct")
+			alive := probeDirect(ip, port, st)
+			// The relay's probe may take a while yet.
+			if alive {
+				picker.recheckDone(gen, ip, true, false)
+			}
+			direct <- alive
+		}()
+	}
+	relay, silent := recheckRelay(hgen, ip, port, cred)
+	if d := direct != nil && <-direct; !d && (relay || silent && direct != nil) {
+		picker.recheckDone(gen, ip, false, relay)
+	}
+}
+
+// recheckRelay: one hello to ip through the relay; any byte back within
+// deadWait means it is alive. silent: nothing back, with the VDS answering
+// others meanwhile.
+func recheckRelay(hgen uint64, ip string, port uint16, cred []byte) (alive, silent bool) {
 	if health.down() || overQuota() {
-		return
+		return false, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	out, err := dialRelay(ctx, cred, net.ParseIP(ip).To4(), 443)
+	out, err := dialRelay(ctx, cred, net.ParseIP(ip).To4(), port)
 	cancel()
 	if err != nil {
-		return
+		return false, false
 	}
 	defer out.Close()
 	wc := &watchConn{Conn: out, start: time.Now()}
 	wc.SetDeadline(time.Now().Add(deadWait))
-	tls.Client(wc, &tls.Config{ServerName: "redirector.googlevideo.com", InsecureSkipVerify: true}).Handshake()
+	tls.Client(wc, &tls.Config{ServerName: probeName, InsecureSkipVerify: true}).Handshake()
 	if health.generation() != hgen {
-		return
+		return false, false
 	}
-	if alive := wc.first.Load() > 0; alive || relayAlive.Load() > wc.start.UnixNano() {
-		picker.recheckDone(gen, ip, alive)
-	}
+	alive = wc.first.Load() > 0
+	return alive, !alive && relayAlive.Load() > wc.start.UnixNano()
 }
 
 var refusedLog = throttle{every: time.Minute}
@@ -893,6 +967,8 @@ type watchConn struct {
 	start    time.Time
 	first    atomic.Int64 // since start, of the first byte back; 0 before it
 	down, up atomic.Int64
+	appEnd   atomic.Bool // the app finished sending
+	relayEnd atomic.Bool // the relay's side ended first, not by our Close
 }
 
 func (c *watchConn) Read(p []byte) (int, error) {
@@ -900,6 +976,9 @@ func (c *watchConn) Read(p []byte) (int, error) {
 	if n > 0 {
 		c.first.CompareAndSwap(0, int64(time.Since(c.start)))
 		c.down.Add(int64(n))
+	}
+	if err != nil && !errors.Is(err, net.ErrClosed) && !c.appEnd.Load() {
+		c.relayEnd.Store(true)
 	}
 	return n, err
 }
@@ -920,6 +999,7 @@ func (c *watchConn) logDone(name string, ip net.IP) {
 }
 
 func (c *watchConn) CloseWrite() error {
+	c.appEnd.Store(true)
 	if hc, ok := c.Conn.(interface{ CloseWrite() error }); ok {
 		return hc.CloseWrite()
 	}
