@@ -50,6 +50,7 @@ class QuotaTest {
     @After
     fun tearDown() {
         Quota.today = { java.time.LocalDate.now().toEpochDay() }
+        MainActivity.resetUpdateState()
         be.release()
         awaitServiceThreads()
         controller.destroy()
@@ -295,10 +296,10 @@ class QuotaTest {
 
     @Test
     fun formatsForPeople() {
-        assertEquals("0 МБ", Quota.format(0))
-        assertEquals("350 МБ", Quota.format(350 * mb))
-        assertEquals("1,2 ГБ", Quota.format(1229 * mb))
-        assertEquals("2 ГБ", Quota.format(2048 * mb))
+        assertEquals("0\u00A0МБ", Quota.format(0))
+        assertEquals("350\u00A0МБ", Quota.format(350 * mb))
+        assertEquals("1,2\u00A0ГБ", Quota.format(1229 * mb))
+        assertEquals("2\u00A0ГБ", Quota.format(2048 * mb))
     }
 
     private fun launchUi(): MainActivity {
@@ -312,21 +313,22 @@ class QuotaTest {
 
     private fun MainActivity.assertQuotaOutUi() {
         assertEquals(
-            "Сегодня через VPN: 2 ГБ из 2 ГБ, снова после 00:00",
+            "Сегодня через VPN: 2\u00A0ГБ из 2\u00A0ГБ",
             findViewById<TextView>(R.id.usageText).text.toString(),
         )
-        assertEquals(getColor(R.color.simple_blue), findViewById<TextView>(R.id.hintText).currentTextColor)
-        assertEquals("a normal state, not a failure", View.GONE, findViewById<View>(R.id.errorBox).visibility)
+        assertEquals(View.VISIBLE, findViewById<View>(R.id.banner).visibility)
+        assertEquals("Дневной лимит трафика исчерпан. VPN снова заработает после 00:00", findViewById<TextView>(R.id.bannerText).text.toString())
+        assertEquals(getColor(R.color.on_error_container), findViewById<TextView>(R.id.bannerText).currentTextColor)
         assertEquals("Лимит на сегодня исчерпан", findViewById<TextView>(R.id.buttonLabel).text.toString())
         assertFalse(findViewById<View>(R.id.toggleButton).isEnabled)
     }
 
     private fun MainActivity.assertFreshDayUi() {
-        assertEquals("Сегодня через VPN: 0 МБ из 2 ГБ", findViewById<TextView>(R.id.usageText).text.toString())
-        assertEquals(View.GONE, findViewById<View>(R.id.errorBox).visibility)
+        assertEquals("Сегодня через VPN: 0\u00A0МБ из 2\u00A0ГБ", findViewById<TextView>(R.id.usageText).text.toString())
+        assertEquals(View.GONE, findViewById<View>(R.id.banner).visibility)
         assertEquals("Подключить", findViewById<TextView>(R.id.buttonLabel).text.toString())
         assertTrue(findViewById<View>(R.id.toggleButton).isEnabled)
-        assertEquals(getColor(R.color.simple_blue), findViewById<TextView>(R.id.hintText).currentTextColor)
+        assertEquals("Что пойдёт через VPN", findViewById<TextView>(R.id.hintText).text.toString())
     }
 
     @Test
@@ -360,7 +362,7 @@ class QuotaTest {
     fun usageLineHasNoMidnightNoteBeforeTheLimit() {
         Quota.save(app, 300 * mb, day)
         val a = launchUi()
-        assertEquals("Сегодня через VPN: 300 МБ из 2 ГБ", a.findViewById<TextView>(R.id.usageText).text.toString())
+        assertEquals("Сегодня через VPN: 300\u00A0МБ из 2\u00A0ГБ", a.findViewById<TextView>(R.id.usageText).text.toString())
         assertEquals("Подключить", a.findViewById<TextView>(R.id.buttonLabel).text.toString())
         assertTrue(a.findViewById<View>(R.id.toggleButton).isEnabled)
     }
@@ -394,14 +396,14 @@ class QuotaTest {
         // The UI's bind fetches while refused: RC still says so.
         be.config = RcValues("", Long.MAX_VALUE, Long.MAX_VALUE, "")
         val a = launchUi()
-        assertEquals(View.VISIBLE, a.findViewById<View>(R.id.errorBox).visibility)
-        assertEquals("Обновить", a.findViewById<TextView>(R.id.errorAction).text.toString())
+        assertEquals(View.VISIBLE, a.findViewById<View>(R.id.banner).visibility)
+        assertEquals("Обновить", a.findViewById<TextView>(R.id.bannerAction).text.toString())
         assertEquals("Лимит на сегодня исчерпан", a.findViewById<TextView>(R.id.buttonLabel).text.toString())
         assertFalse(a.findViewById<View>(R.id.toggleButton).isEnabled)
         // Debug: Updater refuses, the page opens. On this thread, not a race with the assert.
         MainActivity.background = { it.run() }
         try {
-            a.findViewById<View>(R.id.errorAction).performClick()
+            a.findViewById<View>(R.id.bannerAction).performClick()
         } finally {
             MainActivity.background = { Thread(it, "Update").start() }
         }
@@ -418,6 +420,6 @@ class QuotaTest {
         val a = Robolectric.buildActivity(MainActivity::class.java).setup().get()
         ShadowLooper.idleMainLooper()
         assertEquals(View.GONE, a.findViewById<View>(R.id.usageText).visibility)
-        assertEquals(View.GONE, a.findViewById<View>(R.id.errorBox).visibility)
+        assertEquals(View.GONE, a.findViewById<View>(R.id.banner).visibility)
     }
 }

@@ -31,6 +31,7 @@ import androidx.core.content.ContextCompat
 import com.google.android.gms.tasks.Tasks
 import com.google.android.play.core.integrity.IntegrityManagerFactory
 import com.google.android.play.core.integrity.IntegrityTokenRequest
+import com.google.firebase.FirebaseApp
 import com.google.firebase.remoteconfig.CustomSignals
 import com.google.firebase.remoteconfig.FirebaseRemoteConfig
 import com.google.firebase.remoteconfig.FirebaseRemoteConfigSettings
@@ -147,14 +148,23 @@ internal object GoBackend : Backend {
         )
         // Always set, never only for debug: custom signals persist, and a
         // release installed over a debug build would keep "debug".
-        Tasks.await(rc.setCustomSignals(CustomSignals.Builder().put("build", if (BuildConfig.DEBUG) "debug" else "release").build()), 10, TimeUnit.SECONDS)
+        // uid is the Analytics user_id: RC conditions can't see it, so a
+        // per-device value (one device's quota) keys on this signal.
+        val signals = CustomSignals.Builder()
+            .put("build", if (BuildConfig.DEBUG) "debug" else "release")
+            .put("uid", Crash.userId(FirebaseApp.getInstance().applicationContext))
+            .build()
+        Tasks.await(rc.setCustomSignals(signals), 10, TimeUnit.SECONDS)
         Tasks.await(rc.fetchAndActivate(), 60, TimeUnit.SECONDS)
         // Not asLong(): a typo in the console would throw and cost the endpoints too.
         val quota = rc.getValue("daily_quota_mb").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString()?.trim()?.toLongOrNull()
         val yt = rc.getValue("yt_strategies").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString()
         val bp = RemoteConfig.parseDialEventBp(rc.getValue("dial_event_bp").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString())
         val fallback = RemoteConfig.parseVkFallback(rc.getValue("vk_fallback").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString())
-        return RcValues(rc.getString("endpoints"), rc.getLong("min_version"), rc.getLong("latest_version"), rc.getString("update_url"), quota, yt, rc.getString("apk_url"), bp, fallback)
+        return RcValues(
+            rc.getString("endpoints"), rc.getLong("min_version"), rc.getLong("latest_version"), rc.getString("update_url"), quota, yt,
+            rc.getString("apk_url"), bp, rc.getString("apk_urls"), rc.getString("latest_name"), fallback,
+        )
     }
     override fun setQuota(used: Long, limit: Long) = tunnel.Tunnel.setQuota(used, limit)
     override fun usage() = tunnel.Tunnel.usage()
@@ -497,6 +507,12 @@ class TunnelVpnService : VpnService() {
         throw refusal ?: last
     }
 
+    // The UI's switch and the start thread both set Go: the saved value read and set
+    // in one go, so a switch during the start is not undone by the START's value.
+    private val adBlockLock = Any()
+
+    private fun applyAdBlock() = synchronized(adBlockLock) { backend.setAdBlock(vpnPrefs.getBoolean(KEY_ADBLOCK, false)) }
+
     private val clients = mutableSetOf<Messenger>()
     private val messenger = Messenger(Handler(Looper.getMainLooper()) { msg ->
         when (msg.what) {
@@ -509,6 +525,16 @@ class TunnelVpnService : VpnService() {
             }
             VpnClient.MSG_UNREGISTER -> msg.replyTo?.let { clients -= it }
             VpnClient.MSG_LOG -> msg.data.getString(VpnClient.KEY_LINE)?.let { AppLog.i("ui: $it") }
+            // Go checks the flag on every DNS query: no restart.
+            VpnClient.MSG_ADBLOCK -> {
+                val on = msg.data.getBoolean(VpnClient.KEY_ADBLOCK)
+                synchronized(adBlockLock) {
+                    vpnPrefs.edit().putBoolean(KEY_ADBLOCK, on).apply()
+                    backend.setAdBlock(on)
+                }
+                backend.userProperty(this, "adblock", if (on) "on" else "off")
+                AppLog.i("adblock: $on")
+            }
             // Saves and applies, never starts or stops: on a stopped tunnel the service is only bound.
             VpnClient.MSG_FALLBACK_EXTRAS -> if (BuildConfig.DEBUG) fallbackHooks(msg.data)
         }
@@ -1533,7 +1559,7 @@ class TunnelVpnService : VpnService() {
                 backend.setQuota(used, limitNow)
                 if (Quota.limit(this) != limitNow) mainHandler.post { onNewLimit() }
                 Quota.save(this, used, day)
-                backend.setAdBlock(adBlock)
+                applyAdBlock()
                 backend.setDirect(direct)
                 directOn = direct
                 try {

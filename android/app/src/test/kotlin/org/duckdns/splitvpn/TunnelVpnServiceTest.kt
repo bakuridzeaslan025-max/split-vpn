@@ -426,7 +426,8 @@ class TunnelVpnServiceTest {
     @Test
     fun fetchedVersionsArePushed() {
         val svc = controller.get()
-        fake = FakeBackend().apply { config = RcValues("", 0, newer, url) }
+        val apks = """[{"base":"https://split-vpn-dl-547fcb.gitlab.io/","probe":true}]"""
+        fake = FakeBackend().apply { config = RcValues("", 0, newer, url, apkUrls = apks, latestName = "9.9.9") }
         svc.backend = fake!!
         Credentials.save(app, fakeCred(System.currentTimeMillis() / 1000 + 7 * 86400))
         val got = mutableListOf<Versions?>()
@@ -439,7 +440,7 @@ class TunnelVpnServiceTest {
             Thread.sleep(20)
             ShadowLooper.idleMainLooper()
         }
-        assertEquals(Versions(0, newer, url), got.last())
+        assertEquals(Versions(0, newer, url, apks = apks, name = "9.9.9"), got.last())
         awaitState(VpnState.CONNECTED)
     }
 

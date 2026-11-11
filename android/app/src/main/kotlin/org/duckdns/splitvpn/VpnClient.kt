@@ -31,7 +31,8 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
         const val MSG_UNREGISTER = 2
         const val MSG_SNAPSHOT = 3
         const val MSG_LOG = 4
-        const val MSG_FALLBACK_EXTRAS = 5
+        const val MSG_ADBLOCK = 5
+        const val MSG_FALLBACK_EXTRAS = 6
         const val KEY_STATE = "state"
         const val KEY_ERROR = "error"
         const val KEY_LOG = "log"
@@ -41,12 +42,15 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
         const val KEY_LATEST_VERSION = "latest_version"
         const val KEY_UPDATE_URL = "update_url"
         const val KEY_APK_URL = "apk_url"
+        const val KEY_APK_URLS = "apk_urls"
+        const val KEY_LATEST_NAME = "latest_name"
         const val KEY_USED = "used"
         const val KEY_LIMIT = "limit"
         const val KEY_DAY = "day"
         const val KEY_DIRECT = "direct"
         const val KEY_FALLBACK = "fallback"
         const val KEY_LINE = "line"
+        const val KEY_ADBLOCK = "adblock"
 
         fun snapshot(state: VpnState, error: String?, log: List<String>, connectedAt: Long, waiting: Waiting?, versions: Versions, usage: Usage, direct: String, fallback: Fallback?): Message =
             Message.obtain(null, MSG_SNAPSHOT).apply {
@@ -60,6 +64,8 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
                     putLong(KEY_LATEST_VERSION, versions.latest)
                     putString(KEY_UPDATE_URL, versions.url)
                     putString(KEY_APK_URL, versions.apk)
+                    putString(KEY_APK_URLS, versions.apks)
+                    putString(KEY_LATEST_NAME, versions.name)
                     putLong(KEY_USED, usage.used)
                     putLong(KEY_LIMIT, usage.limit)
                     putLong(KEY_DAY, usage.day)
@@ -72,6 +78,8 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
     private var service: Messenger? = null
     // onCreate and onNewIntent can come before onStart binds.
     private val pendingExtras = mutableListOf<Bundle>()
+    // A switch made while unbound; a sticky restart would otherwise run with the old one.
+    private var pendingAdBlock: Boolean? = null
     private val incoming = Messenger(Handler(Looper.getMainLooper()) { msg ->
         if (msg.what == MSG_SNAPSHOT) {
             onSnapshot(
@@ -80,7 +88,10 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
                 msg.data.getStringArrayList(KEY_LOG) ?: emptyList(),
                 msg.data.getLong(KEY_SINCE),
                 Waiting.values().getOrNull(msg.data.getInt(KEY_WAITING, -1)),
-                Versions(msg.data.getLong(KEY_MIN_VERSION), msg.data.getLong(KEY_LATEST_VERSION), msg.data.getString(KEY_UPDATE_URL).orEmpty(), msg.data.getString(KEY_APK_URL).orEmpty()),
+                Versions(
+                    msg.data.getLong(KEY_MIN_VERSION), msg.data.getLong(KEY_LATEST_VERSION), msg.data.getString(KEY_UPDATE_URL).orEmpty(),
+                    msg.data.getString(KEY_APK_URL).orEmpty(), msg.data.getString(KEY_APK_URLS).orEmpty(), msg.data.getString(KEY_LATEST_NAME).orEmpty(),
+                ),
                 Usage(msg.data.getLong(KEY_USED), msg.data.getLong(KEY_LIMIT), msg.data.getLong(KEY_DAY)),
                 msg.data.getString(KEY_DIRECT),
                 Fallback.values().getOrNull(msg.data.getInt(KEY_FALLBACK, -1)),
@@ -94,6 +105,7 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
             service = Messenger(binder).also { send(it, MSG_REGISTER) }
             pendingExtras.forEach(::sendFallbackExtras)
             pendingExtras.clear()
+            pendingAdBlock?.let { setAdBlock(it) }
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
@@ -135,6 +147,17 @@ class VpnClient(private val ctx: Context, private val onSnapshot: (VpnState, Str
         }
         try {
             to.send(Message.obtain(null, MSG_FALLBACK_EXTRAS).apply { data = extras })
+        } catch (_: RemoteException) {
+        }
+    }
+
+    /** Ad blocking on or off right away; while unbound, as soon as the service is back. */
+    fun setAdBlock(on: Boolean) {
+        val to = service
+        pendingAdBlock = if (to == null) on else null
+        if (to == null) return
+        try {
+            to.send(Message.obtain(null, MSG_ADBLOCK).apply { data = Bundle().apply { putBoolean(KEY_ADBLOCK, on) } })
         } catch (_: RemoteException) {
         }
     }

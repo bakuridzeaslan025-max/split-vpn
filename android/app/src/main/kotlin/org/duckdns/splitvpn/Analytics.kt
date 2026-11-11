@@ -1,6 +1,7 @@
 package org.duckdns.splitvpn
 
 import android.content.Context
+import android.os.Build
 import android.os.Bundle
 import com.google.firebase.analytics.FirebaseAnalytics
 
@@ -16,7 +17,7 @@ internal object Analytics {
 
     fun userProperty(ctx: Context, name: String, value: String) = analytics(ctx) { setUserProperty(name, value) }
 
-    // Swapped in unit tests: the real SDK there reports to the production property.
+    // Swapped in unit tests to see the calls; the real SDK is off there (see analytics()).
     internal var setCollection: (Context, Boolean) -> Unit = { ctx, on ->
         analytics(ctx) {
             setAnalyticsCollectionEnabled(on)
@@ -53,6 +54,11 @@ internal object Analytics {
 
     // Analytics must never be the thing that takes the tunnel down.
     private inline fun analytics(ctx: Context, body: FirebaseAnalytics.() -> Unit) {
+        // As in Crash.init: the real SDK would report to the production property,
+        // and its Measurement Worker thread outlives the test and binds
+        // AppMeasurementService into whichever test runs next, where it shows
+        // up in ShadowApplication's started services.
+        if (Build.FINGERPRINT == "robolectric") return
         try {
             FirebaseAnalytics.getInstance(ctx).body()
         } catch (e: Exception) {

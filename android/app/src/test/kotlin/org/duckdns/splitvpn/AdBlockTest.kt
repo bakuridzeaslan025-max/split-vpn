@@ -70,6 +70,40 @@ class AdBlockTest {
         assertEquals(false, be.startedAdBlock)
     }
 
+    private fun switchFromUi(on: Boolean) {
+        val msg = android.os.Message.obtain(null, VpnClient.MSG_ADBLOCK).apply {
+            data = android.os.Bundle().apply { putBoolean(VpnClient.KEY_ADBLOCK, on) }
+        }
+        android.os.Messenger(svc.onBind(Intent(TunnelVpnService.ACTION_BIND))!!).send(msg)
+        ShadowLooper.idleMainLooper()
+    }
+
+    @Test
+    fun switchWhileConnectedReachesGoWithoutARestart() {
+        start(startIntent())
+        switchFromUi(true)
+        assertEquals(true, be.adBlock)
+        assertTrue(vpnPrefs.getBoolean(TunnelVpnService.KEY_ADBLOCK, false))
+        assertEquals("on", be.userProperties["adblock"])
+        assertEquals(VpnState.CONNECTED, TunnelState.state)
+        assertEquals(listOf("start"), be.events.filter { it == "start" || it == "stop" })
+    }
+
+    // The START carried the old value; the switch landed while it ran.
+    @Test
+    fun switchDuringTheStartIsNotUndone() {
+        val inStart = java.util.concurrent.CountDownLatch(1)
+        val go = java.util.concurrent.CountDownLatch(1)
+        be.establishHook = { inStart.countDown(); go.await(5, TimeUnit.SECONDS) }
+        svc.onStartCommand(startIntent().putExtra(TunnelVpnService.EXTRA_ADBLOCK, false), 0, 1)
+        assertTrue(inStart.await(5, TimeUnit.SECONDS))
+        switchFromUi(true)
+        go.countDown()
+        start(null)
+        assertEquals(true, be.adBlock)
+        assertTrue(vpnPrefs.getBoolean(TunnelVpnService.KEY_ADBLOCK, false))
+    }
+
     // Sticky restart, boot, always-on: no extras, what ran last.
     @Test
     fun nullIntentRestartTakesTheSavedOne() {

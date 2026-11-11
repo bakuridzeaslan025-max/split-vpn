@@ -19,7 +19,13 @@ h1{display:flex;align-items:center;justify-content:center;gap:10px;font-size:24p
 .card{background:var(--card);border-radius:16px;padding:20px;margin-bottom:16px}
 .dl{display:block;text-align:center;background:var(--blue);color:var(--blue-ink);text-decoration:none;font-weight:600;font-size:18px;padding:16px;border-radius:12px}
 .dl:active{opacity:.85}
+.dl[aria-busy]{pointer-events:none}
+.dl[aria-busy]::before{content:"";display:inline-block;width:14px;height:14px;margin-right:10px;vertical-align:-2px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.dl[aria-busy]::before{animation-duration:2.4s}}
 .meta{text-align:center;color:var(--dim);font-size:14px;margin:10px 0 0;min-height:21px}
+.fail{text-align:center;font-size:14px;margin:6px 0 0}
+.fail a{color:var(--blue)}
 h2{font-size:18px;margin:0 0 12px}
 .steps ol{max-height:84px;overflow:hidden;-webkit-mask-image:linear-gradient(#000 45%,transparent);mask-image:linear-gradient(#000 45%,transparent)}
 .steps.open ol{max-height:none;-webkit-mask-image:none;mask-image:none}
@@ -56,8 +62,9 @@ code{font:12px/1.4 ui-monospace,Menlo,monospace;word-break:break-all;display:blo
 </div>
 
 <div class="card">
-<a class="dl" id="dl" href="https://github.com/bakuridzeaslan025-max/split-vpn/releases/latest/download/split-vpn.apk">Скачать для Android</a>
+<a class="dl" id="dl" href="https://bakuridzeaslan025-max.github.io/split-vpn-dl/split-vpn.apk">Скачать для Android</a>
 <p class="meta" id="meta"></p>
+<p class="fail" id="fail" aria-live="polite" hidden>Если загрузка не началась, скачай <a id="direct" href="https://github.com/bakuridzeaslan025-max/split-vpn/releases/latest/download/split-vpn.apk">с GitHub</a> или открой <a href="https://github.com/bakuridzeaslan025-max/split-vpn/releases">Все версии</a>. Не вышло — попробуй позже.</p>
 <div class="note">Уже пользуешься Split VPN? Ставь поверх — настройки сохранятся, а VPN включится сам, если был включён.</div>
 </div>
 
@@ -66,19 +73,6 @@ code{font:12px/1.4 ui-monospace,Menlo,monospace;word-break:break-all;display:blo
 <p><a href="https://github.com/bakuridzeaslan025-max/split-vpn/releases">Все версии</a> · <a href="https://github.com/bakuridzeaslan025-max/split-vpn">Исходный код</a> · <a href="https://bakuridzeaslan025-max.github.io/split-vpn-privacy/">Конфиденциальность</a></p>
 </footer>
 </main>
-<script>
-fetch("https://api.github.com/repos/bakuridzeaslan025-max/split-vpn/releases/latest")
-  .then(r => r.ok ? r.json() : Promise.reject())
-  .then(rel => {
-    // Without the API (60 requests an hour per IP, and mobile NAT shares one) the button keeps the direct link.
-    const apk = rel.assets.find(a => a.name === "split-vpn.apk") || rel.assets.find(a => a.name.endsWith(".apk"));
-    if (!apk) return;
-    document.getElementById("dl").href = apk.browser_download_url;
-    const mb = (apk.size / 1048576).toLocaleString("ru-RU", {maximumFractionDigits: 1});
-    const date = new Date(rel.published_at).toLocaleDateString("ru-RU", {day: "numeric", month: "long"});
-    document.getElementById("meta").textContent = `Версия ${rel.tag_name.replace(/^v/, "")} · ${mb} МБ · ${date}`;
-  })
-  .catch(() => {});
-</script>
+<script type="module" src="download.js"></script>
 </body>
 </html>

@@ -43,8 +43,8 @@ internal object Quota {
 
     /** "350 МБ", "1,2 ГБ", "2 ГБ". */
     fun format(bytes: Long): String {
-        if (bytes < 1024 * MB) return "${bytes / MB} МБ"
+        if (bytes < 1024 * MB) return "${bytes / MB}\u00A0МБ"
         val gb = "%.1f".format(java.util.Locale.ROOT, bytes.toDouble() / (1024 * MB)).removeSuffix(".0").replace('.', ',')
-        return "$gb ГБ"
+        return "$gb\u00A0ГБ"
     }
 }

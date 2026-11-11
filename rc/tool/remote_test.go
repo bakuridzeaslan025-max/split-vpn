@@ -101,8 +101,11 @@ func newFake(t *testing.T, tmpl string) (*fakeRC, *rcClient) {
 
 func boolPtr(b bool) *bool { return &b }
 
-var testConfig = config{MinVersion: 110, LatestVersion: 114, UpdateURL: "https://o.github.io/r/",
-	APKURL: releasesPrefix + "latest/download/split-vpn.apk", DailyQuotaMB: 1024, DialEventBP: 25, VKFallback: boolPtr(true),
+var testConfig = config{MinVersion: 110, LatestVersion: 114, LatestName: "0.5.7", UpdateURL: "https://o.github.io/r/",
+	APKURL: releasesPrefix + "latest/download/split-vpn.apk",
+	APKURLs: json.RawMessage(`[ {"base": "https://split-vpn-dl-547fcb.gitlab.io/", "probe": true},
+	{"base": "` + releasesPrefix + `latest/download/", "probe": false} ]`),
+	DailyQuotaMB: 1024, DialEventBP: 25, VKFallback: boolPtr(true),
 	YTStrategies: json.RawMessage(`[ {"id": "rec2", "spec": "rec=host+1,midsld"},
 	{"id": "none", "spec": ""} ]`)}
 
@@ -164,6 +167,8 @@ func TestPush(t *testing.T) {
 	check("latest_version", debugCondition, "114")
 	check("update_url", debugCondition, testConfig.UpdateURL)
 	check("apk_url", debugCondition, testConfig.APKURL)
+	check("apk_urls", debugCondition, `[{"base":"https://split-vpn-dl-547fcb.gitlab.io/","probe":true},{"base":"`+releasesPrefix+`latest/download/","probe":false}]`)
+	check("latest_name", debugCondition, "0.5.7")
 	check("daily_quota_mb", debugCondition, "1024")
 	check("dial_event_bp", debugCondition, "25")
 	check("vk_fallback", debugCondition, "true")
@@ -176,6 +181,11 @@ func TestPush(t *testing.T) {
 	}
 	for _, name := range []string{"latest_version", "daily_quota_mb", "dial_event_bp"} {
 		if p := got.findParam(name); p["valueType"] != "NUMBER" || p["defaultValue"].(map[string]any)["useInAppDefault"] != true {
+			t.Errorf("new parameter %s %v", name, p)
+		}
+	}
+	for _, name := range []string{"apk_urls", "latest_name"} {
+		if p := got.findParam(name); p["valueType"] != "STRING" || p["defaultValue"].(map[string]any)["useInAppDefault"] != true {
 			t.Errorf("new parameter %s %v", name, p)
 		}
 	}
@@ -318,23 +328,29 @@ func TestConfig(t *testing.T) {
 		if !strings.Contains(s, "dial_event_bp") {
 			s = strings.TrimSuffix(s, "}") + `,"dial_event_bp":0}`
 		}
+		if !strings.Contains(s, "apk_urls") {
+			s = strings.TrimSuffix(s, "}") + `,"apk_urls":[]}`
+		}
+		if !strings.Contains(s, "latest_name") {
+			s = strings.TrimSuffix(s, "}") + `,"latest_name":"0.5.7"}`
+		}
 		if !strings.Contains(s, "vk_fallback") {
 			s = strings.TrimSuffix(s, "}") + `,"vk_fallback":false}`
 		}
 		return loadRaw(s)
 	}
-	const base = `{"min_version":114,"latest_version":115,"update_url":"https://o.github.io/r/","daily_quota_mb":2048,"dial_event_bp":0,"vk_fallback":false`
+	const base = `{"min_version":114,"latest_version":115,"latest_name":"0.5.7","update_url":"https://o.github.io/r/","daily_quota_mb":2048,"dial_event_bp":0,"apk_urls":[],"vk_fallback":false`
 	for _, bp := range []string{"0", "1", "10000"} {
 		if err := load(`{"min_version":114,"latest_version":115,"update_url":"https://o.github.io/r/","daily_quota_mb":2048,"dial_event_bp":` + bp + `}`); err != nil {
 			t.Errorf("dial_event_bp %s: %v", bp, err)
 		}
 	}
 	for _, bp := range []string{"", `,"dial_event_bp":-1`, `,"dial_event_bp":10001`, `,"dial_event_bp":0.5`, `,"dial_event_bp":"1"`, `,"dial_event_bp":null`} {
-		if loadRaw(`{"min_version":114,"latest_version":115,"update_url":"https://o.github.io/r/","daily_quota_mb":2048,"vk_fallback":false,"yt_strategies":[]`+bp+"}") == nil {
+		if loadRaw(`{"min_version":114,"latest_version":115,"latest_name":"0.5.7","update_url":"https://o.github.io/r/","daily_quota_mb":2048,"apk_urls":[],"vk_fallback":false,"yt_strategies":[]`+bp+"}") == nil {
 			t.Errorf("dial_event_bp %q: accepted", bp)
 		}
 	}
-	const noFlag = `{"min_version":114,"latest_version":115,"update_url":"https://o.github.io/r/","daily_quota_mb":2048,"dial_event_bp":0,"yt_strategies":[]`
+	const noFlag = `{"min_version":114,"latest_version":115,"latest_name":"0.5.7","update_url":"https://o.github.io/r/","daily_quota_mb":2048,"dial_event_bp":0,"apk_urls":[],"yt_strategies":[]`
 	for _, tf := range []string{`,"vk_fallback":true`, `,"vk_fallback":false`} {
 		if err := loadRaw(noFlag + tf + "}"); err != nil {
 			t.Errorf("vk_fallback %q: %v", tf, err)
@@ -407,6 +423,30 @@ func TestConfig(t *testing.T) {
 	} {
 		if apk(u) == nil {
 			t.Errorf("apk_url %q: accepted", u)
+		}
+	}
+	// Each entry's rules are the shared vector's (mirrors_test.go); here that
+	// the key is required and checked.
+	const noMirrors = `{"min_version":114,"latest_version":115,"latest_name":"0.5.7","update_url":"https://o.github.io/r/","daily_quota_mb":2048,"dial_event_bp":0,"vk_fallback":false,"yt_strategies":[]`
+	if err := loadRaw(noMirrors + `,"apk_urls":[{"base":"https://bakuridzeaslan025-max.github.io/split-vpn-dl/","probe":true}]}`); err != nil {
+		t.Errorf("apk_urls: %v", err)
+	}
+	// The way back to apk_url: a blank value in RC.
+	p := filepath.Join(dir, "blank.json")
+	os.WriteFile(p, []byte(noMirrors+` ,"apk_urls":""}`), 0o600)
+	if c, err := loadConfig(p); err != nil || c.apkURLsValue() != "" {
+		t.Errorf("apk_urls \"\": %q, %v", c.apkURLsValue(), err)
+	}
+	for _, m := range []string{"", `,"apk_urls":null`, `,"apk_urls":"[]"`, `,"apk_urls":" "`, `,"apk_urls":{}`,
+		`,"apk_urls":[{"base":"` + releasesPrefix + `latest/download/","probe":false}]`,
+		`,"apk_urls":[{"base":"https://bakuridzeaslan025-max.github.io/split-vpn-dl/","probe":true},{"base":"https://example.org/","probe":true}]`} {
+		if loadRaw(noMirrors+m+"}") == nil {
+			t.Errorf("apk_urls %q: accepted", m)
+		}
+	}
+	for _, n := range []string{`"0.12"`, `""`, `"v0.12.4"`, `"0.12.4-debug"`, `12`} {
+		if load(`{"min_version":114,"latest_version":115,"latest_name":`+n+`,"update_url":"`+good+`","daily_quota_mb":2048}`) == nil {
+			t.Errorf("latest_name %s: accepted", n)
 		}
 	}
 }

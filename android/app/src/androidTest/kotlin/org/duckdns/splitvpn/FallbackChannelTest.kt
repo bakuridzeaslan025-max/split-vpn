@@ -136,7 +136,7 @@ class FallbackChannelTest {
         startWithRelayDown()
         ActivityScenario.launch(MainActivity::class.java).use {
             vpn.awaitFallback(settle) { it != null }
-            if (vpn.fallback == Fallback.READY) shot("1_ready", "Включён запасной канал")
+            if (vpn.fallback == Fallback.READY) shot("1_ready", "включён запасной канал")
             vpn.headEventually(url, 60_000)
             vpn.awaitFallback(10_000) { it == Fallback.WORKING }
             val seen = connectsSince(before)
@@ -212,7 +212,7 @@ class FallbackChannelTest {
         assertNull(vpn.error)
         assertEquals(emptyList<String>(), connectsSince(before))
         assertTrue(logLines().drop(logMark).none { "fallback" in it })
-        ActivityScenario.launch(MainActivity::class.java).use { shot("3_no_room", "Сервер пока не отвечает") }
+        ActivityScenario.launch(MainActivity::class.java).use { shot("3_no_room", "подключимся сами, как только он ответит") }
     }
 
     // Configure refuses: the text Kotlin logs must not quote what it was given.

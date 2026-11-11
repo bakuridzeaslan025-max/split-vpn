@@ -57,12 +57,18 @@ class MainActivityTest {
 
     private val realEvent = Analytics.event
     private val updateSteps = mutableListOf<String>()
+    private val updateMirrors = mutableListOf<Any?>()
 
     @Before
     fun stubAnalytics() {
         Analytics.event = { _, name, params ->
-            if (name == "self_update") updateSteps += listOfNotNull(params["step"], params["detail"]).joinToString(":")
+            if (name == "self_update") {
+                updateSteps += listOfNotNull(params["step"], params["detail"]).joinToString(":")
+                updateMirrors += params["mirror"]
+            }
         }
+        Updater.lastMirror = null
+        Updater.lastDetail = null
     }
 
     @After
@@ -71,6 +77,7 @@ class MainActivityTest {
         Versions.debug = true
         MainActivity.update = Updater::update
         MainActivity.background = { Thread(it, "Update").start() }
+        MainActivity.resetUpdateState()
         activity?.destroy()
         service.destroy()
         ShadowLooper.idleMainLooper()
@@ -99,7 +106,7 @@ class MainActivityTest {
     fun pingFromLogShowsOnConnectedService() {
         val a = launch()
         connect("Telegram: 817 мс")
-        assertEquals("817 мс", a.note("telegram"))
+        assertEquals("817\u00A0мс", a.note("telegram"))
     }
 
     @Test
@@ -120,7 +127,7 @@ class MainActivityTest {
     fun lastProbeWins() {
         val a = launch()
         connect("Telegram: 817 мс", "Telegram: ошибка: TimeoutException", "Telegram: 42 мс")
-        assertEquals("42 мс", a.note("telegram"))
+        assertEquals("42\u00A0мс", a.note("telegram"))
     }
 
     @Test
@@ -145,7 +152,7 @@ class MainActivityTest {
         val a = launch()
         Services.ALL.forEach { prefs.edit().putBoolean(Services.prefKey(it.id), true).commit() }
         connect(*Services.ALL.map { "${it.title}: 100 мс" }.toTypedArray())
-        for (svc in Services.ALL) assertEquals(svc.id, "100 мс", a.note(svc.id))
+        for (svc in Services.ALL) assertEquals(svc.id, "100\u00A0мс", a.note(svc.id))
     }
 
     @Test
@@ -153,8 +160,8 @@ class MainActivityTest {
         val a = launch()
         TunnelState.set(VpnState.ERROR, TunnelVpnService.ERR_NEED_CODE)
         ShadowLooper.idleMainLooper()
-        val action = a.findViewById<TextView>(R.id.errorAction)
-        assertEquals(View.VISIBLE, a.findViewById<View>(R.id.errorBox).visibility)
+        val action = a.findViewById<TextView>(R.id.bannerAction)
+        assertEquals(View.VISIBLE, a.findViewById<View>(R.id.banner).visibility)
         assertEquals("Ввести код", action.text.toString())
         action.performClick()
         assertNotNull(ShadowDialog.getLatestDialog())
@@ -162,22 +169,23 @@ class MainActivityTest {
     }
 
     @Test
-    fun otherErrorShowsTheReasonAndLeavesTheRetryToTheToggle() {
+    fun otherErrorShowsTheReasonAndOffersARetry() {
         val a = launch()
         TunnelState.set(VpnState.ERROR, "связь потеряна")
         ShadowLooper.idleMainLooper()
-        assertEquals(View.GONE, a.findViewById<View>(R.id.errorAction).visibility)
-        assertEquals("связь потеряна", a.findViewById<TextView>(R.id.errorText).text.toString())
+        assertEquals("Повторить", a.text(R.id.bannerAction))
+        assertEquals("связь потеряна", a.findViewById<TextView>(R.id.bannerText).text.toString())
         assertEquals("Подключить", a.text(R.id.buttonLabel))
+        assertEquals(app.getColor(R.color.on_error_container), a.findViewById<TextView>(R.id.bannerText).currentTextColor)
     }
 
     @Test
-    fun takenPermissionPointsToTheToggle() {
+    fun takenPermissionOffersARetry() {
         val a = launch()
         TunnelState.set(VpnState.ERROR, TunnelVpnService.ERR_VPN_TAKEN)
         ShadowLooper.idleMainLooper()
-        assertEquals("Разрешение VPN занято другим приложением. Нажмите «Подключить», чтобы вернуть его", a.text(R.id.errorText))
-        assertEquals(View.GONE, a.findViewById<View>(R.id.errorAction).visibility)
+        assertEquals("Разрешение VPN занято другим приложением", a.text(R.id.bannerText))
+        assertEquals("Повторить", a.text(R.id.bannerAction))
         assertEquals("Подключить", a.text(R.id.buttonLabel))
     }
 
@@ -188,19 +196,19 @@ class MainActivityTest {
         ShadowLooper.idleMainLooper()
         assertEquals(
             "Сервер недоступен. Проверьте интернет и повторите",
-            a.findViewById<TextView>(R.id.errorText).text.toString(),
+            a.findViewById<TextView>(R.id.bannerText).text.toString(),
         )
         TunnelState.set(VpnState.ERROR, "fdbased: bad fd")
         ShadowLooper.idleMainLooper()
-        assertEquals("Не удалось подключиться", a.findViewById<TextView>(R.id.errorText).text.toString())
+        assertEquals("Не удалось подключиться", a.findViewById<TextView>(R.id.bannerText).text.toString())
     }
 
     @Test
     fun errorBoxHiddenWhenNotInError() {
         val a = launch()
-        assertEquals(View.GONE, a.findViewById<View>(R.id.errorBox).visibility)
+        assertEquals(View.GONE, a.findViewById<View>(R.id.banner).visibility)
         connect()
-        assertEquals(View.GONE, a.findViewById<View>(R.id.errorBox).visibility)
+        assertEquals(View.GONE, a.findViewById<View>(R.id.banner).visibility)
     }
 
     @Test
@@ -241,90 +249,228 @@ class MainActivityTest {
     }
 
     @Test
-    fun lockedRowTapsDoNotQueueToasts() {
+    fun lockedListIsDimmedAndSaysWhy() {
         val a = launch()
+        assertEquals("Что пойдёт через VPN", a.text(R.id.hintText))
+        assertEquals(View.GONE, a.findViewById<View>(R.id.hintLock).visibility)
         connect()
-        repeat(5) { a.row("telegram").performClick() }
-        assertEquals(1, ShadowToast.shownToastCount())
-        ShadowSystemClock.advanceBy(Duration.ofSeconds(3))
-        a.row("telegram").performClick()
-        assertEquals(2, ShadowToast.shownToastCount())
+        assertEquals("Чтобы изменить список, выключите VPN", a.text(R.id.hintText))
+        assertEquals(View.VISIBLE, a.findViewById<View>(R.id.hintLock).visibility)
+        assertEquals(0.5f, a.findViewById<View>(R.id.serviceList).alpha)
+        assertFalse(a.row("telegram").isEnabled)
+        assertEquals(0, ShadowToast.shownToastCount())
     }
 
-    @Test
-    fun adBlockSwitchInTheMenuIsLockedWhileConnected() {
-        val a = launch()
-        a.findViewById<View>(R.id.menuButton).performClick()
-        val popup = shadowOf(app).latestPopupWindow
-        val item = (popup.contentView as LinearLayout).getChildAt(0)
-        item.performClick()
-        assertEquals(true, prefs.getBoolean("adblock", false))
-        assertTrue(popup.isShowing)
-        val info = AccessibilityNodeInfo.obtain()
-        item.onInitializeAccessibilityNodeInfo(info)
-        assertTrue(info.isCheckable && info.isChecked)
-        connect()
-        item.performClick()
-        assertEquals(true, prefs.getBoolean("adblock", false))
-        assertEquals(1, ShadowToast.shownToastCount())
+    private fun settings(): MainActivity {
+        val a = activity!!.get()
+        (a.findViewById<LinearLayout>(R.id.tabBar).getChildAt(1)).performClick()
+        return a
     }
 
+    // Go checks the flag on every DNS query: no lock, and it reaches the service at once.
     @Test
-    fun notificationItemOpensTheSystemPage() {
-        fun item(): LinearLayout {
-            activity!!.get().findViewById<View>(R.id.menuButton).performClick()
-            return (shadowOf(app).latestPopupWindow.contentView as LinearLayout).getChildAt(2) as LinearLayout
-        }
-        fun caption(i: LinearLayout) = (i.getChildAt(1) as TextView).text.toString()
+    fun adBlockSwitchesWhileConnected() {
+        val be = FakeBackend()
+        service.get().backend = be
         launch()
-        var i = item()
-        assertEquals("Включено · настроить в системе", caption(i))
-        i.performClick()
+        connect()
+        val row = settings().findViewById<View>(R.id.adBlockRow)
+        row.performClick()
+        ShadowLooper.idleMainLooper()
+        assertEquals(true, prefs.getBoolean("adblock", false))
+        assertEquals(true, app.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).getBoolean(TunnelVpnService.KEY_ADBLOCK, false))
+        assertEquals(true, be.adBlock)
+        val info = AccessibilityNodeInfo.obtain()
+        row.onInitializeAccessibilityNodeInfo(info)
+        assertTrue(info.isCheckable && info.isChecked)
+        assertEquals(0, ShadowToast.shownToastCount())
+    }
+
+    @Test
+    fun notificationRowOpensTheSystemPage() {
+        launch()
+        val a = settings()
+        assertEquals("Включено · настраивается в системе", a.text(R.id.notificationState))
+        a.findViewById<View>(R.id.notificationRow).performClick()
         var started = nextActivity()
         assertEquals(android.provider.Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS, started.action)
         assertEquals("vpn_channel", started.getStringExtra(android.provider.Settings.EXTRA_CHANNEL_ID))
         assertEquals(app.packageName, started.getStringExtra(android.provider.Settings.EXTRA_APP_PACKAGE))
-        assertFalse(shadowOf(app).latestPopupWindow.isShowing)
 
         // The app's notifications off: the channel page is inert, go a level up.
         shadowOf(app.getSystemService(android.app.NotificationManager::class.java)).setNotificationsEnabled(false)
-        i = item()
-        assertEquals("Выключено · настроить в системе", caption(i))
-        i.performClick()
+        activity!!.pause().resume()
+        assertEquals("Выключено · настраивается в системе", a.text(R.id.notificationState))
+        a.findViewById<View>(R.id.notificationRow).performClick()
         started = nextActivity()
         assertEquals(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS, started.action)
     }
 
-    private fun menuItem(i: Int): LinearLayout {
-        activity!!.get().findViewById<View>(R.id.menuButton).performClick()
-        return (shadowOf(app).latestPopupWindow.contentView as LinearLayout).getChildAt(i) as LinearLayout
+    @Test
+    fun footerHasThePolicyAndTheVersion() {
+        launch()
+        val a = settings()
+        assertEquals("Split VPN · версия ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})", a.text(R.id.versionText))
+        a.findViewById<View>(R.id.privacyLink).performClick()
+        assertEquals(Intent.ACTION_VIEW, nextActivity().action)
     }
 
-    private fun LinearLayout.texts() = (getChildAt(0) as LinearLayout).let { t -> (0 until t.childCount).map { (t.getChildAt(it) as TextView).text.toString() } }
+    private fun MainActivity.night() =
+        resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
 
-    // The grey switch says it is locked: no line to explain it.
     @Test
-    fun adBlockItemIsOneLine() {
-        launch()
-        assertEquals(listOf("Блокировать рекламу"), menuItem(0).texts())
-        connect()
-        assertEquals(listOf("Блокировать рекламу"), menuItem(0).texts())
+    fun themeFollowsTheSystemByDefault() {
+        val a = launch()
+        assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_NO, a.night())
+        assertEquals("Как в системе", settings().text(R.id.themeValue))
+    }
+
+    // The 0.5 skins lived under "theme": a stale "light" must not pin the light theme.
+    @Test
+    fun oldThemeKeyIsIgnored() {
+        val a = launch("light")
+        assertEquals("Как в системе", settings().text(R.id.themeValue))
+        assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_NO, a.night())
     }
 
     @Test
-    fun youTubeDirectIsSecondOnByDefaultAndLockedWhileConnected() {
+    @org.robolectric.annotation.Config(qualifiers = "night")
+    fun themeFollowsANightSystem() {
+        val a = launch()
+        assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_YES, a.night())
+        assertEquals(0xFF131314.toInt(), a.getColor(R.color.background))
+    }
+
+    @Test
+    fun darkThemeOverridesALightSystem() {
+        prefs.edit().putString("theme_mode", "dark").commit()
+        val a = launch()
+        assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_YES, a.night())
+        assertEquals(0xFF131314.toInt(), a.getColor(R.color.background))
+        assertEquals("Тёмная", settings().text(R.id.themeValue))
+    }
+
+    @Test
+    @org.robolectric.annotation.Config(qualifiers = "night")
+    fun lightThemeOverridesANightSystem() {
+        prefs.edit().putString("theme_mode", "light").commit()
+        val a = launch()
+        assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_NO, a.night())
+        assertEquals(0xFFF2F2F2.toInt(), a.getColor(R.color.background))
+    }
+
+    @Test
+    fun themeMenuSavesTheChoice() {
         launch()
-        val item = menuItem(1)
-        assertEquals(listOf("YouTube напрямую", "С обходом замедления у провайдера. Не тратит лимит"), item.texts())
-        val info = AccessibilityNodeInfo.obtain()
-        item.onInitializeAccessibilityNodeInfo(info)
-        assertTrue(info.isChecked)
-        item.performClick()
+        val a = settings()
+        a.findViewById<View>(R.id.themeRow).performClick()
+        val menu = shadowOf(app).latestPopupWindow.contentView as LinearLayout
+        assertEquals(3, menu.childCount)
+        assertTrue(menu.getChildAt(0).isSelected)
+        menu.getChildAt(2).performClick()
+        assertEquals("dark", prefs.getString("theme_mode", null))
+        assertFalse(shadowOf(app).latestPopupWindow.isShowing)
+        // Applied at once: the activity comes back dark, on the same tab.
+        ShadowLooper.idleMainLooper()
+        val b = activity!!.get()
+        assertTrue(a !== b)
+        assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_YES, b.night())
+        assertEquals(View.VISIBLE, b.findViewById<View>(R.id.pageSettings).visibility)
+    }
+
+    private val uiModes get() = shadowOf(app.getSystemService(android.app.UiModeManager::class.java))
+
+    @Test
+    fun themeBackToTheSystemForgetsTheChoice() {
+        prefs.edit().putString("theme_mode", "dark").commit()
+        launch()
+        val a = settings()
+        assertEquals("Тема: Тёмная", a.findViewById<View>(R.id.themeRow).contentDescription)
+        a.findViewById<View>(R.id.themeRow).performClick()
+        (shadowOf(app).latestPopupWindow.contentView as LinearLayout).getChildAt(0).performClick()
+        ShadowLooper.idleMainLooper()
+        assertFalse(prefs.contains("theme_mode"))
+        assertEquals(android.app.UiModeManager.MODE_NIGHT_AUTO, uiModes.applicationNightMode)
+        assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_NO, activity!!.get().night())
+    }
+
+    @Test
+    fun pickingTheCurrentThemeKeepsTheActivity() {
+        launch()
+        val a = settings()
+        a.findViewById<View>(R.id.themeRow).performClick()
+        (shadowOf(app).latestPopupWindow.contentView as LinearLayout).getChildAt(0).performClick()
+        ShadowLooper.idleMainLooper()
+        assertTrue(a === activity!!.get())
+    }
+
+    @Test
+    fun junkThemeValueFollowsTheSystem() {
+        prefs.edit().putString("theme_mode", "sepia").commit()
+        val a = launch()
+        assertEquals(android.content.res.Configuration.UI_MODE_NIGHT_NO, a.night())
+        assertEquals("Как в системе", settings().text(R.id.themeValue))
+    }
+
+    // The splash reads the system's copy; a cold start puts it back from the pref.
+    @Test
+    fun coldStartSyncsTheSystemNightMode() {
+        prefs.edit().putString("theme_mode", "dark").commit()
+        launch()
+        assertEquals(android.app.UiModeManager.MODE_NIGHT_YES, uiModes.applicationNightMode)
+    }
+
+    @Test
+    @org.robolectric.annotation.Config(qualifiers = "fr-xlarge")
+    fun themeOverrideKeepsTheRestOfTheConfiguration() {
+        prefs.edit().putString("theme_mode", "dark").commit()
+        val a = launch()
+        assertEquals("fr", a.resources.configuration.locales[0].language)
+        assertTrue(a.resources.configuration.smallestScreenWidthDp >= 600)
+    }
+
+    @Test
+    fun menuOutlineIsDrawnOverTheItems() {
+        launch()
+        val a = settings()
+        a.findViewById<View>(R.id.themeRow).performClick()
+        assertNotNull((shadowOf(app).latestPopupWindow.contentView as LinearLayout).foreground)
+    }
+
+    private fun MainActivity.mode() = row("youtube").findViewById<TextView>(R.id.ytMode)
+
+    // The old "YouTube напрямую" switch is the mode: both on was direct, as it ran.
+    @Test
+    fun youTubeModeIsDirectByDefaultAndLockedWhileConnected() {
+        val a = launch()
+        assertEquals(View.GONE, a.mode().visibility)
+        a.row("youtube").performClick()
+        assertEquals(View.VISIBLE, a.mode().visibility)
+        assertEquals("Напрямую", a.mode().text.toString())
+        a.mode().performClick()
+        val menu = shadowOf(app).latestPopupWindow.contentView as LinearLayout
+        assertTrue(menu.getChildAt(0).isSelected)
+        menu.getChildAt(1).performClick()
         assertEquals(false, prefs.getBoolean("yt_direct", true))
+        assertEquals("Через VPN", a.mode().text.toString())
         connect()
-        menuItem(1).performClick()
-        assertEquals(false, prefs.getBoolean("yt_direct", true))
-        assertEquals(1, ShadowToast.shownToastCount())
+        assertFalse(a.mode().isEnabled)
+        val before = shadowOf(app).latestPopupWindow
+        a.mode().performClick()
+        assertTrue(before === shadowOf(app).latestPopupWindow)
+    }
+
+    // A start from outside (boot, always-on) locks the list under an open menu.
+    @Test
+    fun youTubeModeMenuDoesNothingOnceLocked() {
+        prefs.edit().putBoolean(Services.prefKey("youtube"), true).commit()
+        val a = launch()
+        a.mode().performClick()
+        val menu = shadowOf(app).latestPopupWindow.contentView as LinearLayout
+        connect()
+        menu.getChildAt(1).performClick()
+        assertEquals(true, prefs.getBoolean("yt_direct", true))
+        assertEquals("Режим YouTube: Напрямую", a.mode().contentDescription)
     }
 
     /** Go's verdict as the :vpn host hears it; the service pushes a snapshot. */
@@ -333,26 +479,28 @@ class MainActivityTest {
         ShadowLooper.idleMainLooper()
     }
 
+    // The chip names the mode; the row tells only the search, not a relay ping.
     @Test
     fun youTubeCardSaysDirect() {
         prefs.edit().putBoolean(Services.prefKey("youtube"), true).commit()
         val a = launch()
         connect("YouTube: 120 мс")
-        assertEquals("120 мс", a.note("youtube"))
+        assertEquals("120 мс", a.note("youtube"))
         verdict("testing")
         assertEquals("ищу обход…", a.note("youtube"))
         verdict("works")
-        assertEquals("YouTube напрямую", a.note("youtube"))
-        assertEquals(app.getColor(R.color.simple_blue), a.row("youtube").findViewById<TextView>(R.id.note).currentTextColor)
-        // The server down: YouTube still goes direct, the card says so.
+        assertEquals("", a.note("youtube"))
+        // The server down: YouTube still goes direct, no relay ping to show.
         TunnelState.setWaiting(Waiting.NO_SERVER)
         ShadowLooper.idleMainLooper()
-        assertEquals("YouTube напрямую", a.note("youtube"))
+        assertEquals("", a.note("youtube"))
         TunnelState.setWaiting(null)
+        ShadowLooper.idleMainLooper()
         verdict("fails")
-        assertEquals("120 мс", a.note("youtube"))
-        assertEquals(app.getColor(R.color.simple_dim), a.row("youtube").findViewById<TextView>(R.id.note).currentTextColor)
-        verdict("works")
+        assertEquals("120 мс", a.note("youtube"))
+        prefs.edit().putBoolean("yt_direct", false).commit()
+        verdict("testing")
+        assertEquals("120 мс", a.note("youtube"))
         TunnelState.set(VpnState.DISCONNECTED)
         ShadowLooper.idleMainLooper()
         assertEquals("", a.note("youtube"))
@@ -365,7 +513,7 @@ class MainActivityTest {
         val a = launch()
         TunnelState.set(VpnState.ERROR, TunnelVpnService.ERR_OFFLINE)
         ShadowLooper.idleMainLooper()
-        assertEquals(View.GONE, a.findViewById<View>(R.id.errorAction).visibility)
+        assertEquals(View.GONE, a.findViewById<View>(R.id.bannerAction).visibility)
         assertEquals("Нет сети", a.findViewById<TextView>(R.id.statusText).text.toString())
         assertEquals("Выключить", a.findViewById<TextView>(R.id.buttonLabel).text.toString())
         shadowOf(app).clearStartedServices()
@@ -378,7 +526,7 @@ class MainActivityTest {
     fun fallbackExplainsTheBanner() {
         val a = launch()
         val chip = a.findViewById<TextView>(R.id.statusText)
-        val banner = a.findViewById<TextView>(R.id.errorText)
+        val banner = a.findViewById<TextView>(R.id.bannerText)
         TunnelState.set(VpnState.CONNECTED)
         TunnelState.setWaiting(Waiting.NO_SERVER)
         ShadowLooper.idleMainLooper()
@@ -387,15 +535,15 @@ class MainActivityTest {
         TunnelState.setFallback(Fallback.READY)
         ShadowLooper.idleMainLooper()
         assertEquals("Сервер недоступен", chip.text.toString())
-        assertTrue(banner.text.contains("Включён запасной канал"))
+        assertTrue(banner.text.contains("включён запасной канал"))
         assertTrue(banner.text.contains("батарея"))
 
         TunnelState.setFallback(Fallback.WORKING)
         ShadowLooper.idleMainLooper()
         assertEquals("Запасной канал", chip.text.toString())
         assertTrue(banner.text.contains("трафик идёт через запасной канал"))
-        assertTrue(banner.text.contains("Батарея садится быстрее"))
-        assertEquals(View.GONE, a.findViewById<View>(R.id.errorAction).visibility)
+        assertTrue(banner.text.contains("батарея садится быстрее"))
+        assertEquals(View.GONE, a.findViewById<View>(R.id.bannerAction).visibility)
 
         TunnelState.setFallback(Fallback.FAILED)
         ShadowLooper.idleMainLooper()
@@ -411,7 +559,7 @@ class MainActivityTest {
         TunnelState.setFallback(null)
         TunnelState.setWaiting(null)
         ShadowLooper.idleMainLooper()
-        assertEquals(View.GONE, a.findViewById<View>(R.id.errorBox).visibility)
+        assertEquals(View.GONE, a.findViewById<View>(R.id.banner).visibility)
     }
 
     private val vpnPrefs get() = app.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE)
@@ -526,18 +674,18 @@ class MainActivityTest {
         TunnelState.set(VpnState.CONNECTED)
         TunnelState.setWaiting(Waiting.NO_SERVER)
         ShadowLooper.idleMainLooper()
-        assertEquals(View.VISIBLE, a.findViewById<View>(R.id.errorBox).visibility)
-        assertEquals(View.GONE, a.findViewById<View>(R.id.errorAction).visibility)
-        assertTrue(a.findViewById<TextView>(R.id.errorText).text.contains("ничего делать не нужно"))
+        assertEquals(View.VISIBLE, a.findViewById<View>(R.id.banner).visibility)
+        assertEquals(View.GONE, a.findViewById<View>(R.id.bannerAction).visibility)
+        assertEquals("Сервер не отвечает\u00A0— подключимся сами, как только он ответит", a.text(R.id.bannerText))
         assertEquals("Сервер недоступен", a.findViewById<TextView>(R.id.statusText).text.toString())
         assertEquals("Выключить", a.findViewById<TextView>(R.id.buttonLabel).text.toString())
 
         TunnelState.setWaiting(null)
         ShadowLooper.idleMainLooper()
-        assertEquals(View.GONE, a.findViewById<View>(R.id.errorBox).visibility)
+        assertEquals(View.GONE, a.findViewById<View>(R.id.banner).visibility)
         TunnelState.set(VpnState.ERROR, TunnelVpnService.ERR_NEED_CODE)
         ShadowLooper.idleMainLooper()
-        assertEquals(View.VISIBLE, a.findViewById<View>(R.id.errorAction).visibility)
+        assertEquals(View.VISIBLE, a.findViewById<View>(R.id.bannerAction).visibility)
     }
 
     private val url = "https://mirror.example.org/split-vpn/"
@@ -546,24 +694,25 @@ class MainActivityTest {
 
     private fun updater(vararg results: Updater.Result) {
         val queue = ArrayDeque(results.toList())
-        MainActivity.update = { _, latest, u, _ -> calls += latest to u; queue.removeFirst() }
+        MainActivity.update = { _, v, _ -> calls += v.latest to v.apk; queue.removeFirst() }
         MainActivity.background = { it.run() }
     }
 
     /** What :vpn has from Remote Config; any state change pushes a fresh snapshot. */
-    private fun rc(min: Long = 0, latest: Long = 0, url: String = this.url, apk: String = this.apk) {
+    private fun rc(min: Long = 0, latest: Long = 0, url: String = this.url, apk: String = this.apk, apks: String = "") {
         app.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).edit()
             .putLong(RemoteConfig.KEY_MIN_VERSION, min)
             .putLong(RemoteConfig.KEY_LATEST_VERSION, latest)
             .putString(RemoteConfig.KEY_UPDATE_URL, url)
             .putString(RemoteConfig.KEY_APK_URL, apk)
+            .putString(RemoteConfig.KEY_APK_URLS, apks)
             .commit()
         TunnelState.log("rc")
         ShadowLooper.idleMainLooper()
     }
 
     private val newer = BuildConfig.VERSION_CODE + 1L
-    private fun MainActivity.updateBox() = findViewById<View>(R.id.updateBox).visibility
+    private fun MainActivity.updateBox() = findViewById<View>(R.id.banner).visibility
     private fun MainActivity.text(id: Int) = findViewById<TextView>(id).text.toString()
     private fun nextActivity() = shadowOf(app).nextStartedActivity
 
@@ -580,10 +729,10 @@ class MainActivityTest {
         rc(min = newer, latest = newer)
         TunnelState.set(VpnState.ERROR, TunnelVpnService.ERR_UPDATE_REQUIRED)
         ShadowLooper.idleMainLooper()
-        assertEquals(View.VISIBLE, a.findViewById<View>(R.id.errorBox).visibility)
-        assertEquals("Эта версия больше не поддерживается — обновите приложение", a.text(R.id.errorText))
-        assertEquals("Обновить", a.text(R.id.errorAction))
-        a.findViewById<View>(R.id.errorAction).performClick()
+        assertEquals(View.VISIBLE, a.findViewById<View>(R.id.banner).visibility)
+        assertEquals("Эта версия больше не поддерживается", a.text(R.id.bannerText))
+        assertEquals("Обновить", a.text(R.id.bannerAction))
+        a.findViewById<View>(R.id.bannerAction).performClick()
         assertEquals(listOf(newer to apk), calls)
         assertNull(nextActivity())
     }
@@ -594,7 +743,7 @@ class MainActivityTest {
         updater(Updater.Result.DISABLED)
         val a = launch()
         rc(min = newer, latest = newer)
-        a.findViewById<View>(R.id.errorAction).performClick()
+        a.findViewById<View>(R.id.bannerAction).performClick()
         assertOpens(url)
     }
 
@@ -606,11 +755,49 @@ class MainActivityTest {
         assertEquals(View.GONE, a.updateBox())
         rc(latest = newer)
         assertEquals(View.VISIBLE, a.updateBox())
-        assertEquals("Доступна новая версия", a.text(R.id.updateText))
-        assertEquals("Обновить", a.text(R.id.updateAction))
-        a.findViewById<View>(R.id.updateAction).performClick()
+        assertEquals("Доступна новая версия", a.text(R.id.bannerText))
+        assertEquals("Обновить", a.text(R.id.bannerAction))
+        a.findViewById<View>(R.id.bannerAction).performClick()
         assertEquals(listOf(newer to apk), calls)
         assertEquals(View.VISIBLE, a.updateBox())
+    }
+
+    /** apk_urls "[]" turns self-update off, apk_url or not. */
+    @Test
+    fun emptyMirrorListOpensThePage() {
+        Versions.debug = false
+        updater()
+        val a = launch()
+        rc(latest = newer, apks = "[]")
+        a.findViewById<View>(R.id.bannerAction).performClick()
+        assertOpens(url)
+        assertTrue(calls.isEmpty())
+    }
+
+    /** The mirror taken and why the ones before it failed. */
+    @Test
+    fun startedAndFailedCarryTheMirrors() {
+        Versions.debug = false
+        val a = launch()
+        rc(latest = newer, apks = """[{"base":"https://split-vpn-dl-547fcb.gitlab.io/","probe":true}]""")
+        MainActivity.background = { it.run() }
+        MainActivity.update = { _, v, _ ->
+            assertEquals("""[{"base":"https://split-vpn-dl-547fcb.gitlab.io/","probe":true}]""", v.apks)
+            Updater.lastMirror = 2
+            Updater.lastDetail = "1:stall"
+            Updater.Result.STARTED
+        }
+        a.findViewById<View>(R.id.bannerAction).performClick()
+        MainActivity.update = { _, _, _ ->
+            Updater.lastMirror = 0
+            Updater.lastDetail = "1:stall,2:get-http504"
+            Updater.Result.FAILED
+        }
+        a.findViewById<View>(R.id.bannerAction).performClick()
+        assertEquals(listOf("started:1:stall", "failed:1:stall,2:get-http504"), updateSteps)
+        assertEquals(listOf<Any?>(2, 0), updateMirrors)
+        // The user's log has the mirrors' reasons too.
+        assertTrue(org.robolectric.shadows.ShadowLog.getLogsForTag(AppLog.TAG).any { it.msg.startsWith("update: FAILED") && it.msg.endsWith(", mirrors 1:stall,2:get-http504") })
     }
 
     /** apk_url "" turns self-update off: the page, as before it. */
@@ -620,7 +807,7 @@ class MainActivityTest {
         updater()
         val a = launch()
         rc(latest = newer, apk = "")
-        a.findViewById<View>(R.id.updateAction).performClick()
+        a.findViewById<View>(R.id.bannerAction).performClick()
         assertOpens(url)
         assertTrue(calls.isEmpty())
     }
@@ -631,7 +818,7 @@ class MainActivityTest {
         updater(Updater.Result.BAD_URL)
         val a = launch()
         rc(latest = newer, url = "http://mirror.example.org/")
-        a.findViewById<View>(R.id.updateAction).performClick()
+        a.findViewById<View>(R.id.bannerAction).performClick()
         assertOpens(Versions.DOWNLOAD_PAGE)
     }
 
@@ -651,7 +838,7 @@ class MainActivityTest {
         rc(latest = newer)
         var a = launch()
         assertEquals(View.VISIBLE, a.updateBox())
-        a.findViewById<View>(R.id.updateClose).performClick()
+        a.findViewById<View>(R.id.bannerClose).performClick()
         assertEquals(View.GONE, a.updateBox())
         activity?.destroy()
         a = launch()
@@ -666,21 +853,65 @@ class MainActivityTest {
         var job: Runnable? = null
         var midway = ""
         val a = launch()
-        MainActivity.update = { _, _, _, report -> report(45); midway = a.text(R.id.updateAction); Updater.Result.STARTED }
+        MainActivity.update = { _, _, report -> report(45); midway = a.text(R.id.bannerAction); Updater.Result.STARTED }
         MainActivity.background = { job = it }
         rc(latest = newer)
-        a.findViewById<View>(R.id.updateAction).performClick()
-        assertEquals("Скачивается…", a.text(R.id.updateAction))
+        a.findViewById<View>(R.id.bannerAction).performClick()
+        assertEquals("Скачивается…", a.text(R.id.bannerAction))
         // Not a button meanwhile, and the banner cannot be hidden.
-        assertFalse(a.findViewById<View>(R.id.updateAction).isEnabled)
-        assertEquals(View.INVISIBLE, a.findViewById<View>(R.id.updateClose).visibility)
+        assertFalse(a.findViewById<View>(R.id.bannerAction).isEnabled)
+        assertEquals(View.GONE, a.findViewById<View>(R.id.bannerClose).visibility)
         job!!.run()
         ShadowLooper.idleMainLooper()
         assertEquals("Скачивается… 45%", midway)
-        assertEquals("Обновить", a.text(R.id.updateAction))
-        assertTrue(a.findViewById<View>(R.id.updateAction).isEnabled)
-        assertEquals(View.VISIBLE, a.findViewById<View>(R.id.updateClose).visibility)
+        assertEquals("Обновить", a.text(R.id.bannerAction))
+        assertTrue(a.findViewById<View>(R.id.bannerAction).isEnabled)
+        assertEquals(View.VISIBLE, a.findViewById<View>(R.id.bannerClose).visibility)
         assertNull(nextActivity())
+    }
+
+    // A theme switch mid-download: the new activity keeps the progress and gets the result.
+    @Test
+    fun updateProgressSurvivesARecreatedActivity() {
+        Versions.debug = false
+        val report = java.util.concurrent.atomic.AtomicReference<(Int) -> Unit>()
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val started = java.util.concurrent.CountDownLatch(1)
+        val done = java.util.concurrent.CountDownLatch(1)
+        MainActivity.update = { _, _, r ->
+            calls.incrementAndGet()
+            report.set(r)
+            started.countDown()
+            done.await()
+            Updater.Result.STARTED
+        }
+        MainActivity.background = { Thread(it, "Update").start() }
+        try {
+            rc(latest = newer)
+            val a = launch()
+            a.findViewById<View>(R.id.bannerAction).performClick()
+            assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            activity!!.recreate()
+            ShadowLooper.idleMainLooper()
+            val b = activity!!.get()
+            assertTrue(a !== b)
+            assertEquals("Скачивается…", b.text(R.id.bannerAction))
+            b.findViewById<View>(R.id.bannerAction).performClick()
+            report.get()(45)
+            ShadowLooper.idleMainLooper()
+            assertEquals("Скачивается… 45%", b.text(R.id.bannerAction))
+            done.countDown()
+            val end = System.nanoTime() + 5_000_000_000
+            while (MainActivity.updating && System.nanoTime() < end) {
+                Thread.sleep(5)
+                ShadowLooper.idleMainLooper()
+            }
+            assertFalse(MainActivity.updating)
+            assertEquals(1, calls.get())
+            assertEquals("Обновить", b.text(R.id.bannerAction))
+        } finally {
+            done.countDown()
+        }
     }
 
     private fun continueHint() {
@@ -695,7 +926,7 @@ class MainActivityTest {
         updater(Updater.Result.NEED_PERMISSION, Updater.Result.STARTED)
         val a = launch()
         rc(latest = newer)
-        a.findViewById<View>(R.id.updateAction).performClick()
+        a.findViewById<View>(R.id.bannerAction).performClick()
         assertNull(nextActivity())
         continueHint()
         val ask = nextActivity()
@@ -712,7 +943,7 @@ class MainActivityTest {
         updater(Updater.Result.NEED_PERMISSION)
         val a = launch()
         rc(latest = newer)
-        a.findViewById<View>(R.id.updateAction).performClick()
+        a.findViewById<View>(R.id.bannerAction).performClick()
         continueHint()
         shadowOf(app.packageManager).setCanRequestPackageInstalls(false)
         shadowOf(a).receiveResult(nextActivity(), android.app.Activity.RESULT_CANCELED, null)
@@ -727,7 +958,7 @@ class MainActivityTest {
         updater(Updater.Result.NEED_PERMISSION, Updater.Result.STARTED)
         val a = launch()
         rc(latest = newer)
-        a.findViewById<View>(R.id.updateAction).performClick()
+        a.findViewById<View>(R.id.bannerAction).performClick()
         continueHint()
         val ask = nextActivity()
         // As a fresh process would have it: no snapshot yet.
@@ -745,10 +976,10 @@ class MainActivityTest {
         updater(Updater.Result.NEED_PERMISSION)
         val a = launch()
         rc(latest = newer)
-        a.findViewById<View>(R.id.updateAction).performClick()
+        a.findViewById<View>(R.id.bannerAction).performClick()
         ShadowDialog.getLatestDialog().findViewById<View>(R.id.cancel).performClick()
         assertNull(nextActivity())
-        assertEquals("Обновить", a.text(R.id.updateAction))
+        assertEquals("Обновить", a.text(R.id.bannerAction))
     }
 
     // DISABLED, UP_TO_DATE, BUSY: nothing was tried.
@@ -763,7 +994,7 @@ class MainActivityTest {
         rc(latest = newer)
         repeat(6) {
             ShadowDialog.getLatestDialog()?.dismiss()
-            a.findViewById<View>(R.id.updateAction).performClick()
+            a.findViewById<View>(R.id.bannerAction).performClick()
             ShadowLooper.idleMainLooper()
         }
         assertEquals(listOf("started", "need_permission", "failed:url"), updateSteps)
@@ -775,7 +1006,7 @@ class MainActivityTest {
         updater(Updater.Result.FAILED)
         val a = launch()
         rc(latest = newer)
-        a.findViewById<View>(R.id.updateAction).performClick()
+        a.findViewById<View>(R.id.bannerAction).performClick()
         assertEquals("Не удалось скачать", ShadowToast.getTextOfLatestToast())
         assertOpens(url)
         assertEquals("failed", updateSteps.single().substringBefore(":"))
@@ -787,11 +1018,11 @@ class MainActivityTest {
         updater(Updater.Result.BUSY, Updater.Result.UP_TO_DATE)
         val a = launch()
         rc(latest = newer)
-        a.findViewById<View>(R.id.updateAction).performClick()
+        a.findViewById<View>(R.id.bannerAction).performClick()
         assertNull(nextActivity())
         assertEquals(View.VISIBLE, a.updateBox())
-        assertEquals("Обновить", a.text(R.id.updateAction))
-        a.findViewById<View>(R.id.updateAction).performClick()
+        assertEquals("Обновить", a.text(R.id.bannerAction))
+        a.findViewById<View>(R.id.bannerAction).performClick()
         assertEquals(View.GONE, a.updateBox())
     }
 
@@ -801,7 +1032,7 @@ class MainActivityTest {
         updater(Updater.Result.UP_TO_DATE)
         val a = launch()
         rc(min = newer, latest = BuildConfig.VERSION_CODE.toLong())
-        a.findViewById<View>(R.id.errorAction).performClick()
+        a.findViewById<View>(R.id.bannerAction).performClick()
         assertOpens(url)
         assertEquals(0L, prefs.getLong("update_dismissed", 0))
     }
@@ -838,29 +1069,28 @@ class MainActivityTest {
     fun requiredShowsBeforeAnyTryToConnect() {
         updater(Updater.Result.STARTED)
         val a = launch()
-        assertEquals(View.GONE, a.findViewById<View>(R.id.errorBox).visibility)
+        assertEquals(View.GONE, a.findViewById<View>(R.id.banner).visibility)
         rc(min = newer, latest = newer)
         assertEquals(VpnState.DISCONNECTED, TunnelState.state)
-        assertEquals(View.VISIBLE, a.findViewById<View>(R.id.errorBox).visibility)
-        assertEquals(TunnelVpnService.ERR_UPDATE_REQUIRED, a.text(R.id.errorText))
-        assertEquals("Обновить", a.text(R.id.errorAction))
+        assertEquals(View.VISIBLE, a.findViewById<View>(R.id.banner).visibility)
+        assertEquals("Эта версия больше не поддерживается", a.text(R.id.bannerText))
+        assertEquals("Обновить", a.text(R.id.bannerAction))
         // The toggle would only be refused: the red box's button is the way.
         assertFalse(a.findViewById<View>(R.id.toggleButton).isEnabled)
         a.findViewById<View>(R.id.toggleButton).performClick()
         assertEquals(VpnState.DISCONNECTED, TunnelState.state)
-        a.findViewById<View>(R.id.errorAction).performClick()
+        a.findViewById<View>(R.id.bannerAction).performClick()
         assertEquals(1, calls.size)
-        assertEquals(View.GONE, a.updateBox())
+        // The required one, not the news of a version beside it.
+        assertEquals("Эта версия больше не поддерживается", a.text(R.id.bannerText))
+        assertEquals(View.GONE, a.findViewById<View>(R.id.bannerClose).visibility)
     }
 
     @Test
     fun shareShowsTheQrAndSendsThePage() {
         val a = launch()
         rc(url = url)
-        a.findViewById<View>(R.id.menuButton).performClick()
-        val menu = shadowOf(app).latestPopupWindow.contentView as LinearLayout
-        (0 until menu.childCount).mapNotNull { menu.getChildAt(it) as? TextView }
-            .first { it.text == "Поделиться приложением" }.performClick()
+        a.findViewById<View>(R.id.shareButton).performClick()
         val dialog = ShadowDialog.getLatestDialog()
         assertTrue(dialog.isShowing)
         assertNotNull((dialog.findViewById<ImageView>(R.id.qr).drawable as BitmapDrawable).bitmap)
