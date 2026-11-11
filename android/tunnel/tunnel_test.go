@@ -59,6 +59,11 @@ func fakeRelay(t *testing.T) (addr string, got <-chan []byte) {
 // withConns gives the test a live conn tracker.
 func withConns(t *testing.T) {
 	setConns(make(map[net.Conn]struct{}))
+	// An earlier test's relay answer to the same loopback node must not
+	// clear this one's dead check.
+	videoConns.mu.Lock()
+	videoConns.last = nil
+	videoConns.mu.Unlock()
 	t.Cleanup(func() { setConns(nil) })
 }
 

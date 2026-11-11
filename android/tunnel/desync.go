@@ -852,9 +852,13 @@ func completeHello(c net.Conn, b []byte, deadline time.Time) ([]byte, bool) {
 func desyncVerdict(gen uint64, st *strategy, ip, name, dst string, start time.Time, err error) {
 	var since int
 	var logFail bool
-	if errors.Is(err, errNoConnect) {
+	switch {
+	// No route out at all: this side is offline, which says nothing of
+	// the address (a muted one would turn dead, see unreachable).
+	case errors.Is(err, syscall.ENETUNREACH):
+	case errors.Is(err, errNoConnect):
 		since, logFail = picker.unreachable(gen, ip)
-	} else {
+	default:
 		since, logFail = picker.result(gen, st.id, ip, name, start, err == nil, fmt.Sprint(err))
 	}
 	if err == nil {

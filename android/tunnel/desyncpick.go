@@ -22,7 +22,7 @@ const (
 	needFails    = 2                // counted failures before a strategy moves on...
 	needFailsWon = 3                // ...and before this network's winner does
 	silentFor    = 30 * time.Minute // an address the winner does not get through to goes by relay
-	deadFor      = 24 * time.Hour   // its connections refused on this network, kept in the map
+	deadFor      = time.Hour        // its connections refused on this network, kept in the map; short: a cell key is the whole operator, not one tower
 	deadMax      = 16               // dead addresses kept per network
 	deadRecheck  = 15 * time.Minute // a dead address the player asks for is probed again at most this often
 	noneFor      = 7 * 24 * time.Hour
@@ -113,6 +113,7 @@ type addrInfo struct {
 	muteUntil  time.Time // the relay was silent to it with the VDS alive, direct answered: direct only
 	deadUntil  time.Time // its connections refused until then
 	checked    time.Time // a dead one's last probe, see recheckDue
+	relayKnew  bool      // that probe had the relay's half too
 	failed     int       // failures counted against cur, forgiven if it turns dead
 	used       uint64
 }
@@ -268,6 +269,11 @@ var picker = &pickState{now: time.Now}
 // says the relay does not reach it, see relayNoAnswer. A var for the tests.
 var deadWait = 4 * time.Second
 
+// answerKept: how long a closed session's answer can clear a dead check:
+// twice deadWait (see answered), then a relay probe (dial, TLS and upgrade,
+// handshakeTimeout each), with room.
+const answerKept = time.Minute
+
 // started: Start's turn. The map is read once per process (Stop and Start
 // keep the memory), the new host hears the verdict afresh.
 func (p *pickState) started(file string) {
@@ -417,7 +423,13 @@ func (p *pickState) applyLocked() {
 				p.noneUntil = until
 			}
 			for ip, until := range e.Dead {
-				if t := time.Unix(until, 0); p.now().Before(t) {
+				// A map from a build with a longer deadFor (0.13.0: a day)
+				// keeps no mark past this build's.
+				t := time.Unix(until, 0)
+				if limit := p.now().Add(deadFor); t.After(limit) {
+					t = limit
+				}
+				if p.now().Before(t) {
 					p.putLocked(ip).deadUntil = t
 				}
 			}
@@ -677,7 +689,8 @@ func (p *pickState) markDeadLocked(ip string) {
 	}
 	log.Printf("sni desync: %s silent through the relay too → closing, refusing connections for %s", ip, deadFor)
 	// The check that found it dead is as fresh as a recheck.
-	p.deadLocked(ip).checked = p.now()
+	a := p.deadLocked(ip)
+	a.checked, a.relayKnew = p.now(), true
 }
 
 // deadLocked: ip's connections get refused for deadFor, on this network
@@ -750,16 +763,21 @@ func (p *pickState) deadNow(ip string) bool {
 // recheckDue: the player asks for a dead address that was not probed for
 // deadRecheck (or since it came from the map, or turned dead without a
 // probe). True once per due time: the caller probes it and reports with
-// recheckDone.
-func (p *pickState) recheckDue(ip string) (uint64, bool) {
+// recheckDone. relay: the relay can take a probe now. A probe without it
+// (relay down, over the quota) does not use the turn up for one with it:
+// a node only the relay reaches is probed again as soon as it is back.
+func (p *pickState) recheckDue(ip string, relay bool) (uint64, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.now()
 	a := p.addrLocked(ip)
-	if a == nil || !now.Before(a.deadUntil) || now.Sub(a.checked) < deadRecheck {
+	if a == nil || !now.Before(a.deadUntil) {
 		return 0, false
 	}
-	a.checked = now
+	if now.Sub(a.checked) < deadRecheck && (a.relayKnew || !relay) {
+		return 0, false
+	}
+	a.checked, a.relayKnew = now, relay
 	return p.gen, true
 }
 

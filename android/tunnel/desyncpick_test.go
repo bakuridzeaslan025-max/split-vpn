@@ -3,11 +3,13 @@ package tunnel
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -659,24 +661,24 @@ func TestFailed_ClearedBySuccess(t *testing.T) {
 func TestRecheck(t *testing.T) {
 	p, _, file := picking(t)
 	p.markDead(p.gen, "1.1.1.1")
-	if _, due := p.recheckDue("1.1.1.1"); due {
+	if _, due := p.recheckDue("1.1.1.1", true); due {
 		t.Fatal("due right after the mark")
 	}
 	advance(p, deadRecheck)
-	gen, due := p.recheckDue("1.1.1.1")
+	gen, due := p.recheckDue("1.1.1.1", true)
 	if !due {
 		t.Fatalf("not due %s after the mark", deadRecheck)
 	}
-	if _, again := p.recheckDue("1.1.1.1"); again {
+	if _, again := p.recheckDue("1.1.1.1", true); again {
 		t.Fatal("due twice")
 	}
 	advance(p, deadFor-deadRecheck-time.Minute)
 	p.recheckDone(gen, "1.1.1.1", false, false)
-	advance(p, time.Hour)
+	advance(p, deadFor/2) // past the first mark's end
 	if !p.deadNow("1.1.1.1") {
 		t.Fatal("silence did not extend the mark")
 	}
-	gen, due = p.recheckDue("1.1.1.1")
+	gen, due = p.recheckDue("1.1.1.1", true)
 	if !due {
 		t.Fatalf("not due after %s", deadRecheck)
 	}
@@ -978,7 +980,7 @@ func TestAddr_DirectOnlyFailsIsDead(t *testing.T) {
 	if !slices.Contains(out.lines, "sni desync: 3.3.3.3: direct fails too, relay never reached it → dead") {
 		t.Fatalf("lines %q", out.lines)
 	}
-	gen, due := p.recheckDue("3.3.3.3")
+	gen, due := p.recheckDue("3.3.3.3", true)
 	if !due {
 		t.Fatal("no recheck at once")
 	}
@@ -1116,7 +1118,7 @@ func TestAddr_UnreachableBurstUnderMute(t *testing.T) {
 	_, gen, _ := p.pick("4.4.4.4", node2)
 	p.unreachable(gen, "4.4.4.4")
 	p.unreachable(gen, "4.4.4.4")
-	g, due := p.recheckDue("4.4.4.4")
+	g, due := p.recheckDue("4.4.4.4", true)
 	if !due {
 		t.Fatal("not due")
 	}
@@ -1136,12 +1138,49 @@ func TestAddr_DirectLiftEndsRelay(t *testing.T) {
 	gen, _ := p.silentNow("7.7.7.7")
 	p.relayNoAnswer(gen, "7.7.7.7", false)
 	advance(p, deadRecheck)
-	g, due := p.recheckDue("7.7.7.7")
+	g, due := p.recheckDue("7.7.7.7", true)
 	if !due {
 		t.Fatal("not due")
 	}
 	p.recheckDone(g, "7.7.7.7", true, false)
 	if st, _, _ := p.pick("7.7.7.7", node1); st == nil {
 		t.Fatalf("lifted by a direct probe, yet by relay: %+v", p.addr("7.7.7.7"))
+	}
+}
+
+// Offline (no route out): a direct-only address's failed dial is this
+// side's, not the address's. It stays direct only, not dead.
+func TestAddr_OfflineKeepsDirectOnly(t *testing.T) {
+	p, _, file := picking(t)
+	winner(p)
+	directOnly(t, p, "3.3.3.3", node1)
+	fails, attempts := p.fails, p.attempts
+	err := fmt.Errorf("%w: %w", errNoConnect, &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ENETUNREACH)})
+	desyncVerdict(p.gen, &strategy{id: p.cur}, "3.3.3.3", node1, "3.3.3.3:443", p.now(), err)
+	if p.deadNow("3.3.3.3") || !p.mutedNow("3.3.3.3") || readMap(t, file)["cell:25001"].Dead["3.3.3.3"] != 0 {
+		t.Fatalf("after an offline dial: %+v", p.addr("3.3.3.3"))
+	}
+	if p.fails != fails || p.attempts != attempts {
+		t.Fatalf("fails %d, attempts %d: counted", p.fails, p.attempts)
+	}
+}
+
+// A recheck while the relay cannot take a probe is direct only: it does
+// not use up the turn, the relay's return brings one at once.
+func TestRecheck_RelayDownKeepsTurn(t *testing.T) {
+	p, _, _ := picking(t)
+	p.markDead(p.gen, "1.1.1.1")
+	advance(p, deadRecheck)
+	if _, due := p.recheckDue("1.1.1.1", false); !due {
+		t.Fatal("no direct-only recheck")
+	}
+	if _, due := p.recheckDue("1.1.1.1", false); due {
+		t.Fatal("direct-only recheck twice")
+	}
+	if _, due := p.recheckDue("1.1.1.1", true); !due {
+		t.Fatal("no recheck once the relay is back")
+	}
+	if _, due := p.recheckDue("1.1.1.1", true); due {
+		t.Fatal("due twice")
 	}
 }

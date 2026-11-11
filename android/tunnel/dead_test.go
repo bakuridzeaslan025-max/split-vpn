@@ -298,6 +298,22 @@ func writeDeadMap(t *testing.T, file string, until int64) {
 	}
 }
 
+// A mark from 0.13.0's map (a day) is cut to this build's deadFor.
+func TestDeadMap_LongMarkCut(t *testing.T) {
+	q := freshPicker(t)
+	file := filepath.Join(t.TempDir(), "desync.json")
+	writeDeadMap(t, file, q.now().Add(24*time.Hour).Unix())
+	q.started(file)
+	q.setNetKey("cell:25001")
+	if !q.deadNow(deadIP) {
+		t.Fatal("not dead from the map")
+	}
+	advance(q, deadFor)
+	if q.deadNow(deadIP) {
+		t.Fatalf("dead past %s", deadFor)
+	}
+}
+
 // From the map: the first refused SYN probes the node through the relay;
 // an answer lifts the mark (memory and map), the next SYN is served.
 func TestRecheckDead_AliveLifts(t *testing.T) {
@@ -391,7 +407,7 @@ func TestRecheck_StaleVisit(t *testing.T) {
 	p, _, _ := picking(t)
 	p.markDead(p.gen, "1.1.1.1")
 	advance(p, deadRecheck)
-	gen, due := p.recheckDue("1.1.1.1")
+	gen, due := p.recheckDue("1.1.1.1", true)
 	if !due {
 		t.Fatal("not due")
 	}
@@ -401,7 +417,7 @@ func TestRecheck_StaleVisit(t *testing.T) {
 	if !p.deadNow("1.1.1.1") {
 		t.Fatal("lifted by a stale recheck")
 	}
-	if _, due := p.recheckDue("1.1.1.1"); !due {
+	if _, due := p.recheckDue("1.1.1.1", true); !due {
 		t.Fatal("not due on a new visit")
 	}
 }
@@ -509,7 +525,7 @@ func TestPicker_Concurrent(t *testing.T) {
 					_, gen, _ := p.pick(ip, "")
 					p.markDead(gen, ip)
 				case 1:
-					if gen, ok := p.recheckDue(ip); ok {
+					if gen, ok := p.recheckDue(ip, true); ok {
 						p.recheckDone(gen, ip, i%3 == 0, i%2 == 0)
 					}
 				case 2:
@@ -536,22 +552,71 @@ func TestPicker_Concurrent(t *testing.T) {
 }
 
 // Another session to the same node got its first byte after this one's
-// hello: the node is alive, the silence is the path's.
+// hello, or up to deadWait before it: the node is alive, the silence is the
+// path's.
 func TestConnsByAddr_Answered(t *testing.T) {
 	var c connsByAddr
 	c.m = map[string]map[net.Conn]net.Conn{}
 	since := time.Now()
-	early := &watchConn{start: since.Add(-time.Second)}
-	early.first.Store(int64(500 * time.Millisecond)) // before since
+	early := &watchConn{start: since.Add(-deadWait - 2*time.Second)}
+	early.first.Store(int64(time.Second)) // deadWait+1s before since
 	defer c.add(deadIP, &net.TCPConn{}, early)()
 	if c.answered(deadIP, since) {
-		t.Fatal("an answer from before the hello counted")
+		t.Fatal("an answer from long before the hello counted")
 	}
+	just := &watchConn{start: since.Add(-time.Second)}
+	just.first.Store(int64(500 * time.Millisecond)) // just before since
+	c.add(deadIP, &net.TCPConn{}, just)()
+	if !c.answered(deadIP, since) {
+		t.Fatal("an answer just before the hello did not count")
+	}
+	c.last = nil
 	late := &watchConn{start: since}
 	late.first.Store(int64(time.Second))
 	defer c.add(deadIP, &net.UDPConn{}, late)()
 	if !c.answered(deadIP, since) || c.answered(liveIP, since) {
 		t.Fatal("answered")
+	}
+}
+
+// 11.11, Tele2: of a burst of three, one session answered through the relay
+// and closed; the other two were silent for deadWait. The closed one's
+// answer still counts.
+func TestConnsByAddr_AnsweredThenClosed(t *testing.T) {
+	var c connsByAddr
+	c.m = map[string]map[net.Conn]net.Conn{}
+	since := time.Now().Add(-deadWait)
+	silent := &watchConn{start: since}
+	defer c.add(deadIP, &net.TCPConn{}, silent)()
+	quick := &watchConn{start: since}
+	quick.first.Store(int64(224 * time.Millisecond))
+	c.add(deadIP, &net.UDPConn{}, quick)()
+	if !c.answered(deadIP, since) {
+		t.Fatal("a closed session's answer did not count")
+	}
+	if c.answered(deadIP, since.Add(deadWait+time.Second)) || c.answered(liveIP, since) {
+		t.Fatal("answered")
+	}
+	unanswered := &watchConn{start: since}
+	c.add(liveIP, &net.UDPConn{}, unanswered)()
+	if c.answered(liveIP, since) {
+		t.Fatal("a closed session with no byte back counted")
+	}
+}
+
+// An answer older than answerKept is dropped when another one is kept.
+func TestConnsByAddr_OldAnswerDropped(t *testing.T) {
+	var c connsByAddr
+	c.m = map[string]map[net.Conn]net.Conn{}
+	long := time.Now().Add(-answerKept - time.Second)
+	old := &watchConn{start: long}
+	old.first.Store(int64(time.Millisecond))
+	c.add(deadIP, &net.TCPConn{}, old)()
+	fresh := &watchConn{start: time.Now()}
+	fresh.first.Store(int64(time.Millisecond))
+	c.add(liveIP, &net.TCPConn{}, fresh)()
+	if _, kept := c.last[deadIP]; kept || len(c.last) != 1 {
+		t.Fatalf("kept %v", c.last)
 	}
 }
 
@@ -634,7 +699,7 @@ func probeServer(t *testing.T, answer []byte) (net.IP, uint16, *atomic.Int32) {
 	return ip, uint16(ln.Addr().(*net.TCPAddr).Port), &hits
 }
 
-// recheckStack: a node dead in cell:25001's map for an hour more, direct
+// recheckStack: a node dead in cell:25001's map for deadFor/2 more, direct
 // on with the strategy none, the node answering its direct probe with
 // answer, the relay silent to it or echoing.
 func recheckStack(t *testing.T, answer []byte, relaySilent bool) (p *pickState, r *multiRelay, ip string, port uint16, hits *atomic.Int32, file string) {
@@ -657,7 +722,7 @@ func recheckStack(t *testing.T, answer []byte, relaySilent bool) (p *pickState, 
 	}
 	file = filepath.Join(t.TempDir(), "desync.json")
 	b, _ := json.Marshal(netMapFile{V: 1, Nets: map[string]netEntry{
-		"cell:25001": {Win: "none", At: 1, Dead: map[string]int64{ip: time.Now().Add(time.Hour).Unix()}},
+		"cell:25001": {Win: "none", At: 1, Dead: map[string]int64{ip: time.Now().Add(deadFor / 2).Unix()}},
 	}})
 	if err := os.WriteFile(file, b, 0o600); err != nil {
 		t.Fatal(err)
@@ -670,7 +735,7 @@ func recheckStack(t *testing.T, answer []byte, relaySilent bool) (p *pickState, 
 
 func recheckNow(t *testing.T, p *pickState, ip string, port uint16) {
 	t.Helper()
-	gen, due := p.recheckDue(ip)
+	gen, due := p.recheckDue(ip, true)
 	if !due {
 		t.Fatal("not due")
 	}
@@ -764,7 +829,7 @@ func TestRecheckDead_DirectAlone(t *testing.T) {
 func TestRecheckDead_DirectProbeWhen(t *testing.T) {
 	t.Run("stale", func(t *testing.T) {
 		p, _, ip, port, hits, _ := recheckStack(t, serverHello, false)
-		gen, _ := p.recheckDue(ip)
+		gen, _ := p.recheckDue(ip, true)
 		p.setNetKey("cell:25002")
 		p.setNetKey("cell:25001")
 		recheckDead(gen, health.generation(), ip, port, testCred)

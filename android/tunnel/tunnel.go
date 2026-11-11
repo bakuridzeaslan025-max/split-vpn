@@ -655,8 +655,9 @@ func handleTCP(r *tcp.ForwarderRequest, id stack.TransportEndpointID, cred []byt
 		}
 		// The player never waits on the check: it gets the refusal now. A
 		// check that cannot happen either way does not take the turn.
-		if st, _ := picker.directProbe(); st != nil || !health.down() && !overQuota() {
-			if gen, ok := picker.recheckDue(ip); ok {
+		relayOK := !health.down() && !overQuota()
+		if st, _ := picker.directProbe(); st != nil || relayOK {
+			if gen, ok := picker.recheckDue(ip, relayOK); ok {
 				go recheckDead(gen, health.generation(), ip, dstPort, cred)
 			}
 		}
@@ -795,6 +796,10 @@ var videoConns = connsByAddr{m: map[string]map[net.Conn]net.Conn{}}
 type connsByAddr struct {
 	mu sync.Mutex
 	m  map[string]map[net.Conn]net.Conn // ip → app side → relay side
+	// ip → first byte of its latest closed session that got one. A player
+	// opens a burst to a node; one may answer and close before the rest's
+	// deadWait runs out, and its answer must still count.
+	last map[string]time.Time
 }
 
 func (c *connsByAddr) add(ip string, app, out net.Conn) (remove func()) {
@@ -811,14 +816,43 @@ func (c *connsByAddr) add(ip string, app, out net.Conn) (remove func()) {
 		if len(c.m[ip]) == 0 {
 			delete(c.m, ip)
 		}
+		if wc, ok := out.(*watchConn); ok {
+			if f := wc.first.Load(); f > 0 {
+				c.keepAnswerLocked(ip, wc.start.Add(time.Duration(f)))
+			}
+		}
 	}
 }
 
-// answered: a session to ip got its first byte after since, the node is
-// alive and this one's silence is the path's.
+// keepAnswerLocked: a check's since is a silent session's start, about
+// deadWait before it fires; the check may then wait on a relay probe. An
+// answer older than answerKept can no longer clear one, so it is dropped.
+func (c *connsByAddr) keepAnswerLocked(ip string, at time.Time) {
+	if c.last == nil {
+		c.last = map[string]time.Time{}
+	}
+	old := time.Now().Add(-answerKept)
+	for k, t := range c.last {
+		if t.Before(old) {
+			delete(c.last, k)
+		}
+	}
+	if at.After(c.last[ip]) && !at.Before(old) {
+		c.last[ip] = at
+	}
+}
+
+// answered: a session to ip got its first byte after since, or up to
+// deadWait before it, the node is alive and this one's silence is the
+// path's. A player's sessions to a node overlap: one may get its bytes just
+// before another starts and stalls. Closed sessions count too.
 func (c *connsByAddr) answered(ip string, since time.Time) bool {
+	since = since.Add(-deadWait)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.last[ip].After(since) {
+		return true
+	}
 	for _, out := range c.m[ip] {
 		if wc, ok := out.(*watchConn); ok {
 			if f := wc.first.Load(); f > 0 && wc.start.Add(time.Duration(f)).After(since) {
