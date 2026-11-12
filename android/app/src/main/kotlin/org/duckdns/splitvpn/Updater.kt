@@ -13,6 +13,8 @@ import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.util.JsonReader
 import android.util.JsonToken
@@ -48,6 +50,8 @@ object Updater {
     private const val CHANNEL_ID = "update"
     // 1 and 2 are TunnelVpnService's.
     private const val NOTIFICATION_ID = 3
+    // A ROM that never asks nor answers must not hold «Установка…» for good.
+    internal const val ASK_TIMEOUT_MS = 30_000L
     // Our committed session, in the UI process's prefs: the installer's
     // answer may come to a new process (from the notification, after the
     // install). Only its ABORTED is the user's cancel.
@@ -69,9 +73,39 @@ object Updater {
     // next onResume starts it, from the activity, where nothing blocks it.
     @Volatile
     private var pending: Pair<Int, Intent>? = null
+    // Our session from the commit to the installer's final answer, with its
+    // dialog once the installer asked for it. «Обновить» meanwhile downloaded
+    // again and put a new dialog over the last one, tap after tap. This
+    // process's only: after a restart the next tap starts over.
+    @Volatile
+    internal var awaiting: Pair<Int, Intent?>? = null
+        set(value) {
+            field = value
+            Handler(Looper.getMainLooper()).post { onChange() }
+        }
+    /** On the main thread, when [installing] or [canReopen] may have changed. */
+    internal var onChange: () -> Unit = {}
     internal var visible: (Context) -> Boolean = {
         ActivityManager.RunningAppProcessInfo().also(ActivityManager::getMyMemoryState).importance ==
             ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+    }
+
+    /** The installer has our APK and has not answered yet: no new download. */
+    val installing get() = awaiting != null
+
+    /** [reopen] has the installer's dialog to show. */
+    val canReopen get() = awaiting?.second != null
+
+    /** The installer's dialog again, for the session [installing] waits on. */
+    fun reopen(ctx: Context): Boolean {
+        val i = awaiting?.second ?: return false
+        return runCatching { ctx.startActivity(i) }.isSuccess
+    }
+
+    /** A session the system dropped without an answer to us: «Обновить» again. */
+    fun recheck(ctx: Context) {
+        val a = awaiting ?: return
+        if (ctx.packageManager.packageInstaller.getSessionInfo(a.first) == null && awaiting === a) awaiting = null
     }
 
     fun canInstall(ctx: Context) = ctx.packageManager.canRequestPackageInstalls()
@@ -726,6 +760,7 @@ object Updater {
         prefs(ctx).edit().remove(KEY_SESSION).apply()
         for (old in installer.mySessions) runCatching { installer.abandonSession(old.sessionId) }
         pending = null
+        awaiting = null
         ctx.getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
         val id = installer.createSession(params)
         installer.openSession(id).use { s ->
@@ -737,11 +772,16 @@ object Updater {
                 // Mutable: the system puts the status and the confirmation intent in.
                 val flags = PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
                 val status = PendingIntent.getBroadcast(ctx, id, Intent(ctx, InstallReceiver::class.java), flags)
+                // Before the commit: its answer may come first.
+                val waiting = id to null
+                awaiting = waiting
+                Handler(Looper.getMainLooper()).postDelayed({ if (awaiting === waiting) awaiting = null }, ASK_TIMEOUT_MS)
                 s.commit(status.intentSender)
                 // After the commit: a session abandoned below must not
                 // come back as the user's cancel on top of the failure.
                 prefs(ctx).edit().putInt(KEY_SESSION, id).apply()
             } catch (e: Exception) {
+                if (awaiting?.first == id) awaiting = null
                 s.abandon()
                 throw e
             }
@@ -755,6 +795,7 @@ object Updater {
         // Answered from the notification: coming back to the app must not ask
         // again. Not by an abandoned session's ABORTED, though.
         if (st != PackageInstaller.STATUS_PENDING_USER_ACTION && pending?.first == session) pending = null
+        if (st != PackageInstaller.STATUS_PENDING_USER_ACTION && awaiting?.first == session) awaiting = null
         val ours = session != -1 && prefs(ctx).getInt(KEY_SESSION, -1) == session
         // A final answer about ours: nothing more will come for it.
         if (ours && st != PackageInstaller.STATUS_PENDING_USER_ACTION) prefs(ctx).edit().remove(KEY_SESSION).apply()
@@ -781,11 +822,13 @@ object Updater {
     private fun confirm(ctx: Context, session: Int, confirm: Intent?) {
         // It arrives through a mutable PendingIntent: start only the system's own dialog.
         if (confirm == null || confirm.action !in confirmActions) {
+            if (awaiting?.first == session) awaiting = null
             report(Failure(Kind.INSTALL, "confirm action ${confirm?.action}"))
             event(ctx, "failed", "confirm")
             return
         }
         confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (awaiting?.first == session) awaiting = session to confirm
         // Android 10+ drops activity starts from the background without a word.
         if (visible(ctx)) {
             ctx.startActivity(confirm)

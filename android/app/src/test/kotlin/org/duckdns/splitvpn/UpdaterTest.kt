@@ -49,6 +49,7 @@ class UpdaterTest {
         Versions.debug = true
         Updater.busy.set(false)
         Updater.takePending(app)
+        Updater.awaiting = null
         Updater.visible = realVisible
         Updater.timing = Updater.Timing()
         Updater.checkApk = realCheck
@@ -338,6 +339,68 @@ class UpdaterTest {
         }
         Updater.onStatus(app, status(PackageInstaller.STATUS_FAILURE_ABORTED, session = 5))
         assertTrue(steps().isEmpty())
+    }
+
+    private fun install(apk: File) = org.robolectric.util.ReflectionHelpers.callInstanceMethod<Unit>(
+        Updater, "install",
+        org.robolectric.util.ReflectionHelpers.ClassParameter.from(Context::class.java, app),
+        org.robolectric.util.ReflectionHelpers.ClassParameter.from(File::class.java, apk),
+    )
+
+    // A friend's log: «Обновить» four times in ten seconds, each a new
+    // download and a new dialog over the last one.
+    @Test
+    fun committedSessionWaitsForTheInstallersAnswer() {
+        Updater.visible = { true }
+        install(File(app.cacheDir, "u.apk").apply { writeBytes(ByteArray(16)) })
+        val id = Updater.awaiting!!.first
+        assertTrue(Updater.installing)
+        assertFalse(Updater.canReopen)
+        assertFalse(Updater.reopen(app))
+        Updater.onStatus(app, status(PackageInstaller.STATUS_PENDING_USER_ACTION, confirm, session = id))
+        assertEquals(confirm.action, shadowOf(app).nextStartedActivity?.action)
+        assertTrue(Updater.canReopen)
+        assertTrue(Updater.reopen(app))
+        assertEquals(confirm.action, shadowOf(app).nextStartedActivity?.action)
+        Updater.onStatus(app, status(PackageInstaller.STATUS_FAILURE_ABORTED, session = id + 1))
+        assertTrue(Updater.installing)
+        Updater.onStatus(app, status(PackageInstaller.STATUS_FAILURE_ABORTED, session = id))
+        assertFalse(Updater.installing)
+        assertFalse(Updater.reopen(app))
+    }
+
+    @Test
+    fun aStrangeDialogOrNoneFreesTheButton() {
+        Updater.visible = { true }
+        install(File(app.cacheDir, "u.apk").apply { writeBytes(ByteArray(16)) })
+        val id = Updater.awaiting!!.first
+        Updater.onStatus(app, status(PackageInstaller.STATUS_PENDING_USER_ACTION, Intent(Intent.ACTION_VIEW), session = id))
+        assertFalse(Updater.installing)
+
+        install(File(app.cacheDir, "u.apk").apply { writeBytes(ByteArray(16)) })
+        assertTrue(Updater.installing)
+        shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(Updater.ASK_TIMEOUT_MS - 1))
+        assertTrue(Updater.installing)
+        shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(1))
+        assertFalse(Updater.installing)
+
+        // Once asked, the dialog is the user's to answer: no timeout.
+        install(File(app.cacheDir, "u.apk").apply { writeBytes(ByteArray(16)) })
+        Updater.onStatus(app, status(PackageInstaller.STATUS_PENDING_USER_ACTION, confirm, session = Updater.awaiting!!.first))
+        shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(Updater.ASK_TIMEOUT_MS))
+        assertTrue(Updater.canReopen)
+    }
+
+    @Test
+    fun aSessionTheSystemDroppedIsForgotten() {
+        val installer = app.packageManager.packageInstaller
+        val id = installer.createSession(PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL))
+        Updater.awaiting = id to null
+        Updater.recheck(app)
+        assertTrue(Updater.installing)
+        installer.abandonSession(id)
+        Updater.recheck(app)
+        assertFalse(Updater.installing)
     }
 
     @Test

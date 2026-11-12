@@ -315,6 +315,7 @@ class MainActivity : Activity() {
         }
         setContentView(R.layout.main_simple)
         shown = java.lang.ref.WeakReference(this)
+        Updater.onChange = { live?.renderBanner() }
 
         findViewById<View>(R.id.root).setOnApplyWindowInsetsListener { v, insets ->
             // WindowInsets.Type is API 30 (and Insets 29); minSdk is 26.
@@ -575,6 +576,7 @@ class MainActivity : Activity() {
     // Both change in the system's own screens: asked again on every return.
     override fun onResume() {
         super.onResume()
+        Updater.recheck(this)
         Updater.takePending(this)?.let { runCatching { startActivity(it) } }
         val optimized = !getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
         batteryOptimized = optimized
@@ -919,7 +921,7 @@ class MainActivity : Activity() {
 
     // One at a time, the most important: an error, then a warning, then news.
     private fun banner(): Banner? = when {
-        updateRequired -> Banner(Level.ERROR, R.drawable.ic_system_update, "Эта версия больше не поддерживается", updateLabel, ::startUpdate, busy = updating)
+        updateRequired -> Banner(Level.ERROR, R.drawable.ic_system_update, "Эта версия больше не поддерживается", updateLabel, ::startUpdate, busy = updateBusy)
         quotaOut -> Banner(Level.ERROR, R.drawable.ic_error, "Дневной лимит трафика исчерпан. VPN снова заработает после 00:00")
         state == VpnState.ERROR && error == TunnelVpnService.ERR_NEED_CODE ->
             Banner(Level.WARN, R.drawable.ic_gpp_maybe, "Не удалось проверить устройство через Google Play", "Ввести код", ::showInviteDialog)
@@ -930,7 +932,8 @@ class MainActivity : Activity() {
             Banner(Level.WARN, R.drawable.ic_wifi_off, "Нет интернета — VPN заработает, когда сеть появится")
         waitingNow -> Banner(Level.WARN, R.drawable.ic_schedule, "Сервер не отвечает — подключимся сами, как только он ответит")
         // While downloading: no way to hide the only sign of it.
-        updateAvailable -> Banner(Level.INFO, R.drawable.ic_system_update, "Доступна новая версия", updateLabel, ::startUpdate, busy = updating, closable = !updating)
+        updateAvailable -> Banner(Level.INFO, R.drawable.ic_system_update, "Доступна новая версия", updateLabel, ::startUpdate, busy = updateBusy,
+            closable = !updating && !Updater.installing)
         else -> null
     }
 
@@ -987,7 +990,11 @@ class MainActivity : Activity() {
     private val updateRequired get() = state == VpnState.ERROR && error == TunnelVpnService.ERR_UPDATE_REQUIRED ||
         state == VpnState.DISCONNECTED && versions?.required == true
 
+    // Until the installer asks, there is no dialog to bring back.
+    private val updateBusy get() = updating || Updater.installing && !Updater.canReopen
+
     private val updateLabel get() = when {
+        !updating && Updater.installing -> if (Updater.canReopen) "Установить" else "Установка…"
         !updating -> "Обновить"
         progress >= 0 -> "Скачивается… $progress%"
         else -> "Скачивается…"
@@ -1000,6 +1007,11 @@ class MainActivity : Activity() {
         // Self-update turned off in Remote Config: no report, just the page.
         if (!Updater.enabled(v)) return openDownloadPage()
         if (updating) return
+        if (Updater.installing) {
+            // No dialog yet (the service notification's «Обновить»): it is on its way.
+            if (!Updater.canReopen || Updater.reopen(this)) return
+            Updater.awaiting = null
+        }
         updating = true
         progress = -1
         render()

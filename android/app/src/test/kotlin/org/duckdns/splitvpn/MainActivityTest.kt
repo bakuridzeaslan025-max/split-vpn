@@ -78,6 +78,8 @@ class MainActivityTest {
         MainActivity.update = Updater::update
         MainActivity.background = { Thread(it, "Update").start() }
         MainActivity.resetUpdateState()
+        Updater.awaiting = null
+        Updater.visible = realVisible
         activity?.destroy()
         service.destroy()
         ShadowLooper.idleMainLooper()
@@ -698,6 +700,51 @@ class MainActivityTest {
         assertEquals(View.GONE, a.updateBox())
         rc(latest = newer + 1)
         assertEquals(View.VISIBLE, a.updateBox())
+    }
+
+    private val realVisible = Updater.visible
+
+    // Until the installer answers, «Обновить» brings its dialog back instead
+    // of downloading again: a friend's four taps were four dialogs.
+    @Test
+    fun startedUpdateWaitsForTheInstallerInsteadOfDownloadingAgain() {
+        Versions.debug = false
+        val id = app.packageManager.packageInstaller
+            .createSession(android.content.pm.PackageInstaller.SessionParams(android.content.pm.PackageInstaller.SessionParams.MODE_FULL_INSTALL))
+        var downloads = 0
+        MainActivity.update = { _, _, _ ->
+            downloads++
+            Updater.awaiting = id to null
+            Updater.Result.STARTED
+        }
+        MainActivity.background = { it.run() }
+        Updater.visible = { true }
+        rc(latest = newer)
+        val a = launch()
+        val action = a.findViewById<View>(R.id.bannerAction)
+        action.performClick()
+        ShadowLooper.idleMainLooper()
+        assertEquals("Установка…", a.text(R.id.bannerAction))
+        assertFalse(action.isEnabled)
+        assertEquals(View.GONE, a.findViewById<View>(R.id.bannerClose).visibility)
+        val confirm = Intent("android.content.pm.action.CONFIRM_INSTALL")
+        val status = { st: Int ->
+            Updater.onStatus(app, Intent().putExtra(android.content.pm.PackageInstaller.EXTRA_STATUS, st)
+                .putExtra(android.content.pm.PackageInstaller.EXTRA_SESSION_ID, id).putExtra(Intent.EXTRA_INTENT, confirm))
+            ShadowLooper.idleMainLooper()
+        }
+        status(android.content.pm.PackageInstaller.STATUS_PENDING_USER_ACTION)
+        assertEquals(confirm.action, nextActivity()?.action)
+        assertEquals("Установить", a.text(R.id.bannerAction))
+        assertTrue(action.isEnabled)
+        action.performClick()
+        assertEquals(confirm.action, nextActivity()?.action)
+        assertEquals(1, downloads)
+        // The user's cancel: the next tap downloads again.
+        status(android.content.pm.PackageInstaller.STATUS_FAILURE_ABORTED)
+        assertEquals("Обновить", a.text(R.id.bannerAction))
+        action.performClick()
+        assertEquals(2, downloads)
     }
 
     @Test
