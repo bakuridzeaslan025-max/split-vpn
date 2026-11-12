@@ -96,8 +96,8 @@ android {
         applicationId = "org.newvpn" // Play Console package; Kotlin namespace stays
         minSdk = 26
         targetSdk = 36
-        versionCode = 144 // an earlier internal release in Play took 68
-        versionName = "0.13.2"
+        versionCode = 145 // an earlier internal release in Play took 68
+        versionName = "0.13.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("long", "INTEGRITY_PROJECT", "${integrityProject}L")
         buildConfigField("String", "ENDPOINTS", "\"$endpointsBlob\"")
