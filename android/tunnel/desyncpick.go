@@ -422,16 +422,22 @@ func (p *pickState) applyLocked() {
 			if until := time.Unix(e.At, 0).Add(noneFor); e.None && p.now().Before(until) {
 				p.noneUntil = until
 			}
+			cut := false
 			for ip, until := range e.Dead {
 				// A map from a build with a longer deadFor (0.13.0: a day)
-				// keeps no mark past this build's.
+				// keeps no mark past this build's. The cut goes to the file
+				// too, or every apply would grant the mark another deadFor.
 				t := time.Unix(until, 0)
 				if limit := p.now().Add(deadFor); t.After(limit) {
-					t = limit
+					t, cut = limit, true
+					e.Dead[ip] = t.Unix()
 				}
 				if p.now().Before(t) {
 					p.putLocked(ip).deadUntil = t
 				}
+			}
+			if cut {
+				p.writeLocked()
 			}
 			if e.Win != "" && hasID(list, e.Win) {
 				p.cur, p.won = e.Win, true
@@ -779,6 +785,17 @@ func (p *pickState) recheckDue(ip string, relay bool) (uint64, bool) {
 	}
 	a.checked, a.relayKnew = now, relay
 	return p.gen, true
+}
+
+// recheckNoRelay: the relay's half of ip's recheck told nothing and the
+// relay cannot take a probe now (down, over the quota, another
+// generation): the turn stays open for one with it, once it can.
+func (p *pickState) recheckNoRelay(gen uint64, ip string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if a := p.addrLocked(ip); gen == p.gen && a != nil {
+		a.relayKnew = false
+	}
 }
 
 // directProbe is the strategy a recheck tries a dead address with

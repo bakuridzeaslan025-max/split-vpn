@@ -1184,3 +1184,25 @@ func TestRecheck_RelayDownKeepsTurn(t *testing.T) {
 		t.Fatal("due twice")
 	}
 }
+
+// The relay looked up at the SYN but could not take the probe after all:
+// the turn is not used up, the next SYN with the relay probes.
+func TestRecheck_RelayProbeLostKeepsTurn(t *testing.T) {
+	p, _, _ := picking(t)
+	p.markDead(p.gen, "1.1.1.1")
+	advance(p, deadRecheck)
+	gen, due := p.recheckDue("1.1.1.1", true)
+	if !due {
+		t.Fatal("not due")
+	}
+	p.recheckNoRelay(gen, "1.1.1.1")
+	if _, due := p.recheckDue("1.1.1.1", false); due {
+		t.Fatal("direct-only recheck right after")
+	}
+	if _, due := p.recheckDue("1.1.1.1", true); !due {
+		t.Fatal("no recheck with the relay")
+	}
+	if _, due := p.recheckDue("1.1.1.1", true); due {
+		t.Fatal("due twice")
+	}
+}
