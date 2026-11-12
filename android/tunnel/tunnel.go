@@ -929,6 +929,12 @@ func recheckDead(gen, hgen uint64, ip string, port uint16, cred []byte) {
 		}()
 	}
 	relay, silent := recheckRelay(hgen, ip, port, cred)
+	// Only a relay that cannot take the next turn gives this one back: a
+	// failure health does not count (a rejected credential) would bring a
+	// handshake to the VDS on every refused SYN.
+	if !relay && !silent && (health.down() || overQuota() || health.generation() != hgen) {
+		picker.recheckNoRelay(gen, ip)
+	}
 	if d := direct != nil && <-direct; !d && (relay || silent && direct != nil) {
 		picker.recheckDone(gen, ip, false, relay)
 	}

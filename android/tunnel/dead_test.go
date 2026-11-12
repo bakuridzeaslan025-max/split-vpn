@@ -308,7 +308,17 @@ func TestDeadMap_LongMarkCut(t *testing.T) {
 	if !q.deadNow(deadIP) {
 		t.Fatal("not dead from the map")
 	}
-	advance(q, deadFor)
+	if got, want := readMap(t, file)["cell:25001"].Dead[deadIP], q.now().Add(deadFor).Unix(); got != want {
+		t.Fatalf("map keeps %d, want the cut %d", got, want)
+	}
+	// Another apply later (a network back, a restart) grants no more time.
+	advance(q, deadFor/2)
+	q.setNetKey("cell:25002")
+	q.setNetKey("cell:25001")
+	if !q.deadNow(deadIP) {
+		t.Fatal("not dead after the re-apply")
+	}
+	advance(q, deadFor/2)
 	if q.deadNow(deadIP) {
 		t.Fatalf("dead past %s", deadFor)
 	}
@@ -822,6 +832,26 @@ func TestRecheckDead_DirectAlone(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The relay's half lost to a new relay generation: the turn stays open for
+// the next SYN. A relay that heard the hello and stayed silent uses it up.
+func TestRecheckDead_RelayLostKeepsTurn(t *testing.T) {
+	t.Run("lost", func(t *testing.T) {
+		p, _, ip, port, _, _ := recheckStack(t, nil, true)
+		gen, _ := p.recheckDue(ip, true)
+		recheckDead(gen, health.generation()+1, ip, port, testCred)
+		if _, due := p.recheckDue(ip, true); !due {
+			t.Fatal("turn used up")
+		}
+	})
+	t.Run("silent", func(t *testing.T) {
+		p, _, ip, port, _, _ := recheckStack(t, nil, true)
+		recheckNow(t, p, ip, port)
+		if _, due := p.recheckDue(ip, true); due {
+			t.Fatal("due again")
+		}
+	})
 }
 
 // No direct probe on another visit to the network, under "nothing works"
