@@ -1185,8 +1185,8 @@ func TestRecheck_RelayDownKeepsTurn(t *testing.T) {
 	}
 }
 
-// The relay looked up at the SYN but its probe never went out (dial
-// failed): the turn is not used up, the next SYN with the relay probes.
+// The relay looked up at the SYN but could not take the probe after all:
+// the turn is not used up, the next SYN with the relay probes.
 func TestRecheck_RelayProbeLostKeepsTurn(t *testing.T) {
 	p, _, _ := picking(t)
 	p.markDead(p.gen, "1.1.1.1")
