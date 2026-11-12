@@ -1,8 +1,18 @@
 name: CI
 
 on:
+  # Branches get their run from the PR; pushing to one would run it twice.
   push:
+    branches: [main]
+    paths-ignore:
+      - rc/config.json
+      - android/release-notes/**
+      - '**.md'
   pull_request:
+    paths-ignore:
+      - rc/config.json
+      - android/release-notes/**
+      - '**.md'
 
 permissions:
   contents: read
