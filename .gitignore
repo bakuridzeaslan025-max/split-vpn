@@ -4,6 +4,7 @@ android/.kotlin/
 android/build/
 android/app/build/
 android/local.properties
+android/tg.properties
 
 # Compiled Go binary (relay)
 relay/relay
