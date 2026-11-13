@@ -322,6 +322,7 @@ func Start(tunFd int, vpnAddr string, sni string, path string, id string, cred [
 	go health.prober(proberStop, wake, func() error { return probeRelay(cred) })
 	mu.Unlock()
 	picker.started(desyncFile)
+	wifiASN.started()
 	return nil
 }
 
@@ -341,14 +342,14 @@ func probeRelay(cred []byte) error {
 // are made here. gen and ep are the caller's, read together: a SetEndpoint
 // meanwhile changes neither the address dialed nor whose event it is.
 func relayHandshake(ctx context.Context, gen uint64, ep *relayTarget, cred []byte) (net.Conn, *bufio.Reader, error) {
-	t0 := time.Now()
+	t0, net0 := time.Now(), wifiASN.now()
 	c, stage, err := dialTLSStage(ctx, gen, ep.addr, ep.sni)
 	if err == nil {
 		stage = "upgrade"
 		c.SetDeadline(time.Now().Add(handshakeTimeout))
 		var br *bufio.Reader
 		if br, err = upgrade(c, ep, cred); err == nil {
-			dialEvent(gen, ep, stage, nil, t0)
+			dialEvent(gen, ep, stage, nil, t0, net0)
 			return c, br, nil
 		}
 		c.Close()
@@ -358,7 +359,7 @@ func relayHandshake(ctx context.Context, gen uint64, ep *relayTarget, cred []byt
 			health.failed(gen, "upgrade", fmt.Sprintf("relay: upgrade failed: %v", err), err)
 		}
 	}
-	dialEvent(gen, ep, stage, err, t0)
+	dialEvent(gen, ep, stage, err, t0, net0)
 	return nil, nil, err
 }
 
@@ -379,8 +380,9 @@ func SetDialEvents(bp int) {
 // about the relay's reach: a refused credential (it answered), the caller
 // giving up, a handshake that outlived its network or endpoint (health
 // drops those too). The dice are Go's, so gomobile is not crossed for the
-// handshakes left out.
-func dialEvent(gen uint64, ep *relayTarget, stage string, err error, t0 time.Time) {
+// handshakes left out. net0 is the network the handshake began on: its
+// Wi-Fi's ASN goes along only if it is still the network.
+func dialEvent(gen uint64, ep *relayTarget, stage string, err error, t0 time.Time, net0 string) {
 	bp := int(dialBP.Load())
 	h := protector
 	if bp <= 0 || h == nil || ep.id == "" || gen == notCounted || errors.Is(err, ErrCredRejected) || errors.Is(err, context.Canceled) {
@@ -389,7 +391,7 @@ func dialEvent(gen uint64, ep *relayTarget, stage string, err error, t0 time.Tim
 	if mrand.IntN(10000) >= bp || health.generation() != gen {
 		return
 	}
-	go h.DialEvent(ep.id, dialResult(stage, err), time.Since(t0).Milliseconds())
+	go h.DialEvent(ep.id, dialResult(stage, err), time.Since(t0).Milliseconds(), wifiASN.of(net0))
 }
 
 // dialResult names a handshake's outcome for DialEvent: "ok", or the

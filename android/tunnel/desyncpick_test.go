@@ -23,6 +23,7 @@ func freshPicker(t *testing.T) *pickState {
 	p.now = func() time.Time { return now }
 	picker = p
 	t.Cleanup(func() { picker = old })
+	freshASN(t)
 	return p
 }
 

@@ -63,7 +63,10 @@ func SetDirect(on bool) { directOn.Store(on) }
 // carrier), "wifi@<id>" (a Wi-Fi: Go asks a public service for its
 // provider and keys it "wifi:AS<n>"), anything else is a network without
 // a name, picked for in memory only. The same key again changes nothing.
-func SetNetKey(key string) { picker.setNetKey(key) }
+func SetNetKey(key string) {
+	picker.setNetKey(key)
+	wifiASN.set(key)
+}
 
 // addrs remembers up to addrMemory addresses, dropping the least recently
 // put.
@@ -211,11 +214,9 @@ type pickState struct {
 	mu  sync.Mutex
 	now func() time.Time
 
-	raw      string // as SetNetKey said it
-	key      string // in the map; "" for a network without a name
-	gen      uint64 // results from an earlier network do not count
-	asnTried bool
-	asns     map[string]string // "wifi@<id>" → its ASN, for the process: a restart does not ask again
+	raw string // as SetNetKey said it
+	key string // in the map; "" for a network without a name
+	gen uint64 // results from an earlier network do not count
 
 	cur       string // strategy id
 	won       bool   // cur is this network's winner, from the map or found now
@@ -295,12 +296,8 @@ func (p *pickState) started(file string) {
 	if list := strategiesNow(); len(list) > 0 && !hasID(list, p.cur) {
 		p.restartLocked()
 	}
-	lookup, gen, raw := p.wantASNLocked(), p.gen, p.raw
 	p.told = ""
 	p.unlockAndTell()
-	if lookup {
-		go p.lookupASN(gen, raw)
-	}
 }
 
 func (p *pickState) setNetKey(raw string) {
@@ -313,10 +310,10 @@ func (p *pickState) setNetKey(raw string) {
 	if code, ok := strings.CutPrefix(raw, "cell:"); ok && code != "" {
 		key = raw
 	}
-	if asn, ok := p.asns[raw]; ok {
+	if asn := wifiASN.cached(raw); asn != "" {
 		key = "wifi:AS" + asn
 	}
-	p.raw, p.asnTried = raw, false
+	p.raw = raw
 	// The same network under another id (a Wi-Fi joined again): its memory stays.
 	if key != "" && key == p.key {
 		p.unlockAndTell()
@@ -331,11 +328,7 @@ func (p *pickState) setNetKey(raw string) {
 	if directOn.Load() && len(strategiesNow()) > 0 && (key != "" || was != "") {
 		log.Printf("sni desync: network %s, starting from %s%s", p.nameLocked(), p.cur, p.noneNoteLocked())
 	}
-	lookup, gen := p.wantASNLocked(), p.gen
 	p.unlockAndTell()
-	if lookup {
-		go p.lookupASN(gen, raw)
-	}
 }
 
 func (p *pickState) noneNoteLocked() string {
@@ -456,43 +449,20 @@ func hasID(list []strategy, id string) bool {
 	return slices.ContainsFunc(list, func(s strategy) bool { return s.id == id })
 }
 
-func (p *pickState) wantASNLocked() bool {
-	if !strings.HasPrefix(p.raw, "wifi@") || p.key != "" || p.asnTried || !directOn.Load() || len(strategiesNow()) == 0 {
-		return false
-	}
-	p.asnTried = true
-	return true
-}
-
-func (p *pickState) lookupASN(gen uint64, raw string) {
-	defer guard("asn")
-	// The services' names resolve through the network's resolvers, and
-	// those may come a moment after the network itself.
-	for deadline := time.Now().Add(asnDNSWait); dnsServers() == "" && time.Now().Before(deadline); {
-		time.Sleep(100 * time.Millisecond)
-	}
-	if dnsServers() == "" {
-		p.mu.Lock()
-		if p.raw == raw {
-			p.asnTried = false // the next Start asks
-		}
-		p.mu.Unlock()
-		return
-	}
-	asn, from := asnLookup()
+// asnFound: wifiASN's answer for raw ("" none). Taken only while raw is
+// still the network and has no name; with direct YouTube off it is kept
+// quiet, as setNetKey's line is.
+func (p *pickState) asnFound(raw, asn, from string) {
 	p.mu.Lock()
-	if asn != "" {
-		if p.asns == nil {
-			p.asns = map[string]string{}
-		}
-		p.asns[raw] = asn
-	}
-	if p.gen != gen || p.raw != raw {
+	if p.raw != raw || p.key != "" {
 		p.mu.Unlock()
 		return
 	}
+	on := directOn.Load() && len(strategiesNow()) > 0
 	if asn == "" {
-		log.Printf("sni desync: wifi provider unknown, no name for this network")
+		if on {
+			log.Printf("sni desync: wifi provider unknown, no name for this network")
+		}
 		p.mu.Unlock()
 		return
 	}
@@ -500,7 +470,9 @@ func (p *pickState) lookupASN(gen uint64, raw string) {
 	p.key = "wifi:AS" + asn
 	p.resetLocked()
 	p.applyLocked()
-	log.Printf("sni desync: network %s (%s), starting from %s%s", p.key, from, p.cur, p.noneNoteLocked())
+	if on {
+		log.Printf("sni desync: network %s (%s), starting from %s%s", p.key, from, p.cur, p.noneNoteLocked())
+	}
 	p.unlockAndTell()
 }
 

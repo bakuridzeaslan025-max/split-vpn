@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -136,6 +137,105 @@ func asnFrom(s asnService, timeout time.Duration) (string, error) {
 		return a, nil
 	}
 	return "", errors.New("no asn in the answer")
+}
+
+// wifiASN is the default Wi-Fi's provider, asked whatever direct YouTube's
+// switch: relay_dial names it, and the picker keys the Wi-Fi by it.
+var wifiASN = &netASN{}
+
+type netASN struct {
+	mu    sync.Mutex
+	raw   string // as SetNetKey said it
+	gen   uint64 // raw's changes: a lookup that outlived its network answered over another one
+	tried bool
+	asns  map[string]string // "wifi@<id>" → its ASN, for the process: a restart does not ask again
+}
+
+// set: SetNetKey's turn. Asks for a Wi-Fi not known yet, once per network.
+func (n *netASN) set(raw string) {
+	n.mu.Lock()
+	if raw != n.raw {
+		n.raw, n.tried = raw, false
+		n.gen++
+	}
+	n.askLocked()
+}
+
+// started: Start's turn. A Wi-Fi left unasked (no resolvers yet) is asked now.
+func (n *netASN) started() {
+	n.mu.Lock()
+	n.askLocked()
+}
+
+// askLocked releases mu, then asks if the network needs it.
+func (n *netASN) askLocked() {
+	raw, gen := n.raw, n.gen
+	_, known := n.asns[raw]
+	ask := strings.HasPrefix(raw, "wifi@") && !known && !n.tried
+	if ask {
+		n.tried = true
+	}
+	n.mu.Unlock()
+	if ask {
+		go n.lookup(raw, gen)
+	}
+}
+
+// cached is raw's ASN if it was found, "" if not.
+func (n *netASN) cached(raw string) string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.asns[raw]
+}
+
+func (n *netASN) now() string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.raw
+}
+
+// of is "AS<n>" of a Wi-Fi that is still the default network, "" for any
+// other: one left since, a carrier, one not known yet.
+func (n *netASN) of(raw string) string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if raw != n.raw || !strings.HasPrefix(raw, "wifi@") || n.asns[raw] == "" {
+		return ""
+	}
+	return "AS" + n.asns[raw]
+}
+
+func (n *netASN) lookup(raw string, gen uint64) {
+	defer guard("asn")
+	// The services' names resolve through the network's resolvers, and
+	// those may come a moment after the network itself.
+	for deadline := time.Now().Add(asnDNSWait); dnsServers() == "" && time.Now().Before(deadline); {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if dnsServers() == "" {
+		n.mu.Lock()
+		if n.gen == gen {
+			n.tried = false // the next Start asks
+		}
+		n.mu.Unlock()
+		return
+	}
+	asn, from := asnLookup()
+	n.mu.Lock()
+	// The sockets follow the default network: after a change the answer
+	// may be another network's provider.
+	if n.gen != gen {
+		n.mu.Unlock()
+		return
+	}
+	if asn != "" {
+		if n.asns == nil {
+			n.asns = map[string]string{}
+		}
+		n.asns[raw] = asn
+	}
+	n.mu.Unlock()
+	picker.asnFound(raw, asn, from)
 }
 
 func dnsServers() string {

@@ -50,8 +50,9 @@ type Host interface {
 	DirectVerdict(state string)
 	// DialEvent: how a sampled relay handshake went (SetDialEvents) on
 	// the endpoint labelled id; result as dialResult names it, ms from the
-	// TCP connect to the 101 or the failure. Off Go's locks, any order.
-	DialEvent(id, result string, ms int64)
+	// TCP connect to the 101 or the failure; asn "AS<n>" of the Wi-Fi it
+	// went over, "" if not a Wi-Fi or not known. Off Go's locks, any order.
+	DialEvent(id, result string, ms int64, asn string)
 }
 
 type routeCache struct {

@@ -20,9 +20,12 @@ type dialHost struct {
 	ch chan string
 }
 
-func (h *dialHost) DialEvent(id, result string, ms int64) {
+func (h *dialHost) DialEvent(id, result string, ms int64, asn string) {
 	if ms < 0 {
 		result += " negative ms"
+	}
+	if asn != "" {
+		result += " " + asn
 	}
 	h.ch <- id + " " + result
 }
@@ -113,6 +116,33 @@ func TestDialEvent_UpgradeResults(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// A Wi-Fi's provider goes with its own dials only: not a carrier's, not
+// one begun on the network before.
+func TestDialEvent_WifiASN(t *testing.T) {
+	scriptedRelay(t, "nl1", reply(answer101))
+	h := withDialEvents(t, 10000)
+	freshASN(t)
+	wifiASN.mu.Lock()
+	wifiASN.raw, wifiASN.asns = "wifi@9", map[string]string{"wifi@9": "8359"}
+	wifiASN.mu.Unlock()
+	probeRelay(testCred)
+	if got := h.next(t); got != "nl1 ok AS8359" {
+		t.Fatalf("on the Wi-Fi: %q", got)
+	}
+	wifiASN.set("cell:25001")
+	probeRelay(testCred)
+	if got := h.next(t); got != "nl1 ok" {
+		t.Fatalf("on a carrier: %q", got)
+	}
+	wifiASN.mu.Lock()
+	wifiASN.raw = "wifi@10"
+	wifiASN.mu.Unlock()
+	dialEvent(health.generation(), relayEP.Load(), "upgrade", nil, time.Now(), "wifi@9")
+	if got := h.next(t); got != "nl1 ok" {
+		t.Fatalf("begun on the Wi-Fi before: %q", got)
 	}
 }
 

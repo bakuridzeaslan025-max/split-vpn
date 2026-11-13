@@ -142,7 +142,7 @@ func (f *fakeProtector) DirectVerdict(v string) {
 	f.mu.Unlock()
 }
 
-func (f *fakeProtector) DialEvent(id, result string, ms int64) {
+func (f *fakeProtector) DialEvent(id, result string, ms int64, asn string) {
 	f.mu.Lock()
 	f.dials = append(f.dials, id+" "+result)
 	f.mu.Unlock()
