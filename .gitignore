@@ -4,7 +4,7 @@ android/.kotlin/
 android/build/
 android/app/build/
 android/local.properties
-android/tg.properties
+android/release.properties
 
 # Compiled Go binary (relay)
 relay/relay
@@ -37,9 +37,9 @@ play/bundles/
 # Agent worktrees
 .claude/
 
-# Remote Config: endpoint list and the service account key (rc.sa in local.properties)
+# Remote Config: endpoint list and the service account key
 rc/endpoints.json
-android/*-sa.json
+rc/sa.json
 
 # rc-check/rc-promote credential
 rc/.check-cred
