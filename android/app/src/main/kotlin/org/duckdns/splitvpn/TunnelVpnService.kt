@@ -658,26 +658,29 @@ class TunnelVpnService : VpnService() {
             backend.userProperty(this@TunnelVpnService, "yt_direct", if (directOff) "off" else state)
             mainHandler.post { pushAll() }
         }
-        override fun dialEvent(id: String, result: String, ms: Long) {
+        override fun dialEvent(id: String, result: String, ms: Long, asn: String) {
             if (!collecting) return
             // Before CONNECTED (Start's own probe, the most telling one) there is no default callback yet.
-            val caps = defaultCaps?.second ?: runCatching {
-                getSystemService(ConnectivityManager::class.java).let { it.getNetworkCapabilities(it.activeNetwork) }
-            }.getOrNull()
+            val (network, caps) = defaultCaps ?: runCatching {
+                getSystemService(ConnectivityManager::class.java).let { it.activeNetwork to it.getNetworkCapabilities(it.activeNetwork) }
+            }.getOrDefault(null to null)
             val net = when {
                 caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true -> "wifi"
                 caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true -> "cell"
                 else -> "other"
             }
             val op = if (net == "cell") carrier()?.filter(Char::isDigit)?.takeIf { it.isNotEmpty() } else null
+            // Go's ASN is of the Wi-Fi it last heard of: a start on another one probes before its key comes.
+            val wifiAsn = asn.takeIf { net == "wifi" && it.isNotEmpty() && network?.networkHandle == sentNet }
             // Failures only: at dial_event_bp 10000 the successes would push the rest out of the rotated log.
-            if (BuildConfig.DEBUG && result != "ok") AppLog.i("relay_dial $id $result $ms ms $net${op?.let { " $it" }.orEmpty()}")
+            if (BuildConfig.DEBUG && result != "ok") AppLog.i("relay_dial $id $result $ms ms $net${(op ?: wifiAsn)?.let { " $it" }.orEmpty()}")
             backend.event(
                 this@TunnelVpnService, "relay_dial",
                 buildMap<String, Any> {
                     put("ep", id)
                     put("net", net)
                     op?.let { put("op", it) }
+                    wifiAsn?.let { put("asn", it) }
                     put("result", result)
                     put("ms", ms)
                 },

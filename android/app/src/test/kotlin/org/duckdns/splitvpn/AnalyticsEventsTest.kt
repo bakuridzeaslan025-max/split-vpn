@@ -3,6 +3,7 @@ package org.duckdns.splitvpn
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.NetworkCapabilities
 import android.net.VpnService
 import org.junit.After
@@ -23,6 +24,7 @@ import org.robolectric.shadows.ShadowNetwork
 import org.robolectric.shadows.ShadowNetworkCapabilities
 import org.robolectric.shadows.ShadowVpnService
 import org.robolectric.util.ReflectionHelpers
+import org.robolectric.util.ReflectionHelpers.ClassParameter
 import java.time.LocalDate
 import java.util.concurrent.TimeUnit
 
@@ -549,12 +551,12 @@ class AnalyticsEventsTest {
         activeNetwork(transport = NetworkCapabilities.TRANSPORT_WIFI)
         start()
         // Before the default network's callback heard anything: the active one.
-        be.startedHost!!.dialEvent("nl1", "ok", 42)
+        be.startedHost!!.dialEvent("nl1", "ok", 42, "")
         val cell = ShadowNetworkCapabilities.newInstance()
         shadowOf(cell).addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
         ReflectionHelpers.getField<ConnectivityManager.NetworkCallback>(svc, "defaultCallback")
             .onCapabilitiesChanged(ShadowNetwork.newInstance(7), cell)
-        be.startedHost!!.dialEvent("nl1", "hello_timeout", 10_000)
+        be.startedHost!!.dialEvent("nl1", "hello_timeout", 10_000, "")
         val got = sent("relay_dial")
         assertEquals(mapOf("ep" to "nl1", "net" to "wifi", "result" to "ok", "ms" to 42L), got[0])
         assertEquals("cell", got[1]["net"])
@@ -563,10 +565,48 @@ class AnalyticsEventsTest {
         got[1]["op"]?.let { assertTrue(it.toString().all(Char::isDigit)) }
     }
 
+    // Go's ASN goes along on the Wi-Fi it was found for: not on a carrier,
+    // not on another Wi-Fi a start probes before its key reaches Go.
+    @Test
+    fun dialEventNamesTheWifiProvider() {
+        TunnelVpnService.forgetNetKeyForTests()
+        start()
+        val cb = ReflectionHelpers.getField<ConnectivityManager.NetworkCallback>(svc, "defaultCallback")
+        val wifi = ShadowNetwork.newInstance(7)
+        val wifiCaps = ShadowNetworkCapabilities.newInstance().also { shadowOf(it).addTransportType(NetworkCapabilities.TRANSPORT_WIFI) }
+        val lp = LinkProperties().also {
+            ReflectionHelpers.callInstanceMethod<Unit>(
+                it, "setDnsServers", ClassParameter.from(Collection::class.java, listOf(java.net.InetAddress.getByName("192.168.1.1"))),
+            )
+        }
+        cb.onCapabilitiesChanged(wifi, wifiCaps)
+        cb.onLinkPropertiesChanged(wifi, lp)
+        assertEquals("wifi@${wifi.networkHandle}", be.netKeys.last())
+        be.startedHost!!.dialEvent("nl1", "ok", 42, "AS8359")
+        be.startedHost!!.dialEvent("nl1", "ok", 42, "")
+        val cell = ShadowNetworkCapabilities.newInstance().also { shadowOf(it).addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR) }
+        cb.onCapabilitiesChanged(wifi, cell)
+        be.startedHost!!.dialEvent("nl1", "ok", 42, "AS8359")
+
+        stop()
+        activeNetwork(transport = NetworkCapabilities.TRANSPORT_WIFI)
+        start()
+        be.startedHost!!.dialEvent("nl1", "ok", 42, "AS8359")
+
+        val got = sent("relay_dial")
+        assertEquals(mapOf("ep" to "nl1", "net" to "wifi", "asn" to "AS8359", "result" to "ok", "ms" to 42L), got[0])
+        assertEquals("wifi", got[1]["net"])
+        assertNull(got[1]["asn"])
+        assertEquals("cell", got[2]["net"])
+        assertNull(got[2]["asn"])
+        assertEquals("wifi", got[3]["net"])
+        assertNull(got[3]["asn"])
+    }
+
     @Test
     fun noDialEventsWithoutCollection() {
         start(ui(analytics = false))
-        be.startedHost!!.dialEvent("nl1", "ok", 42)
+        be.startedHost!!.dialEvent("nl1", "ok", 42, "")
         assertTrue(be.analytics.isEmpty())
     }
 

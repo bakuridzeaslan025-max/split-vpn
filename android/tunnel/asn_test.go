@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -123,11 +125,21 @@ func TestAsnLookup(t *testing.T) {
 
 // asnServer answers every lookup with AS8359 and counts them; the
 // services, resolver and roots point at it until the test ends.
-func asnServer(t *testing.T) *atomic.Int32 {
+func asnServer(t *testing.T) *atomic.Int32 { return asnServerGated(t, nil) }
+
+// asnServerGated: the first lookup waits for gate and is answered AS1111.
+func asnServerGated(t *testing.T, gate chan struct{}) *atomic.Int32 {
 	t.Helper()
 	var asked atomic.Int32
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		asked.Add(1)
+		if asked.Add(1) == 1 && gate != nil {
+			select {
+			case <-gate:
+			case <-r.Context().Done():
+			}
+			fmt.Fprint(w, `{"asn":"AS1111"}`)
+			return
+		}
 		fmt.Fprint(w, `{"asn":"AS8359"}`)
 	}))
 	t.Cleanup(srv.Close)
@@ -138,6 +150,32 @@ func asnServer(t *testing.T) *atomic.Int32 {
 	asnResolve = func(context.Context, string) (net.IP, error) { return net.IPv4(127, 0, 0, 1), nil }
 	asnServices = []asnService{{"example.com", "/json", func(m map[string]any) string { return asnOf(m["asn"]) }}}
 	return &asked
+}
+
+// freshASN empties wifiASN in place: handshakes a test leaves running
+// read it.
+func freshASN(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		wifiASN.mu.Lock()
+		wifiASN.raw, wifiASN.tried, wifiASN.asns = "", false, nil
+		wifiASN.gen++
+		wifiASN.mu.Unlock()
+	}
+	reset()
+	t.Cleanup(reset)
+}
+
+func awaitASN(t *testing.T, raw, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if wifiASN.of(raw) == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s never became %q", raw, want)
 }
 
 func (p *pickState) awaitKey(t *testing.T, key string) {
@@ -166,7 +204,7 @@ func TestSetNetKey_WifiAsksForTheProvider(t *testing.T) {
 	p.nets["wifi:AS8359"] = netEntry{Win: "oob-mid", At: p.now().Unix()}
 	p.mu.Unlock()
 
-	p.setNetKey("wifi@100")
+	SetNetKey("wifi@100")
 	p.awaitKey(t, "wifi:AS8359")
 	if p.curID() != "oob-mid" || !p.won {
 		t.Fatalf("from the map: %s", p.curID())
@@ -174,6 +212,7 @@ func TestSetNetKey_WifiAsksForTheProvider(t *testing.T) {
 	try(p, "1.1.1.1", true)
 
 	p.started(p.file)
+	wifiASN.started()
 	time.Sleep(100 * time.Millisecond)
 	p.mu.Lock()
 	a := p.addrLocked("1.1.1.1")
@@ -183,8 +222,8 @@ func TestSetNetKey_WifiAsksForTheProvider(t *testing.T) {
 		t.Fatalf("after a restart: kept %v, asked %d times", kept, asked.Load())
 	}
 
-	p.setNetKey("cell:25001")
-	p.setNetKey("wifi@100")
+	SetNetKey("cell:25001")
+	SetNetKey("wifi@100")
 	time.Sleep(100 * time.Millisecond)
 	p.mu.Lock()
 	key := p.key
@@ -204,8 +243,8 @@ func TestSetNetKey_WifiWaitsForItsResolvers(t *testing.T) {
 	out := captureLog(t)
 	SetVerbose(true)
 	t.Cleanup(func() { SetVerbose(false) })
-	p.setNetKey("")
-	p.setNetKey("wifi@7")
+	SetNetKey("")
+	SetNetKey("wifi@7")
 	time.Sleep(400 * time.Millisecond)
 	if asked.Load() != 0 {
 		t.Fatal("asked without resolvers")
@@ -214,6 +253,7 @@ func TestSetNetKey_WifiWaitsForItsResolvers(t *testing.T) {
 	fp.dns = "127.0.0.1"
 	fp.mu.Unlock()
 	p.started(p.file)
+	wifiASN.started()
 	p.awaitKey(t, "wifi:AS8359")
 	nameless := 0
 	for _, l := range out.lines {
@@ -226,5 +266,134 @@ func TestSetNetKey_WifiWaitsForItsResolvers(t *testing.T) {
 	}
 	if nameless != 1 {
 		t.Fatalf("%d nameless lines: %v", nameless, out.lines)
+	}
+}
+
+// Direct YouTube off: the Wi-Fi's provider is asked all the same, for
+// relay_dial; the picker says nothing, writes nothing, picks nothing.
+// Turned on later, it has the name without asking again.
+func TestWifiASN_AskedWithDirectOff(t *testing.T) {
+	p := freshPicker(t)
+	out := captureLog(t)
+	SetStrategies(planStrategies)
+	fp := &fakeProtector{ok: true, dns: "127.0.0.1"}
+	protector = fp
+	t.Cleanup(func() { strategies.Store(nil); directOn.Store(false); protector = nil })
+	asked := asnServer(t)
+	file := filepath.Join(t.TempDir(), "desync.json")
+	p.started(file)
+	wifiASN.started()
+
+	SetNetKey("cell:25001")
+	SetNetKey("wifi@100")
+	awaitASN(t, "wifi@100", "AS8359")
+	p.awaitKey(t, "wifi:AS8359")
+	if st, _, _ := p.pick("1.1.1.1", "rr1.googlevideo.com"); st != nil {
+		t.Fatalf("picked %s", st.id)
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatalf("map written: %v", err)
+	}
+	for _, l := range out.lines {
+		if strings.Contains(l, "sni desync") {
+			t.Errorf("line %q", l)
+		}
+	}
+	for _, v := range fp.verdicts() {
+		if v != verdictUnknown {
+			t.Fatalf("verdicts %v", fp.verdicts())
+		}
+	}
+
+	directOn.Store(true)
+	p.started(file)
+	wifiASN.started()
+	time.Sleep(100 * time.Millisecond)
+	p.mu.Lock()
+	key := p.key
+	p.mu.Unlock()
+	if key != "wifi:AS8359" || asked.Load() != 1 {
+		t.Fatalf("direct on: %s, asked %d times", key, asked.Load())
+	}
+}
+
+// Once per Wi-Fi, never for a carrier. A dial is named only by the
+// network it began on, while that is still the network and its provider
+// is known.
+func TestWifiASN_PerNetwork(t *testing.T) {
+	p := freshPicker(t)
+	captureLog(t)
+	fp := &fakeProtector{ok: true, dns: "127.0.0.1"}
+	protector = fp
+	t.Cleanup(func() { protector = nil })
+	asked := asnServer(t)
+	asnDNSWait = 200 * time.Millisecond
+
+	SetNetKey("cell:25001")
+	if a := wifiASN.of(wifiASN.now()); a != "" {
+		t.Fatalf("carrier: %q", a)
+	}
+	SetNetKey("wifi@1")
+	net0 := wifiASN.now()
+	awaitASN(t, net0, "AS8359")
+
+	SetNetKey("cell:25001")
+	if a := wifiASN.of(net0); a != "" {
+		t.Fatalf("after leaving it: %q", a)
+	}
+	SetNetKey("wifi@1")
+	wifiASN.started()
+	time.Sleep(100 * time.Millisecond)
+	if a := wifiASN.of(net0); a != "AS8359" || asked.Load() != 1 {
+		t.Fatalf("back on it: %q, asked %d times", a, asked.Load())
+	}
+
+	// Another Wi-Fi, no resolvers yet: no name, the old one's included.
+	fp.mu.Lock()
+	fp.dns = ""
+	fp.mu.Unlock()
+	SetNetKey("wifi@2")
+	time.Sleep(400 * time.Millisecond)
+	if a, b := wifiASN.of("wifi@2"), wifiASN.of(net0); a != "" || b != "" || asked.Load() != 1 {
+		t.Fatalf("new one %q, old one %q, asked %d times", a, b, asked.Load())
+	}
+	fp.mu.Lock()
+	fp.dns = "127.0.0.1"
+	fp.mu.Unlock()
+	wifiASN.started()
+	awaitASN(t, "wifi@2", "AS8359")
+	p.awaitKey(t, "wifi:AS8359") // the picker heard it too: nothing left running
+	if asked.Load() != 2 {
+		t.Fatalf("asked %d times", asked.Load())
+	}
+}
+
+// The network changed while the lookup ran (and came back): its answer
+// may have come over the other one, so it is neither kept nor applied.
+func TestWifiASN_NetworkChangedDuringLookup(t *testing.T) {
+	p := freshPicker(t)
+	captureLog(t)
+	fp := &fakeProtector{ok: true, dns: "127.0.0.1"}
+	protector = fp
+	t.Cleanup(func() { protector = nil })
+	gate := make(chan struct{})
+	asked := asnServerGated(t, gate)
+
+	SetNetKey("wifi@5")
+	for deadline := time.Now().Add(5 * time.Second); asked.Load() == 0 && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	SetNetKey("cell:25001")
+	SetNetKey("wifi@5")
+	awaitASN(t, "wifi@5", "AS8359")
+	p.awaitKey(t, "wifi:AS8359")
+
+	close(gate)
+	time.Sleep(300 * time.Millisecond)
+	p.mu.Lock()
+	key := p.key
+	p.mu.Unlock()
+	if a := wifiASN.cached("wifi@5"); a != "8359" || key != "wifi:AS8359" || asked.Load() != 2 {
+		t.Fatalf("cached %q, key %s, asked %d times", a, key, asked.Load())
 	}
 }
