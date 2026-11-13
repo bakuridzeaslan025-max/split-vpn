@@ -65,8 +65,9 @@ make adblock-list           # пересобрать список рекламн
 | `vds.endpoints` | встроенный список серверов (до первого ответа Remote Config): `host\|ip\|port\|path`, через `;` |
 | `integrity.project` | номер Cloud-проекта для Play Integrity; без него — только коды приглашения |
 | `keystore.file`, `keystore.pass`, `key.alias`, `key.pass` | ключ подписи |
-| `rc.sa` | ключ сервисного аккаунта для `make rc-push` и др. |
 | `vds.ssh` | `user@host` для `./gradlew updateRoutes` |
+
+Ключ сервисного аккаунта для `make rc-push` и др. — в `rc/sa.json` (в git не попадает).
 
 Без `rc.key`/`vds.endpoints` debug-сборка собирается, но серверов не знает; release-сборка без них не собирается. Своя сборка подписана другим ключом, поэтому Play Integrity на чужих серверах её не пропустит и поверх релизной версии она не встанет.
 

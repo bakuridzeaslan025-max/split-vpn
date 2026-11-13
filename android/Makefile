@@ -64,18 +64,16 @@ apk: tunnel
 # a list equal to the defaults' is promoted unchecked, without an invite.
 # Their credential is cached in rc/.check-cred for its 7 days; without one,
 # INVITE=<code> (relay/Makefile `make invite` on the VDS).
-# local.properties: rc.key, vds.endpoints (unless rc/endpoints.json exists),
-# rc.sa = service account key with Remote Config Admin, path from android/.
-# The container sees only rc/, google-services.json and the SA key; the two
-# secrets go through the environment, not argv.
+# local.properties: rc.key, vds.endpoints (unless rc/endpoints.json exists).
+# rc/sa.json (gitignored): service account key with Remote Config Admin.
+# The container sees only rc/ (the SA key with it) and google-services.json;
+# the two secrets go through the environment, not argv.
 RC_PROP = sed -n 's/^$(1)[[:space:]]*=[[:space:]]*//p' local.properties 2>/dev/null | tr -d '\r'
-RC_RUN = SA=$$($(call RC_PROP,rc\.sa)); \
-	if [ ! -f "$$SA" ]; then echo "rc.sa in local.properties: no such file"; exit 1; fi; \
+RC_RUN = if [ ! -f ../rc/sa.json ]; then echo "no rc/sa.json"; exit 1; fi; \
 	RC_KEY=$$($(call RC_PROP,rc\.key)) VDS_ENDPOINTS=$$($(call RC_PROP,vds\.endpoints)) \
 	docker run --rm --platform linux/amd64 -e RC_KEY -e VDS_ENDPOINTS $(RC_ARGS) \
 		-v $(CURDIR)/../rc:/rc:ro -v $(CURDIR)/app/google-services.json:/google-services.json:ro \
-		-v "$$(cd "$$(dirname "$$SA")" && pwd)/$$(basename "$$SA")":/sa.json:ro \
-		-w /rc/tool $(GO_ALPINE) go run .
+		-w /rc/tool $(GO_ALPINE) go run . -sa /rc/sa.json
 
 .PHONY: rc-push rc-pull rc-rollback rc-test rc-check rc-promote
 # The build in the tree: rc-push right after its publish-local must carry its versionName.
@@ -97,7 +95,7 @@ rc-check rc-promote:
 	@$(RC_RUN) $(subst rc-,,$@)
 
 rc-test:
-	docker run --rm --platform linux/amd64 -v $(CURDIR)/../rc:/rc -w /rc/tool $(GO_ALPINE) \
+	docker run --rm --platform linux/amd64 -v $(CURDIR)/../rc:/rc:ro -w /rc/tool $(GO_ALPINE) \
 		sh -c 'go vet ./... && go test ./...'
 
 # tunnel/adblock.txt, the ad domains (tool in adblock/). By hand before a
@@ -208,7 +206,7 @@ push_dl = $(call push_tree,$(1),https://github.com/$(DL_REPO).git,touch "$$w/.no
 
 # The APK mirror on GitLab Pages, for when GitHub Pages is down or throttled.
 # Pages is the CI job's public/ artifact, live 1-3 minutes after the push.
-# local.properties: gitlab.token (a PAT with write_repository); it goes to git
+# release.properties: gitlab.token (a PAT with write_repository); it goes to git
 # through the environment and a credential helper, never argv. The PAT
 # expires (a year at most; the current one on 2027-11-08). Preconditions in
 # the GitLab project: main, protected as the default branch, allows force
@@ -222,8 +220,10 @@ GL_IMAGE := alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be121
 gl_tree = mkdir "$$w/public"; cp $(1) "$$w/public/"; printf '%s\n' 'pages:' '  image: $(GL_IMAGE)' \
 	'  script: ["ls -l public"]' '  artifacts:' '    paths: [public]' '  rules:' \
 	'    - if: $$CI_COMMIT_BRANCH == $$CI_DEFAULT_BRANCH' > "$$w/.gitlab-ci.yml"
-push_gl = GL_TOKEN=$$($(call RC_PROP,gitlab\.token)); \
-	[ -n "$$GL_TOKEN" ] || { echo "no gitlab.token in local.properties"; exit 1; }; export GL_TOKEN; \
+# Publishing secrets, in gitignored release.properties apart from the build's local.properties.
+REL_PROP = sed -n 's/^$(1)[[:space:]]*=[[:space:]]*//p' release.properties 2>/dev/null | tr -d '\r'
+push_gl = GL_TOKEN=$$($(call REL_PROP,gitlab\.token)); \
+	[ -n "$$GL_TOKEN" ] || { echo "no gitlab.token in android/release.properties"; exit 1; }; export GL_TOKEN; \
 	$(call push_tree,$(1),https://gitlab.com/$(GL_REPO).git,$(call gl_tree,$(2)),!f() { echo username=oauth2; echo "password=$$GL_TOKEN"; }; f)
 
 .PHONY: pages-deploy
@@ -278,17 +278,15 @@ release_notes = mkdir -p build && { cat release-notes/$(1).md; printf '\nSHA-256
 
 .PHONY: send-tg tg-chat
 # A file to the developer's own Telegram by a bot, instead of adb push:
-# tg.token (from @BotFather) and tg.chat (make tg-chat) in gitignored
-# tg.properties, apart from the build's local.properties. The token goes to
-# curl as a config on stdin, out of the process list.
-TG_PROP = sed -n 's/^$(1)[[:space:]]*=[[:space:]]*//p' tg.properties 2>/dev/null | tr -d '\r'
-tg_api = TOKEN=$$($(call TG_PROP,tg\.token)); \
-	[ -n "$$TOKEN" ] || { echo "no tg.token in android/tg.properties"; exit 1; }; \
+# tg.token (from @BotFather) and tg.chat (make tg-chat) in release.properties.
+# The token goes to curl as a config on stdin, out of the process list.
+tg_api = TOKEN=$$($(call REL_PROP,tg\.token)); \
+	[ -n "$$TOKEN" ] || { echo "no tg.token in android/release.properties"; exit 1; }; \
 	printf 'url = "https://api.telegram.org/bot%s/$(1)"\n' "$$TOKEN" | curl -sS -f -K -
 
 send-tg:
 	@test -f "$(FILE)" || { echo "usage: make send-tg FILE=<path from android/>"; exit 2; }
-	@CHAT=$$($(call TG_PROP,tg\.chat)); [ -n "$$CHAT" ] || { echo "no tg.chat in android/tg.properties: make tg-chat"; exit 1; }; \
+	@CHAT=$$($(call REL_PROP,tg\.chat)); [ -n "$$CHAT" ] || { echo "no tg.chat in android/release.properties: make tg-chat"; exit 1; }; \
 	SUM=$$(shasum -a 256 "$(FILE)" | cut -d' ' -f1); \
 	$(call tg_api,sendDocument) -F chat_id="$$CHAT" -F document=@"$(FILE)" \
 		-F caption="$(notdir $(FILE)) SHA-256 $$SUM" -o /dev/null -w 'telegram: %{http_code}\n'
@@ -297,11 +295,11 @@ send-tg:
 # tg.chat, once: a pinned chat never changes here, and anyone else writing
 # to the bot is ignored.
 tg-chat:
-	@CHAT=$$($(call TG_PROP,tg\.chat)); if [ -n "$$CHAT" ]; then echo "tg.chat pinned: $$CHAT"; exit 0; fi; \
+	@CHAT=$$($(call REL_PROP,tg\.chat)); if [ -n "$$CHAT" ]; then echo "tg.chat pinned: $$CHAT"; exit 0; fi; \
 	IDS=$$($(call tg_api,getUpdates) | python3 -I -c 'import json, sys; \
 	print("\n".join(sorted({str(u["message"]["chat"]["id"]) for u in json.load(sys.stdin)["result"] if "message" in u and u["message"]["chat"]["type"] == "private"})))'); \
 	case "$$(printf '%s' "$$IDS" | grep -c .)" in \
 	0) echo "no private chat wrote to the bot yet: send it /start"; exit 1;; \
-	1) [ -z "$$(tail -c1 tg.properties)" ] || echo >> tg.properties; \
-	   printf 'tg.chat=%s\n' "$$IDS" >> tg.properties; echo "tg.chat pinned: $$IDS";; \
+	1) [ -z "$$(tail -c1 release.properties)" ] || echo >> release.properties; \
+	   printf 'tg.chat=%s\n' "$$IDS" >> release.properties; echo "tg.chat pinned: $$IDS";; \
 	*) echo "several chats wrote to the bot, none pinned: $$(echo $$IDS)"; exit 1;; esac
