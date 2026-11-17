@@ -65,7 +65,7 @@ make adblock-list           # пересобрать список рекламн
 | `vds.endpoints` | встроенный список серверов (до первого ответа Remote Config): `host\|ip\|port\|path`, через `;` |
 | `integrity.project` | номер Cloud-проекта для Play Integrity; без него — только коды приглашения |
 | `keystore.file`, `keystore.pass`, `key.alias`, `key.pass` | ключ подписи |
-| `vds.ssh` | `user@host` для `./gradlew updateRoutes` |
+| `vds.ssh` | `user@host;user@host` — каждый сервер со своим выходом в интернет, для `./gradlew updateRoutes` |
 
 Ключ сервисного аккаунта для `make rc-push` и др. — в `rc/sa.json` (в git не попадает).
 

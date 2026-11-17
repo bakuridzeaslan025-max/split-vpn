@@ -7,11 +7,11 @@ data class Service(
     val title: String,
     val probeUrl: String,
     val defaultEnabled: Boolean,
-    /** The service's own networks, hand-written. Empty for [cdn] services. */
+    /** The service's own networks, hand-written; a [cdn] service may have none. */
     val routes: List<Route>,
     /** Site suffixes that go through the relay; other names inside the routes are dialed directly. */
     val domains: List<String>,
-    /** Hosted on a shared CDN: subnets come from [CdnRoutes] (`./gradlew updateRoutes`), not from here. */
+    /** Hosted on a shared CDN: its subnets also come from [CdnRoutes] (`./gradlew updateRoutes`, resolved on every VDS). */
     val cdn: Boolean = false,
 ) {
     val allRoutes: List<Route> get() = routes + (CdnRoutes.BY_SERVICE[id] ?: emptyList())
@@ -39,6 +39,8 @@ object Services {
             Route("74.125.0.0", 16),
             Route("173.194.0.0", 16),
             Route("209.85.128.0", 17),
+            Route("172.253.0.0", 16),
+            Route("192.178.0.0", 15),
         ), listOf(
             "youtube.com", "youtu.be", "googlevideo.com", "ytimg.com", "ggpht.com", "youtube-nocookie.com",
             "googleapis.com", "google.com", "gstatic.com", "googleusercontent.com", "gvt1.com",

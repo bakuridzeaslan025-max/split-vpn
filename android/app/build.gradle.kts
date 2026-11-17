@@ -26,6 +26,10 @@ val endpointsBlob = encryptEndpoints(
     localProps.getProperty("rc.key")?.trim().orEmpty(),
     localProps.getProperty("vds.endpoints")?.trim().orEmpty(),
 )
+// A debug build for one server: -PpinEndpoints=id|host|ip|port|path;… bakes
+// this list instead of vds.endpoints, and the app ignores Remote Config's.
+val pinnedBlob = providers.gradleProperty("pinEndpoints").orNull?.trim()?.takeIf { it.isNotEmpty() }
+    ?.let { encryptEndpoints(localProps.getProperty("rc.key")?.trim().orEmpty(), it) }
 if (localProps.getProperty("vpn.path") != null) {
     logger.warn("local.properties: vpn.path is no longer read, the path goes into vds.endpoints")
 }
@@ -96,7 +100,7 @@ android {
         applicationId = "org.newvpn" // Play Console package; Kotlin namespace stays
         minSdk = 26
         targetSdk = 36
-        versionCode = 146 // an earlier internal release in Play took 68
+        versionCode = 147 // an earlier internal release in Play took 68
         versionName = "0.13.4"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("long", "INTEGRITY_PROJECT", "${integrityProject}L")
@@ -120,10 +124,13 @@ android {
     buildTypes {
         debug {
             versionNameSuffix = "-debug"
+            pinnedBlob?.let { buildConfigField("String", "ENDPOINTS", "\"$it\"") }
+            buildConfigField("boolean", "PINNED_ENDPOINTS", "${pinnedBlob != null}")
             manifestPlaceholders["analyticsEnabled"] = "false"
             if (keystoreFile != null) signingConfig = signingConfigs.getByName("release")
         }
         release {
+            buildConfigField("boolean", "PINNED_ENDPOINTS", "false")
             // T8: shrink dex and resources. gomobile ships keep rules for go.** and
             // tunnel.** inside the AAR (JNI looks them up by name).
             isMinifyEnabled = true
@@ -173,65 +180,116 @@ dependencies {
 }
 
 // ./gradlew updateRoutes — regenerates CdnRoutes.kt: the /24 subnets behind
-// the domains of Services.kt entries marked cdn = true. Lookups run ON THE
+// the domains of Services.kt entries marked cdn = true. Lookups run ON EVERY
 // VDS over ssh (DoH to Cloudflare from there): CDNs answer by the asker's
-// region, and the phone resolves through the relay, so it sees the VDS's
-// answers. Resolving from the Mac would bake Moscow addresses in.
-// Needs ssh access to the VDS: vds.ssh=user@host in local.properties.
+// region, and the phone resolves through the relay of whichever VDS it is on.
+// Resolving from the Mac would bake Moscow addresses in.
+// vds.ssh=user@host;user@host in local.properties: every VDS with its own way
+// out to the internet (a DNAT-only entry like yc1 is not one).
+// It also resolves YouTube's main hosts on each VDS and fails on an address
+// outside YouTube's static routes: such an address bypasses the TUN until a
+// rebuild, so a new Google range goes into Services.kt by hand, before a
+// release. Nothing of YouTube goes into CdnRoutes.kt.
 tasks.register("updateRoutes") {
     group = "release"
-    description = "Regenerate CdnRoutes.kt from the cdn services' domains, resolved on the VDS"
+    description = "Regenerate CdnRoutes.kt from the cdn services' domains, resolved on every VDS"
     doLast {
         val src = file("src/main/kotlin/org/duckdns/splitvpn/Services.kt").readText()
         val domainRe = Regex("\"([a-z0-9-]+(?:\\.[a-z0-9-]+)+)\"")
-        // One chunk per Service("id" …; keep those marked cdn = true.
-        val blocks = LinkedHashMap<String, List<String>>()
-        for (chunk in src.split("Service(\"").drop(1)) {
-            val id = chunk.substringBefore('"')
-            if (!chunk.contains("cdn = true")) continue
-            blocks[id] = domainRe.findAll(chunk).map { it.groupValues[1] }
-                .filter { !it.startsWith("http") && it.any(Char::isLetter) }.distinct().toList()
+        val routeRe = Regex("Route\\(\"([0-9.]+)\", (\\d+)\\)")
+        fun ipLong(ip: String) = ip.split('.').fold(0L) { acc, b -> acc * 256 + b.toLong() }
+        fun covered(ip: String, nets: List<Pair<Long, Int>>) = nets.any { (net, len) ->
+            val mask = (0xFFFFFFFFL shl (32 - len)) and 0xFFFFFFFFL
+            (ipLong(ip) and mask) == (net and mask)
         }
-        require(blocks.isNotEmpty()) { "no cdn services in Services.kt" }
-        val host = localProps.getProperty("vds.ssh")?.trim()?.takeIf { it.isNotEmpty() }
-            ?: throw GradleException("updateRoutes: set vds.ssh=user@host (ssh access to the VDS) in local.properties")
+        class Svc(val domains: List<String>, val static: List<Pair<Long, Int>>, val cdn: Boolean)
+        // One chunk per Service("id" …, in Services.ALL order.
+        val services = LinkedHashMap<String, Svc>()
+        for (chunk in src.split("Service(\"").drop(1)) {
+            services[chunk.substringBefore('"')] = Svc(
+                domainRe.findAll(chunk).map { it.groupValues[1] }
+                    .filter { !it.startsWith("http") && it.any(Char::isLetter) }.distinct().toList(),
+                routeRe.findAll(chunk).map { ipLong(it.groupValues[1]) to it.groupValues[2].toInt() }.toList(),
+                chunk.contains("cdn = true"),
+            )
+        }
+        val cdn = services.filterValues { it.cdn }
+        require(cdn.isNotEmpty()) { "no cdn services in Services.kt" }
+        val youtube = services["youtube"] ?: throw GradleException("no youtube service in Services.kt")
+        val hosts = localProps.getProperty("vds.ssh")?.split(';', ' ', '\t')?.map { it.trim() }?.filter { it.isNotEmpty() }
+            ?.takeIf { it.isNotEmpty() }
+            ?: throw GradleException("updateRoutes: set vds.ssh=user@host;user@host (ssh access to every VDS) in local.properties")
         // Apex + the usual CDN hostnames: an apex like twimg.com has no
         // address of its own, the images live on pbs./abs./video.
         val prefixes = listOf("", "www.", "api.", "cdn.", "static.", "media.", "pbs.", "abs.", "video.", "gateway.", "chat.", "assets.")
+        val ytHosts = listOf("www.youtube.com", "youtubei.googleapis.com", "i.ytimg.com", "yt3.ggpht.com", "yt3.googleusercontent.com", "redirector.googlevideo.com")
+        val names = cdn.values.flatMap { s -> s.domains.flatMap { d -> prefixes.map { "$it$d" } } } + ytHosts
         val script = buildString {
-            append("for h in")
-            blocks.values.flatten().forEach { d -> prefixes.forEach { append(" $it$d") } }
+            append("q() { curl -sf --max-time 5 -H 'accept: application/dns-json' \"https://cloudflare-dns.com/dns-query?name=\$1&type=A\"; }; ")
+            append("for h in ${names.joinToString(" ")}; do ")
+            append("r=\$(q \$h || q \$h) || { echo \"ERR \$h\"; continue; }; ")
             // Attribute answers to the host we asked for: behind a CNAME the
             // A records carry another name (pbs.twimg.com → *.cloudflare.net).
-            append("; do curl -s -H 'accept: application/dns-json' \"https://cloudflare-dns.com/dns-query?name=\$h&type=A\" | ")
-            append("sed 's/[{}]/\\n/g' | grep -o '\"type\":1,[^}]*\"data\":\"[0-9.]*\"' | ")
-            append("sed \"s/.*\\\"data\\\":\\\"\\([0-9.]*\\)\\\".*/\$h \\1/\"; done")
+            append("printf '%s\\n' \"\$r\" | sed 's/[{}]/\\n/g' | grep -o '\"type\":1,[^}]*\"data\":\"[0-9.]*\"' | ")
+            append("sed \"s/.*\\\"data\\\":\\\"\\([0-9.]*\\)\\\".*/\$h \\1/\"; done; echo END")
         }
-        val proc = ProcessBuilder("ssh", "-o", "ConnectTimeout=15", host, script).redirectErrorStream(true).start()
-        val out = proc.inputStream.bufferedReader().readText()
-        require(proc.waitFor() == 0) { "ssh failed:\n$out" }
-        val bySite = out.lines().mapNotNull { l ->
-            val p = l.trim().split(' '); if (p.size == 2) p[0].trimEnd('.').removePrefix("www.") to p[1] else null
+        val lineRe = Regex("([a-z0-9.-]+) (\\d{1,3}(?:\\.\\d{1,3}){3})")
+        // host → (name, ip) answers
+        val answers = hosts.associateWith { host ->
+            val proc = ProcessBuilder("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host, script)
+                .redirectError(ProcessBuilder.Redirect.INHERIT).start()
+            val out = proc.inputStream.bufferedReader().readLines()
+            require(proc.waitFor() == 0 && out.lastOrNull() == "END") { "updateRoutes: ssh $host failed or cut short" }
+            val failed = out.filter { it.startsWith("ERR ") }.map { it.removePrefix("ERR ") }
+            require(failed.isEmpty()) { "updateRoutes: DoH failed on $host for ${failed.joinToString()}" }
+            out.dropLast(1).map { l ->
+                val m = lineRe.matchEntire(l.trim()) ?: throw GradleException("updateRoutes: unexpected line from $host: $l")
+                m.groupValues[1].trimEnd('.') to m.groupValues[2]
+            }
+        }
+        fun matches(name: String, domains: List<String>) = domains.any { name == it || name.endsWith(".$it") }
+
+        val outside = answers.flatMap { (host, list) ->
+            list.filter { (n, ip) -> n in ytHosts && !covered(ip, youtube.static) }.map { (n, ip) -> "$n → $ip on $host" }
+        }
+        for ((host, list) in answers) {
+            require(list.any { it.first in ytHosts }) { "updateRoutes: no YouTube answers on $host" }
+            for ((id, s) in cdn) require(list.any { it.first !in ytHosts && matches(it.first, s.domains) }) { "updateRoutes: no addresses for $id on $host" }
+        }
+        require(outside.isEmpty()) {
+            "updateRoutes: YouTube answers outside its static routes, add the Google range to youtube in Services.kt:\n" + outside.joinToString("\n")
+        }
+
+        val cdnFile = file("src/main/kotlin/org/duckdns/splitvpn/CdnRoutes.kt")
+        val old = HashMap<String, MutableSet<String>>()
+        var key: String? = null
+        for (l in if (cdnFile.exists()) cdnFile.readLines() else emptyList()) {
+            Regex("^\\s*\"([a-z0-9-]+)\" to listOf\\(").find(l)?.let { key = it.groupValues[1] }
+            Regex("Route\\(\"([0-9.]+)\", 24\\)").find(l)?.let { r -> key?.let { old.getOrPut(it) { mutableSetOf() } += r.groupValues[1] } }
         }
         val sb = StringBuilder()
         sb.append("package org.duckdns.splitvpn\n\n")
         sb.append("// GENERATED by `./gradlew updateRoutes` — do not edit by hand.\n")
-        sb.append("// /24 subnets the cdn services' domains resolved to, as seen from the VDS:\n")
-        sb.append("// the phone resolves through the relay, so it sees the same answers.\n")
-        sb.append("// Regenerate before a release; the on-device route cache picks up\n")
-        sb.append("// moves in between.\n")
+        sb.append("// /24 subnets the cdn services' domains resolved to on every VDS in\n")
+        sb.append("// vds.ssh: the phone resolves through the relay of the VDS it is on.\n")
+        sb.append("// Subnets the service's own routes cover are left out. Regenerate\n")
+        sb.append("// before a release; the on-device route cache picks up moves in between.\n")
         sb.append("object CdnRoutes {\n    val BY_SERVICE: Map<String, List<Route>> = mapOf(\n")
-        for ((id, domains) in blocks) {
-            val subnets = bySite.filter { (site, _) -> domains.any { site == it || site.endsWith(".$it") } }
+        for ((id, s) in cdn) {
+            val subnets = answers.values.flatten().filter { (n, _) -> n !in ytHosts && matches(n, s.domains) }
                 .map { (_, ip) -> ip.split('.').take(3).joinToString(".") + ".0" }.distinct()
+                .filter { !covered(it, s.static) }
                 .sortedWith(compareBy({ it.split('.')[0].toInt() }, { it.split('.')[1].toInt() }, { it.split('.')[2].toInt() }))
-            require(subnets.isNotEmpty()) { "no addresses for $id: $domains" }
+            val counts = answers.entries.joinToString(" ") { (host, list) -> "$host=${list.count { (n, _) -> n !in ytHosts && matches(n, s.domains) }}" }
+            val was = old[id].orEmpty()
+            println("$id: answers $counts; /24 ${subnets.size}, +${(subnets - was).size} −${(was - subnets.toSet()).size}")
+            if (subnets.isEmpty()) continue
             sb.append("        \"$id\" to listOf(\n")
             subnets.forEach { sb.append("            Route(\"$it\", 24),\n") }
             sb.append("        ),\n")
         }
         sb.append("    )\n}\n")
-        file("src/main/kotlin/org/duckdns/splitvpn/CdnRoutes.kt").writeText(sb.toString())
-        println("CdnRoutes.kt: " + blocks.keys.joinToString { id -> "$id=${bySite.count { (s, _) -> blocks[id]!!.any { s == it || s.endsWith(".$it") } }} answers" })
+        cdnFile.writeText(sb.toString())
+        println("youtube: ${answers.values.sumOf { l -> l.count { it.first in ytHosts } }} answers, all inside its static routes")
     }
 }
