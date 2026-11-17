@@ -1614,6 +1614,7 @@ class TunnelVpnService : VpnService() {
         unwatchScreen()
         mainHandler.removeCallbacks(periodicRebuild)
         mainHandler.removeCallbacks(deferredRebuild)
+        lastRebuildAt = 0L
         stopFetching()
         mainHandler.removeCallbacks(switchOnNewNetwork)
         // Off the main thread too: the round's flags are the main thread's.
@@ -1758,6 +1759,9 @@ class TunnelVpnService : VpnService() {
             unwatchScreen()
             mainHandler.removeCallbacks(periodicRebuild)
             mainHandler.removeCallbacks(deferredRebuild)
+            // The gap spares a running tunnel's relay sessions; the next one
+            // starts with no sessions to cut, so its first rebuild is at once.
+            lastRebuildAt = 0L
             stopFetching()
             mainHandler.removeCallbacks(switchOnNewNetwork)
             resetRound()
