@@ -384,7 +384,10 @@ class TunnelVpnService : VpnService() {
     @Volatile private var testEndpoint: Endpoint? = null
     @Volatile private var testRc = false
     // Never the real defaults under a test list: the emulator must not dial the VDS.
-    private val endpoints get() = testEndpoint?.let { listOf(it) } ?: Endpoints.cached(this, testRc) ?: if (testRc) emptyList() else backend.endpoints()
+    // A pinned debug build (-PpinEndpoints) talks only to its baked list.
+    private val endpoints get() = testEndpoint?.let { listOf(it) }
+        ?: backend.endpoints().takeIf { BuildConfig.PINNED_ENDPOINTS && !testRc }
+        ?: Endpoints.cached(this, testRc) ?: if (testRc) emptyList() else backend.endpoints()
     // What the running tunnel talks to; null while none runs.
     @Volatile private var current: Endpoint? = null
 
@@ -1611,6 +1614,7 @@ class TunnelVpnService : VpnService() {
         unwatchScreen()
         mainHandler.removeCallbacks(periodicRebuild)
         mainHandler.removeCallbacks(deferredRebuild)
+        lastRebuildAt = 0L
         stopFetching()
         mainHandler.removeCallbacks(switchOnNewNetwork)
         // Off the main thread too: the round's flags are the main thread's.
@@ -1755,6 +1759,9 @@ class TunnelVpnService : VpnService() {
             unwatchScreen()
             mainHandler.removeCallbacks(periodicRebuild)
             mainHandler.removeCallbacks(deferredRebuild)
+            // The gap spares a running tunnel's relay sessions; the next one
+            // starts with no sessions to cut, so its first rebuild is at once.
+            lastRebuildAt = 0L
             stopFetching()
             mainHandler.removeCallbacks(switchOnNewNetwork)
             resetRound()

@@ -13,6 +13,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.android.controller.ServiceController
 import org.robolectric.shadows.ShadowLooper
+import java.util.concurrent.TimeUnit
 
 /** T2 step 5: a stale-routes signal rebuilds the TUN with cached subnets, rate-limited. */
 @RunWith(RobolectricTestRunner::class)
@@ -82,6 +83,27 @@ class RebuildTest {
         ShadowLooper.idleMainLooper()
         Thread.sleep(200)
         assertEquals(3, be.events.size)
+    }
+
+    // Switching YouTube's mode restarts the tunnel: a rebuild just before
+    // must not hold the next tunnel's first one for 10 minutes.
+    @Test
+    fun restartedTunnelRebuildsAtOnce() {
+        start()
+        RouteCache.file(app).writeText("x.com 192.0.2.0 $now\n")
+        be.startedHost!!.routesStale()
+        awaitEvents(3)
+
+        svc.onStartCommand(Intent(TunnelVpnService.ACTION_STOP), 0, 2)
+        awaitServiceThreads()
+        ShadowLooper.idleMainLooper(4, TimeUnit.SECONDS)
+        start()
+        val before = be.events.size
+        RouteCache.file(app).appendText("x.com 192.0.3.0 $now\n")
+        be.startedHost!!.routesStale()
+        awaitEvents(before + 2)
+        assertEquals(listOf("stop", "start"), be.events.toList().takeLast(2))
+        assertTrue(be.establishedExtra.last().contains(Route("192.0.3.0", 24)))
     }
 
     @Test

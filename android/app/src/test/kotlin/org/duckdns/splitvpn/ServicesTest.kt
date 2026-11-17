@@ -41,6 +41,22 @@ class ServicesTest {
     }
 
     @Test
+    fun cdnRoutesBelongToServices() {
+        val ids = Services.ALL.map { it.id }.toSet()
+        for (id in CdnRoutes.BY_SERVICE.keys) assertTrue("CdnRoutes key $id is not a service", id in ids)
+    }
+
+    // updateRoutes leaves out what the service's own routes cover.
+    @Test
+    fun cdnRoutesAreNotCoveredByOwnRoutes() {
+        for (svc in Services.ALL) for (c in CdnRoutes.BY_SERVICE[svc.id].orEmpty()) for (r in svc.routes) {
+            val mask = if (r.prefix == 32) -1 else (-1 shl (32 - r.prefix))
+            assertTrue("${svc.id}: ${c.address}/${c.prefix} inside ${r.address}/${r.prefix}",
+                r.prefix > c.prefix || (ipToInt(c.address) and mask) != (ipToInt(r.address) and mask))
+        }
+    }
+
+    @Test
     fun probeUrlsAreHttps() {
         for (svc in Services.ALL) {
             assertTrue(svc.id, svc.probeUrl.startsWith("https://"))
