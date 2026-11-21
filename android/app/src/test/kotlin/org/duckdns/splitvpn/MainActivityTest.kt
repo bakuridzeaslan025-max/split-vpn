@@ -543,6 +543,22 @@ class MainActivityTest {
         assertEquals(View.VISIBLE, a.findViewById<View>(R.id.bannerAction).visibility)
     }
 
+    // The service shows WHITELIST in its snapshot only; here it stands in TunnelState.
+    @Test
+    fun whitelistHasItsOwnStatusAndBanner() {
+        val a = launch()
+        TunnelState.set(VpnState.CONNECTED)
+        TunnelState.setWaiting(Waiting.WHITELIST)
+        ShadowLooper.idleMainLooper()
+        assertEquals(View.GONE, a.findViewById<View>(R.id.bannerAction).visibility)
+        assertEquals(
+            "Оператор ограничил мобильный интернет. Подключимся сами, когда ограничения снимут",
+            a.text(R.id.bannerText),
+        )
+        assertEquals("Сеть ограничена", a.findViewById<TextView>(R.id.statusText).text.toString())
+        assertEquals("Выключить", a.findViewById<TextView>(R.id.buttonLabel).text.toString())
+    }
+
     private val url = "https://mirror.example.org/split-vpn/"
     private val apk = Updater.RELEASES + "latest/download/split-vpn.apk"
     private val calls = mutableListOf<Pair<Long, String>>()

@@ -884,6 +884,7 @@ class MainActivity : Activity() {
         } else null
         findViewById<TextView>(R.id.statusText).text = clock ?: when {
             waitingNow && (waiting == Waiting.NO_NETWORK || offlineRetry) -> "Нет сети"
+            waitingNow && waiting == Waiting.WHITELIST -> "Сеть ограничена"
             waitingNow -> "Сервер недоступен"
             busy -> "Подождите"
             else -> "Выключен"
@@ -930,6 +931,8 @@ class MainActivity : Activity() {
             Banner(Level.ERROR, R.drawable.ic_error, errorText(), "Повторить", ::startVpn)
         waitingNow && (waiting == Waiting.NO_NETWORK || offlineRetry) ->
             Banner(Level.WARN, R.drawable.ic_wifi_off, "Нет интернета — VPN заработает, когда сеть появится")
+        waitingNow && waiting == Waiting.WHITELIST -> Banner(Level.WARN, R.drawable.ic_lock,
+            "Оператор ограничил мобильный интернет. Подключимся сами, когда ограничения снимут")
         waitingNow -> Banner(Level.WARN, R.drawable.ic_schedule, "Сервер не отвечает — подключимся сами, как только он ответит")
         // While downloading: no way to hide the only sign of it.
         updateAvailable -> Banner(Level.INFO, R.drawable.ic_system_update, "Доступна новая версия", updateLabel, ::startUpdate, busy = updateBusy,

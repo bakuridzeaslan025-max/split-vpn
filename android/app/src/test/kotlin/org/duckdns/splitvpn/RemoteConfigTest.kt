@@ -158,6 +158,24 @@ class RemoteConfigTest {
         assertFalse(RemoteConfig.firstDrop(app, "[] x", RemoteConfig.KEY_BAD_APK_URLS))
     }
 
+    // Garbage: the last good one stays. No key: the built-in. An empty list is a value.
+    @Test
+    fun whitelistHostsAsFetched() {
+        fun fetch(hosts: String?) = RemoteConfig.apply(app, RcValues("", 0, 0, "", whitelistHosts = hosts), be::decryptEndpoints)
+        assertEquals(RemoteConfig.DEFAULT_WHITELIST_HOSTS, RemoteConfig.whitelistHosts(app))
+        fetch(""" {"allowed":["ya.ru"," "],"blocked":["example.org"]} """)
+        assertEquals(listOf("ya.ru") to listOf("example.org"), RemoteConfig.whitelistHosts(app))
+        for (bad in listOf("{garbage", "[]", """{"allowed":["ya.ru"]}""", """{"allowed":"ya.ru","blocked":[]}""")) {
+            fetch(bad)
+            assertEquals(bad, listOf("ya.ru") to listOf("example.org"), RemoteConfig.whitelistHosts(app))
+        }
+        fetch("""{"allowed":[],"blocked":["example.org"]}""")
+        assertEquals(emptyList<String>() to listOf("example.org"), RemoteConfig.whitelistHosts(app))
+        fetch(null)
+        assertEquals(RemoteConfig.DEFAULT_WHITELIST_HOSTS, RemoteConfig.whitelistHosts(app))
+        assertEquals(4, logLines().count { " E remote config: whitelist_hosts" in it })
+    }
+
     @Test
     fun brokenBlobLeavesTheCache() {
         Endpoints.cache(app, listOf(fromRc))
