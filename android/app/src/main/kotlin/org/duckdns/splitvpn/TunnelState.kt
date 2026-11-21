@@ -5,8 +5,12 @@ import android.os.Looper
 
 enum class VpnState { DISCONNECTED, CONNECTING, CONNECTED, DISCONNECTING, ERROR }
 
-/** CONNECTED, but the relay does not answer; the tunnel reconnects by itself. */
-enum class Waiting { NO_NETWORK, NO_SERVER }
+/**
+ * CONNECTED, but the relay does not answer; the tunnel reconnects by itself.
+ * WHITELIST is only shown, never set here: NO_SERVER on a carrier that lets
+ * only its white list through (TunnelVpnService's probe).
+ */
+enum class Waiting { NO_NETWORK, NO_SERVER, WHITELIST }
 
 object TunnelState {
     @Volatile

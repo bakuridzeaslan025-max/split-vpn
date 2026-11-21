@@ -1,6 +1,7 @@
 package org.duckdns.splitvpn
 
 import android.content.Context
+import android.net.Network
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import java.io.File
@@ -87,6 +88,18 @@ internal class FakeBackend : Backend {
         if (probeFailures.getAndDecrement() > 0) throw java.net.SocketException("Connection reset")
     }
 
+    /** What whitelistProbe answers: how many allowed, blocked hosts connected. */
+    @Volatile var whitelistAnswer = 0 to 0
+    @Volatile var blockWhitelist = false
+    val whitelistGate = CountDownLatch(1)
+    /** The networks' handles the probe ran on. */
+    val whitelistProbes = CopyOnWriteArrayList<Long>()
+    override fun whitelistProbe(network: Network, allowed: List<String>, blocked: List<String>): Pair<Int, Int> {
+        whitelistProbes += network.networkHandle
+        if (blockWhitelist) whitelistGate.await()
+        return whitelistAnswer
+    }
+
     override fun integrityToken(ctx: Context, nonce: ByteArray) = token
     override fun trustCA(pem: String) {}
     var endpoints = listOf(TunnelVpnService.Endpoint("cover.example.org", "203.0.113.10", 443, "/test"))
@@ -149,7 +162,7 @@ internal class FakeBackend : Backend {
         if (cred.size == 77) ((cred[9].toLong() and 0xff) shl 24) or ((cred[10].toLong() and 0xff) shl 16) or
             ((cred[11].toLong() and 0xff) shl 8) or (cred[12].toLong() and 0xff) else 0
 
-    fun release() { startGate.countDown(); probeGate.countDown(); configGate.countDown() }
+    fun release() { startGate.countDown(); probeGate.countDown(); configGate.countDown(); whitelistGate.countDown() }
 }
 
 /** A 77-byte credential expiring at [expires] (unix seconds). */
@@ -164,7 +177,7 @@ internal fun fakeCred(expires: Long, kind: Int = 1): ByteArray = ByteArray(77).a
  * they still set TunnelState and prefs, which must not land in the next test.
  */
 internal fun awaitServiceThreads() {
-    val names = setOf("GoTunnel", "GoRebuild", "TunnelStop", "RemoteConfig", "Probe")
+    val names = setOf("GoTunnel", "GoRebuild", "TunnelStop", "RemoteConfig", "Probe", "WhitelistProbe")
     val deadline = System.currentTimeMillis() + 20_000
     while (Thread.getAllStackTraces().keys.any { it.isAlive && it.name in names } && System.currentTimeMillis() < deadline) {
         Thread.sleep(20)
