@@ -276,7 +276,7 @@ release-notes:
 
 release_notes = mkdir -p build && { cat release-notes/$(1).md; printf '\nSHA-256 сертификата: %s\n' '$(CERT_SHA256)'; } > build/notes.md
 
-.PHONY: send-tg tg-chat
+.PHONY: send-tg tg-chat tg-fetch
 # A file to the developer's own Telegram by a bot, instead of adb push:
 # tg.token (from @BotFather) and tg.chat (make tg-chat) in release.properties.
 # The token goes to curl as a config on stdin, out of the process list.
@@ -303,3 +303,11 @@ tg-chat:
 	1) [ -z "$$(tail -c1 release.properties)" ] || echo >> release.properties; \
 	   printf 'tg.chat=%s\n' "$$IDS" >> release.properties; echo "tg.chat pinned: $$IDS";; \
 	*) echo "several chats wrote to the bot, none pinned: $$(echo $$IDS)"; exit 1;; esac
+
+# Texts and files the pinned chat sent the bot since the last run (logs from
+# a phone without adb): texts to stdout, files to build/tg/. Within 24 hours:
+# Telegram keeps no older updates.
+tg-fetch:
+	@CHAT=$$($(call REL_PROP,tg\.chat)); [ -n "$$CHAT" ] || { echo "no tg.chat in android/release.properties: make tg-chat"; exit 1; }; \
+	TOKEN=$$($(call REL_PROP,tg\.token)); [ -n "$$TOKEN" ] || { echo "no tg.token in android/release.properties"; exit 1; }; \
+	TG_TOKEN="$$TOKEN" TG_CHAT="$$CHAT" python3 -I tg_fetch.py build/tg
