@@ -1627,7 +1627,7 @@ class TunnelVpnService : VpnService() {
     private fun followNetwork() {
         val (net, caps) = defaultCaps ?: return
         // switchEndpoint would drop it; the callback after CONNECTED and the rebuild's end call again.
-        if (testEndpoint != null || current == null || synchronized(lock) { stopping || rebuilding || TunnelState.state != VpnState.CONNECTED }) return
+        if (testStand || current == null || synchronized(lock) { stopping || rebuilding || TunnelState.state != VpnState.CONNECTED }) return
         val name = netName()
         // Deciding before the code comes would cost a switch to the first and one back.
         // A new network forgets the last one: a return to it is a change too. Not
@@ -1650,6 +1650,7 @@ class TunnelVpnService : VpnService() {
         if ((paused || roundFails > 0) && SystemClock.uptimeMillis() - followRoundAt >= ROUND_PAUSE_MS) {
             followRoundAt = SystemClock.uptimeMillis()
             resetRound()
+            resetRoundBackoff()
         }
         switchEndpoint(ep, WHY_NETWORK)
     }

@@ -814,4 +814,58 @@ class EndpointSwitchTest {
         capsTick(lte, NetworkCapabilities.TRANSPORT_CELLULAR)
         assertEquals(listOf(a), be.endpointsSet)
     }
+
+    // The Wi-Fi's answer writes nothing; the carrier's answer after the switch writes what it switched to.
+    @Test
+    fun answerAfterANetworkSwitchIsTheCarriersRecord() {
+        onCell("25020")
+        activeNetwork(NetworkCapabilities.TRANSPORT_WIFI)
+        start()
+        defaultNetwork(wifi, NetworkCapabilities.TRANSPORT_WIFI)
+        online()
+        verdict(true)
+        verdict(false)
+        assertEquals(listOf(b), be.endpointsSet)
+        assertNull(app.getSharedPreferences(TunnelVpnService.PREFS, android.content.Context.MODE_PRIVATE).getString("endpoint.by_net", null))
+        defaultNetwork(lte, NetworkCapabilities.TRANSPORT_CELLULAR)
+        assertEquals(listOf(b, a), be.endpointsSet)
+        verdict(false)
+        assertEquals(a, record())
+    }
+
+    // The instrumented tests' list from RC: the stand does not follow the network either.
+    @Test
+    fun testListFromRcIgnoresTheNetwork() {
+        Credentials.save(app, fakeCred(System.currentTimeMillis() / 1000 + 5 * 86400), test = true)
+        onCell("25020")
+        start(
+            Intent(TunnelVpnService.ACTION_START)
+                .putExtra(TunnelVpnService.EXTRA_RC_ENDPOINTS, blob(c, d).removePrefix("blob:")),
+        )
+        assertEquals(c.host, be.startedSni)
+        Endpoints.setForNet(app, tele2, d, test = true)
+        defaultNetwork(lte, NetworkCapabilities.TRANSPORT_CELLULAR)
+        assertEquals(emptyList<TunnelVpnService.Endpoint>(), be.endpointsSet)
+    }
+
+    // All down for rounds on end: a new network's round waits a base pause, not the grown one.
+    @Test
+    fun networkSwitchBringsThePauseBackToBase() {
+        Endpoints.setForNet(app, tele2, b)
+        onCell("25020")
+        activeNetwork(NetworkCapabilities.TRANSPORT_WIFI)
+        be.endpoints = listOf(a, b)
+        start()
+        defaultNetwork(wifi, NetworkCapabilities.TRANSPORT_WIFI)
+        online()
+        verdict(true)
+        verdict(true)
+        nextRoundIn(base)
+        assertEquals(a, be.endpointsSet.last())
+        defaultNetwork(lte, NetworkCapabilities.TRANSPORT_CELLULAR)
+        assertEquals(b, be.endpointsSet.last())
+        verdict(true)
+        verdict(true)
+        nextRoundIn(base)
+    }
 }
