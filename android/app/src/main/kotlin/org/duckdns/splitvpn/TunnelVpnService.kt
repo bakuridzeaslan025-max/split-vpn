@@ -393,6 +393,7 @@ class TunnelVpnService : VpnService() {
             else -> Outage.SERVER_DOWN
         }
         private const val WHY_NEW_LIST = "new list"
+        private const val WHY_NETWORK = "network"
         // vpn_failed's detail for a TUN refused for want of the VPN permission.
         private const val PERM = "perm"
         internal const val CHANNEL_ID = "vpn_channel"
@@ -463,12 +464,17 @@ class TunnelVpnService : VpnService() {
         ?: Endpoints.cached(this, testRc) ?: if (testRc) emptyList() else backend.endpoints()
     // What the running tunnel talks to; null while none runs.
     @Volatile private var current: Endpoint? = null
+    // netName() when current was set or confirmed for the network: a
+    // RelayDown(false) still on its way from the network before must not vouch for it.
+    @Volatile private var currentNet: String? = null
 
-    // The running one (a rebuild keeps it), else the last that worked, then
-    // the rest in order. The list's own entry: it has the label.
+    // The running one (a rebuild keeps it), else the last that worked on
+    // this carrier, then the rest in order. The list's own entry: it has the label.
     private fun ordered(): List<Endpoint> {
         val list = endpoints
-        val first = (current ?: Endpoints.working(this, testRc))?.let { list.getOrNull(list.indexOf(it)) } ?: return list
+        // The test relay's list would drop every real record.
+        val first = (current ?: netName()?.takeIf { testEndpoint == null }?.let { Endpoints.forNet(this, it, list, testRc) })
+            ?.let { list.getOrNull(list.indexOf(it)) } ?: return list
         return listOf(first) + (list - first)
     }
     private val testStand get() = testEndpoint != null || testRc
@@ -629,7 +635,7 @@ class TunnelVpnService : VpnService() {
         if (intent?.getBooleanExtra(EXTRA_QUOTA_RESET, false) == true) Quota.save(this, 0, Quota.today())
         if (testRc) {
             // Each test starts from its list's first, whatever worked in the last one.
-            Endpoints.setWorking(this, null, test = true)
+            Endpoints.clearByNet(this, test = true)
             // A running tunnel takes it like a fetch; a stopped one starts on it.
             applyConfig(RcValues(rcList.orEmpty(), 0, 0, ""), decrypt = { it })
         }
@@ -911,7 +917,9 @@ class TunnelVpnService : VpnService() {
         checkDay()
         checkActive()
         val ep = current ?: return
-        if (testEndpoint == null && ep != Endpoints.working(this, testRc)) Endpoints.setWorking(this, ep, testRc)
+        val net = netName() ?: return
+        // One from the network before, posted before followNetwork ran, would vouch for an untried one.
+        if (testEndpoint == null && net == currentNet) Endpoints.setForNet(this, net, ep, testRc)
     }
 
     // The current endpoint is down with a network that has internet. The
@@ -941,9 +949,16 @@ class TunnelVpnService : VpnService() {
             return
         }
         current = ep
+        currentNet = netName()
         awaitingVerdict = true
         val list = endpoints
         val n = list.indexOf(ep) + 1
+        if (why == WHY_NETWORK) {
+            // Not in the journal: no server is down, and Wi-Fi↔LTE would add a line on every change.
+            val wifi = defaultCaps?.second?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            AppLog.i("endpoint: #$n of ${list.size} for ${currentNet ?: if (wifi) "wifi" else "other"} ($why)")
+            return
+        }
         AppLog.i("endpoint: switched to #$n of ${list.size} ($why)")
         // No ": " in these: MainActivity reads "<name>: <ping>" lines as probes.
         TunnelState.log(
@@ -961,7 +976,7 @@ class TunnelVpnService : VpnService() {
     private var missedChange = false
 
     private fun onNewList(changed: Boolean) {
-        if (changed) Endpoints.setWorking(this, null, testRc)
+        if (changed) Endpoints.clearByNet(this, testRc)
         if (changed && (current == null || synchronized(lock) { stopping || rebuilding || TunnelState.state != VpnState.CONNECTED })) {
             // Connecting or rebuilding: the tunnel may still come up on the
             // old list's endpoint, and the check once it is up must know.
@@ -1240,6 +1255,7 @@ class TunnelVpnService : VpnService() {
             val routes = routesInTun.joinToString("\n") { r -> "${r.address}/${r.prefix}" }
             // Before start: Go's first verdict may reach relayUp while start still runs.
             current = it
+            currentNet = netName()
             backend.start(fd, it, cred, domains, routes, RouteCache.file(this).path, File(filesDir, DESYNC_FILE).path, host, goLogger)
             running = enabled to cred
             AppLog.i("Go tunnel started via ${it.host}")
@@ -1291,6 +1307,8 @@ class TunnelVpnService : VpnService() {
         // restart reproduces what was running, not what was asked last.
         vpnPrefs.edit().putStringSet(KEY_SERVICES, serviceIds).putBoolean(KEY_ADBLOCK, adBlock).putBoolean(KEY_DIRECT, direct).remove(KEY_NEED_CODE).apply()
         current = null
+        followed = null
+        followRoundAt = -ROUND_PAUSE_MS
         mainHandler.removeCallbacks(switchOnNewNetwork)
         newOutageEpisode()
         networkRoundAt = -ROUND_PAUSE_MS
@@ -1530,6 +1548,7 @@ class TunnelVpnService : VpnService() {
                 // The carrier's code may be empty right after a switch and come with a later call.
                 defaultCaps = network to caps
                 updateNetKey()
+                followNetwork()
                 val validated = network to caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
                 if (validated == defaultValidated) return
                 defaultValidated = validated
@@ -1583,6 +1602,56 @@ class TunnelVpnService : VpnService() {
         sentNet = net.networkHandle
         sentNetKey = key
         backend.setNetKey(key)
+    }
+
+    // The name endpoints are remembered by: a carrier only, by its code.
+    // Before the default network's callback (start, registration), the
+    // active network: from Android 9 the VPN's own capabilities carry the
+    // transport under it.
+    private fun netName(): String? {
+        val caps = defaultCaps?.second ?: runCatching {
+            getSystemService(ConnectivityManager::class.java).let { it.getNetworkCapabilities(it.activeNetwork) }
+        }.getOrNull()
+        if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) != true) return null
+        return carrier()?.filter(Char::isDigit)?.takeIf { it.isNotEmpty() }?.let { "cell:$it" }
+    }
+
+    // Main thread. The default network (handle, name) the last decision was for.
+    private var followed: Pair<Long, String?>? = null
+    // Its own, not networkRoundAt: that one would mute newNetwork's deferred switch.
+    private var followRoundAt = -ROUND_PAUSE_MS
+
+    // A new default network, or its carrier's code come late: to its
+    // remembered endpoint, else the list's first. Only on such a change: on
+    // every caps tick a network without a record would undo the round's move.
+    private fun followNetwork() {
+        val (net, caps) = defaultCaps ?: return
+        // switchEndpoint would drop it; the callback after CONNECTED and the rebuild's end call again.
+        if (testEndpoint != null || current == null || synchronized(lock) { stopping || rebuilding || TunnelState.state != VpnState.CONNECTED }) return
+        val name = netName()
+        // Deciding before the code comes would cost a switch to the first and one back.
+        // A new network forgets the last one: a return to it is a change too. Not
+        // a code-less tick on the same one: the code back would undo the round's move.
+        if (name == null && caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+            if (followed?.first != net.networkHandle) followed = null
+            return
+        }
+        val key = net.networkHandle to name
+        if (key == followed) return
+        followed = key
+        val list = endpoints
+        val ep = name?.let { Endpoints.forNet(this, it, list, testRc) } ?: list.firstOrNull() ?: return
+        if (ep == current) {
+            currentNet = name
+            return
+        }
+        // The old network's failures are no count against this one, but as in
+        // newNetwork at most once per base pause: networks flapping between two dead choices.
+        if ((paused || roundFails > 0) && SystemClock.uptimeMillis() - followRoundAt >= ROUND_PAUSE_MS) {
+            followRoundAt = SystemClock.uptimeMillis()
+            resetRound()
+        }
+        switchEndpoint(ep, WHY_NETWORK)
     }
 
     // MCC-MNC of the network the data SIM is on: roaming, the one we stand
@@ -1907,8 +1976,9 @@ class TunnelVpnService : VpnService() {
                 if (!synchronized(lock) { stopping }) fail(e.message ?: e.javaClass.simpleName, reason = "rebuild", src = "run", detail = (e as? NoTun)?.detail)
             } finally {
                 synchronized(lock) { rebuilding = false }
-                // A list that landed meanwhile could not switch.
+                // A list or a network that landed meanwhile could not switch.
                 mainHandler.post { onNewList(changed = missedChange.also { missedChange = false }) }
+                mainHandler.post { followNetwork() }
             }
         }, "GoRebuild")
         tunnelThread = t
