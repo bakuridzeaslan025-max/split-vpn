@@ -185,7 +185,7 @@ dependencies {
 // region, and the phone resolves through the relay of whichever VDS it is on.
 // Resolving from the Mac would bake Moscow addresses in.
 // vds.ssh=user@host;user@host in local.properties: every VDS with its own way
-// out to the internet (a DNAT-only entry like yc1 is not one).
+// out to the internet.
 // It also resolves YouTube's main hosts on each VDS and fails on an address
 // outside YouTube's static routes: such an address bypasses the TUN until a
 // rebuild, so a new Google range goes into Services.kt by hand, before a
