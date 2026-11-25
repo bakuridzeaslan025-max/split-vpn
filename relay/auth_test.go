@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/ed25519"
+	"encoding/binary"
 	"encoding/hex"
 	"io"
 	"net/http"
@@ -15,6 +16,11 @@ import (
 	"testing"
 	"time"
 )
+
+// credLife is how long a freshly minted credential lives.
+func credLife(cred []byte) time.Duration {
+	return time.Until(time.Unix(int64(binary.BigEndian.Uint32(cred[9:13])), 0))
+}
 
 // installIssuer makes this relay both issuer and verifier for the test.
 func installIssuer(t *testing.T) {
@@ -136,6 +142,9 @@ func TestRegister_InviteOnceThenCredentialWorks(t *testing.T) {
 	if st != statusOK || len(cred) != credSize {
 		t.Fatalf("status %d cred %d", st, len(cred))
 	}
+	if d := credLife(cred); d < 29*24*time.Hour || d > credTTLInvite {
+		t.Fatalf("invite credential lives %v, want 30 days", d)
+	}
 	if got := dialAndSend(t, relay, preamble(cred, typeTCP, ip, port), []byte("hi")); string(got) != "hi" {
 		t.Fatalf("got %q", got)
 	}
@@ -177,8 +186,12 @@ func TestRegister_IntegrityViaVerifier(t *testing.T) {
 	proof := append(bytes.Repeat([]byte{7}, nonceSize), []byte("token")...)
 
 	integrity = fakeVerifier{ok: true}
-	if st, cred := register(t, relay, kindIntegrity, proof); st != statusOK || len(cred) != credSize {
+	st, cred := register(t, relay, kindIntegrity, proof)
+	if st != statusOK || len(cred) != credSize {
 		t.Fatalf("status %d cred %d", st, len(cred))
+	}
+	if d := credLife(cred); d < 6*24*time.Hour || d > credTTL {
+		t.Fatalf("integrity credential lives %v, want 7 days", d)
 	}
 	integrity = fakeVerifier{ok: false}
 	if st, _ := register(t, relay, kindIntegrity, proof); st != statusRejected {

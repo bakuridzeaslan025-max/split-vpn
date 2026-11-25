@@ -24,12 +24,13 @@ const (
 	statusNotIssuer byte = 2
 	statusClosed    byte = 0xFF // test-side: connection closed without a reply
 
-	credSize     = 1 + 8 + 4 + ed25519.SignatureSize
-	credSigned   = 1 + 8 + 4
-	nonceSize    = 32
-	proofMax     = 16 * 1024
-	credTTL      = 7 * 24 * time.Hour
-	revokeReload = time.Minute
+	credSize      = 1 + 8 + 4 + ed25519.SignatureSize
+	credSigned    = 1 + 8 + 4
+	nonceSize     = 32
+	proofMax      = 16 * 1024
+	credTTL       = 7 * 24 * time.Hour
+	credTTLInvite = 30 * 24 * time.Hour // a hand-issued code is not renewable: a week would mean a new code weekly
+	revokeReload  = time.Minute
 )
 
 var (

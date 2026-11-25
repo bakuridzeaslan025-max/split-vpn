@@ -46,7 +46,11 @@ func registerProof(kind byte, proof []byte, src string) (byte, []byte) {
 		log.Printf("[%s] register kind=%d rejected: %v", src, kind, err)
 		return statusRejected, nil
 	}
-	cred := issueCred(kind, time.Now().Add(credTTL))
+	ttl := credTTL
+	if kind == kindInvite {
+		ttl = credTTLInvite
+	}
+	cred := issueCred(kind, time.Now().Add(ttl))
 	log.Printf("[%s] register kind=%d ok, device %x", src, kind, cred[1:9])
 	return statusOK, cred
 }
