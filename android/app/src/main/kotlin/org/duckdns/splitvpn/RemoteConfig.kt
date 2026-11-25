@@ -5,9 +5,9 @@ import android.content.Context
 /** Remote Config keys as fetched. */
 /**
  * [dailyQuotaMb], [ytStrategies]: null when RC has no such key. [dialEventBp]: already [RemoteConfig.parseDialEventBp]'s.
- * [ytRaceMs]: [RemoteConfig.parseYtRaceMs]'s, null for the built-in value.
+ * [ytRaceMs]: [RemoteConfig.parseYtRaceMs]'s, null for the built-in value. [whitelistHosts]: null when RC has no such key.
  */
-internal data class RcValues(val endpoints: String, val minVersion: Long, val latestVersion: Long, val updateUrl: String, val dailyQuotaMb: Long? = null, val ytStrategies: String? = null, val apkUrl: String = "", val dialEventBp: Int = 0, val apkUrls: String = "", val latestName: String = "", val ytRaceMs: Int? = null)
+internal data class RcValues(val endpoints: String, val minVersion: Long, val latestVersion: Long, val updateUrl: String, val dailyQuotaMb: Long? = null, val ytStrategies: String? = null, val apkUrl: String = "", val dialEventBp: Int = 0, val apkUrls: String = "", val latestName: String = "", val ytRaceMs: Int? = null, val whitelistHosts: String? = null)
 
 /**
  * The versions part of Remote Config; the UI gets it in VpnClient's snapshot.
@@ -46,12 +46,18 @@ internal object RemoteConfig {
     const val KEY_YT_STRATEGIES = "rc.yt_strategies"
     const val KEY_DIAL_EVENT_BP = "rc.dial_event_bp"
     const val KEY_YT_RACE_MS = "rc.yt_race_ms"
+    const val KEY_WHITELIST_HOSTS = "rc.whitelist_hosts"
     private const val KEY_DROPPED = "rc.dropped_endpoints"
     // Two checks of one value, each with its own memory: one key would
     // make them report each other's value as new, by turns.
     const val KEY_DROPPED_YT = "rc.dropped_yt_strategies"
     const val KEY_BAD_YT = "rc.bad_yt_strategies"
     const val KEY_BAD_APK_URLS = "rc.bad_apk_urls"
+    const val KEY_BAD_WHITELIST_HOSTS = "rc.bad_whitelist_hosts"
+
+    // Not Google in blocked: on a carrier whose white lists Android's own
+    // check gets through, Google is in them.
+    val DEFAULT_WHITELIST_HOSTS = listOf("ya.ru", "vk.com") to listOf("ru.wikipedia.org", "github.com")
 
     fun versions(ctx: Context) = ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).let {
         Versions(
@@ -91,6 +97,22 @@ internal object RemoteConfig {
         ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).getInt(KEY_YT_RACE_MS, -1)
 
     /**
+     * whitelist_hosts, {"allowed":[…],"blocked":[…]}: the white-list probe's
+     * hosts. Null when it is no such object; an empty list is valid and
+     * turns the probe off.
+     */
+    fun parseWhitelistHosts(raw: String): Pair<List<String>, List<String>>? = runCatching {
+        val o = org.json.JSONObject(raw.trim())
+        fun list(name: String) = o.getJSONArray(name).let { a -> List(a.length()) { a.getString(it).trim() }.filter { it.isNotEmpty() } }
+        list("allowed") to list("blocked")
+    }.getOrNull()
+
+    /** The last fetched whitelist_hosts, else the built-in ones (Firebase is out of reach under white lists, the stored ones stay). */
+    fun whitelistHosts(ctx: Context): Pair<List<String>, List<String>> =
+        ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).getString(KEY_WHITELIST_HOSTS, null)
+            ?.let(::parseWhitelistHosts) ?: DEFAULT_WHITELIST_HOSTS
+
+    /**
      * RC serves a broken blob on every fetch until someone publishes a fixed
      * one: a report for the first time this blob is seen, a breadcrumb after.
      */
@@ -128,6 +150,13 @@ internal object RemoteConfig {
                 } else {
                     AppLog.e("remote config: yt_strategies is not a JSON array, kept the last one", expected = !firstDrop(ctx, yt, KEY_BAD_YT))
                 }
+            }
+            // No key: back to the built-in hosts. A broken value keeps the last good one.
+            val hosts = v.whitelistHosts
+            when {
+                hosts == null -> ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).edit().remove(KEY_WHITELIST_HOSTS).apply()
+                parseWhitelistHosts(hosts) != null -> ctx.getSharedPreferences(TunnelVpnService.PREFS, Context.MODE_PRIVATE).edit().putString(KEY_WHITELIST_HOSTS, hosts).apply()
+                else -> AppLog.e("remote config: whitelist_hosts is no {allowed, blocked} object, kept the last one", expected = !firstDrop(ctx, hosts, KEY_BAD_WHITELIST_HOSTS))
             }
         }
         // Not published for this build's condition: nothing to replace the cache with.

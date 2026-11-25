@@ -25,7 +25,12 @@ object Endpoints {
      */
     const val KNOWN_FILE = "known_endpoints.json"
     private const val KEY_CACHE = "endpoints"
+    private const val KEY_BY_NET = "endpoint.by_net"
+    // Before by_net: one endpoint for every network. Removed, never read.
     private const val KEY_WORKING = "endpoint.working"
+    private const val MAX_NETS = 16
+    // As direct YouTube's noneFor: the carrier may let the first one through again.
+    internal const val NET_TTL_MS = 7 * 86_400_000L
 
     @Volatile private var knownFile: File? = null
     // Masked even if the file cannot be written.
@@ -103,13 +108,44 @@ object Endpoints {
         prefs(ctx).edit().putString(key(KEY_CACHE, test), toJson(list)).apply()
     }
 
-    /** The last endpoint the relay answered on; by content, a new list may reorder. */
-    fun working(ctx: Context, test: Boolean = false): TunnelVpnService.Endpoint? =
-        prefs(ctx).getString(key(KEY_WORKING, test), null)?.let { runCatching { parse(it) }.getOrNull() }?.firstOrNull()
+    /**
+     * The endpoint the relay last answered on over network [net], as [list]'s
+     * own entry: by content, a new list may reorder. One gone from [list] is
+     * forgotten, and so is one past the first after [NET_TTL_MS].
+     */
+    @Synchronized
+    fun forNet(ctx: Context, net: String, list: List<TunnelVpnService.Endpoint>, test: Boolean = false, now: Long = System.currentTimeMillis()): TunnelVpnService.Endpoint? {
+        val all = byNet(ctx, test)
+        val rec = all.optJSONObject(net) ?: return null
+        val i = runCatching { list.indexOf(endpoint(rec.getJSONObject("ep"))) }.getOrDefault(-1)
+        if (i == 0 || i > 0 && now - rec.optLong("at") < NET_TTL_MS) return list[i]
+        all.remove(net)
+        save(ctx, all, test)
+        return null
+    }
 
-    fun setWorking(ctx: Context, ep: TunnelVpnService.Endpoint?, test: Boolean = false) {
-        val k = key(KEY_WORKING, test)
-        prefs(ctx).edit().apply { if (ep == null) remove(k) else putString(k, toJson(listOf(ep))) }.apply()
+    // The same endpoint again keeps its at: the week counts from the first answer, or a
+    // carrier used daily would never try the first one again.
+    @Synchronized
+    fun setForNet(ctx: Context, net: String, ep: TunnelVpnService.Endpoint, test: Boolean = false, now: Long = System.currentTimeMillis()) {
+        val all = byNet(ctx, test)
+        val old = all.optJSONObject(net)
+        if (old != null && runCatching { endpoint(old.getJSONObject("ep")) == ep }.getOrDefault(false)) return
+        all.put(net, JSONObject().put("ep", json(ep)).put("at", now))
+        while (all.length() > MAX_NETS) all.remove(all.keys().asSequence().minBy { all.optJSONObject(it)?.optLong("at") ?: 0 })
+        save(ctx, all, test)
+    }
+
+    @Synchronized
+    fun clearByNet(ctx: Context, test: Boolean = false) {
+        prefs(ctx).edit().remove(key(KEY_BY_NET, test)).remove(key(KEY_WORKING, test)).apply()
+    }
+
+    private fun byNet(ctx: Context, test: Boolean) =
+        prefs(ctx).getString(key(KEY_BY_NET, test), null)?.let { runCatching { JSONObject(it) }.getOrNull() } ?: JSONObject()
+
+    private fun save(ctx: Context, all: JSONObject, test: Boolean) {
+        prefs(ctx).edit().putString(key(KEY_BY_NET, test), all.toString()).remove(key(KEY_WORKING, test)).apply()
     }
 
     /**
@@ -141,14 +177,14 @@ object Endpoints {
 
     internal fun parse(json: String): List<TunnelVpnService.Endpoint> {
         val a = JSONArray(json)
-        return List(a.length()) { i ->
-            a.getJSONObject(i).run { TunnelVpnService.Endpoint(getString("host"), getString("ip"), getInt("port"), getString("path"), optString("id")) }
-        }
+        return List(a.length()) { i -> endpoint(a.getJSONObject(i)) }
     }
 
-    private fun toJson(list: List<TunnelVpnService.Endpoint>) = JSONArray(
-        list.map { e ->
-            JSONObject().put("host", e.host).put("ip", e.ip).put("port", e.port).put("path", e.path).apply { if (e.id.isNotEmpty()) put("id", e.id) }
-        },
-    ).toString()
+    private fun endpoint(o: JSONObject) =
+        o.run { TunnelVpnService.Endpoint(getString("host"), getString("ip"), getInt("port"), getString("path"), optString("id")) }
+
+    private fun json(e: TunnelVpnService.Endpoint) =
+        JSONObject().put("host", e.host).put("ip", e.ip).put("port", e.port).put("path", e.path).apply { if (e.id.isNotEmpty()) put("id", e.id) }
+
+    private fun toJson(list: List<TunnelVpnService.Endpoint>) = JSONArray(list.map(::json)).toString()
 }

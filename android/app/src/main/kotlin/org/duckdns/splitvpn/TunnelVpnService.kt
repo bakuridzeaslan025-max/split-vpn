@@ -36,6 +36,8 @@ import com.google.firebase.remoteconfig.FirebaseRemoteConfig
 import com.google.firebase.remoteconfig.FirebaseRemoteConfigSettings
 import java.io.File
 import java.net.HttpURLConnection
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.net.URL
 import java.security.SecureRandom
 import java.time.Instant
@@ -43,6 +45,7 @@ import java.time.ZoneId
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Everything that needs a real TUN, the Go AAR or the network; swapped in unit tests. */
 internal interface Backend {
@@ -66,6 +69,12 @@ internal interface Backend {
     /** Drops Go's DNS cache only; the relay's health is networkChanged's business. */
     fun dnsChanged()
     fun probe(url: String)
+    /**
+     * TCP connects to :443 of every host on [network], past the tunnel, all
+     * at once and within one deadline, DNS included. How many of [allowed]
+     * and of [blocked] answered. Blocking.
+     */
+    fun whitelistProbe(network: Network, allowed: List<String>, blocked: List<String>): Pair<Int, Int>
     /** Play Integrity token for [nonce]; null when unavailable (no project number, no Google services). */
     fun integrityToken(ctx: Context, nonce: ByteArray): ByteArray?
     fun register(addr: String, sni: String, path: String, kind: Int, proof: ByteArray): ByteArray
@@ -149,9 +158,10 @@ internal object GoBackend : Backend {
         val yt = rc.getValue("yt_strategies").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString()
         val bp = RemoteConfig.parseDialEventBp(rc.getValue("dial_event_bp").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString())
         val race = RemoteConfig.parseYtRaceMs(rc.getValue("yt_race_ms").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString())
+        val whitelist = rc.getValue("whitelist_hosts").takeIf { it.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }?.asString()
         return RcValues(
             rc.getString("endpoints"), rc.getLong("min_version"), rc.getLong("latest_version"), rc.getString("update_url"), quota, yt,
-            rc.getString("apk_url"), bp, rc.getString("apk_urls"), rc.getString("latest_name"), race,
+            rc.getString("apk_url"), bp, rc.getString("apk_urls"), rc.getString("latest_name"), race, whitelist,
         )
     }
     override fun setQuota(used: Long, limit: Long) = tunnel.Tunnel.setQuota(used, limit)
@@ -200,7 +210,54 @@ internal object GoBackend : Backend {
         c.responseCode
         c.disconnect()
     }
+    // A host answers if any of its addresses does: a broken v6 must not
+    // silence ya.ru. getAllByName has no timeout of its own, hence the one
+    // deadline for all; a socket still connecting by then is closed.
+    override fun whitelistProbe(network: Network, allowed: List<String>, blocked: List<String>): Pair<Int, Int> {
+        val hosts = allowed + blocked
+        val deadline = System.nanoTime() + TunnelVpnService.WHITELIST_PROBE_MS * 1_000_000
+        val answered = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
+        val decided = List(hosts.size) { AtomicBoolean() }
+        val done = java.util.concurrent.CountDownLatch(hosts.size)
+        val sockets = java.util.concurrent.ConcurrentLinkedQueue<Socket>()
+        val pool = Executors.newCachedThreadPool { Thread(it, "WhitelistConnect").apply { isDaemon = true } }
+        fun decide(i: Int) { if (decided[i].compareAndSet(false, true)) done.countDown() }
+        try {
+            hosts.forEachIndexed { i, host ->
+                pool.execute {
+                    try {
+                        val addrs = network.getAllByName(host)
+                        if (addrs.isEmpty()) decide(i)
+                        val failed = AtomicInteger()
+                        for (a in addrs) pool.execute {
+                            try {
+                                Socket().use { s ->
+                                    sockets += s
+                                    network.bindSocket(s)
+                                    s.connect(InetSocketAddress(a, 443), ((deadline - System.nanoTime()) / 1_000_000).toInt().coerceAtLeast(1))
+                                }
+                                answered += i
+                                decide(i)
+                            } catch (_: Exception) {
+                                if (failed.incrementAndGet() == addrs.size) decide(i)
+                            }
+                        }
+                    } catch (_: Exception) {
+                        decide(i)
+                    }
+                }
+            }
+            done.await(TunnelVpnService.WHITELIST_PROBE_MS, TimeUnit.MILLISECONDS)
+            val got = answered.toSet()
+            return got.count { it < allowed.size } to got.count { it >= allowed.size }
+        } finally {
+            sockets.forEach { runCatching { it.close() } }
+            pool.shutdownNow()
+        }
+    }
 }
+
+internal enum class Outage { WHITELIST, SERVER_DOWN, UNCLEAR }
 
 class TunnelVpnService : VpnService() {
 
@@ -233,6 +290,9 @@ class TunnelVpnService : VpnService() {
         // sticks across runs and overrides the manifest, so every START
         // without this extra turns it off again.
         const val EXTRA_ANALYTICS = "analytics"
+        // Debug builds: whitelist_hosts as RC would bring it; the only way
+        // the white-list probe runs against the test stand.
+        const val EXTRA_WHITELIST_HOSTS = "whitelist_hosts"
         const val ERR_NEED_CODE = "Нужен код доступа"
         const val ERR_NO_SERVER = "Не удалось обновить доступ: нет связи с сервером. Повторите позже"
         const val ERR_OFFLINE = "Нет сети. Доступ обновится сам, когда сеть появится"
@@ -320,7 +380,20 @@ class TunnelVpnService : VpnService() {
         // network: Android moves its socket to the VPN half a second later and
         // the connection breaks. One more try is enough.
         internal var PROBE_RETRY_MS = 1_000L
+        internal const val WHITELIST_PROBE_MS = 8_000L
+
+        /**
+         * The white-list probe's verdict. Every allowed one, not any: with the
+         * package used up a carrier often keeps social networks free, and
+         * vk.com answers alone.
+         */
+        internal fun whitelistVerdict(allowed: Int, allowedOf: Int, blocked: Int) = when {
+            allowed < allowedOf -> Outage.UNCLEAR
+            blocked == 0 -> Outage.WHITELIST
+            else -> Outage.SERVER_DOWN
+        }
         private const val WHY_NEW_LIST = "new list"
+        private const val WHY_NETWORK = "network"
         // vpn_failed's detail for a TUN refused for want of the VPN permission.
         private const val PERM = "perm"
         internal const val CHANNEL_ID = "vpn_channel"
@@ -383,6 +456,7 @@ class TunnelVpnService : VpnService() {
 
     @Volatile private var testEndpoint: Endpoint? = null
     @Volatile private var testRc = false
+    @Volatile private var testWhitelistHosts: Pair<List<String>, List<String>>? = null
     // Never the real defaults under a test list: the emulator must not dial the VDS.
     // A pinned debug build (-PpinEndpoints) talks only to its baked list.
     private val endpoints get() = testEndpoint?.let { listOf(it) }
@@ -390,12 +464,17 @@ class TunnelVpnService : VpnService() {
         ?: Endpoints.cached(this, testRc) ?: if (testRc) emptyList() else backend.endpoints()
     // What the running tunnel talks to; null while none runs.
     @Volatile private var current: Endpoint? = null
+    // netName() when current was set or confirmed for the network: a
+    // RelayDown(false) still on its way from the network before must not vouch for it.
+    @Volatile private var currentNet: String? = null
 
-    // The running one (a rebuild keeps it), else the last that worked, then
-    // the rest in order. The list's own entry: it has the label.
+    // The running one (a rebuild keeps it), else the last that worked on
+    // this carrier, then the rest in order. The list's own entry: it has the label.
     private fun ordered(): List<Endpoint> {
         val list = endpoints
-        val first = (current ?: Endpoints.working(this, testRc))?.let { list.getOrNull(list.indexOf(it)) } ?: return list
+        // The test relay's list would drop every real record.
+        val first = (current ?: netName()?.takeIf { testEndpoint == null }?.let { Endpoints.forNet(this, it, list, testRc) })
+            ?.let { list.getOrNull(list.indexOf(it)) } ?: return list
         return listOf(first) + (list - first)
     }
     private val testStand get() = testEndpoint != null || testRc
@@ -548,6 +627,7 @@ class TunnelVpnService : VpnService() {
         val rcList = intent?.getStringExtra(EXTRA_RC_ENDPOINTS)
         testEndpoint = ep?.let { (id, host, ip, port, path) -> Endpoint(host, ip, port.toInt(), path, id) }
         testRc = ep == null && rcList != null
+        testWhitelistHosts = intent?.getStringExtra(EXTRA_WHITELIST_HOSTS)?.let(RemoteConfig::parseWhitelistHosts)
         backend.trustCA(if (testStand) intent?.getStringExtra(EXTRA_CA).orEmpty() else "")
         if (ep != null) AppLog.i("test endpoint ${ep[1]} ${ep[2]}:${ep[3]}")
         if (testStand && intent?.getBooleanExtra(EXTRA_FORGET_CRED, false) == true) Credentials.clear(this, test = true)
@@ -555,7 +635,7 @@ class TunnelVpnService : VpnService() {
         if (intent?.getBooleanExtra(EXTRA_QUOTA_RESET, false) == true) Quota.save(this, 0, Quota.today())
         if (testRc) {
             // Each test starts from its list's first, whatever worked in the last one.
-            Endpoints.setWorking(this, null, test = true)
+            Endpoints.clearByNet(this, test = true)
             // A running tunnel takes it like a fetch; a stopped one starts on it.
             applyConfig(RcValues(rcList.orEmpty(), 0, 0, ""), decrypt = { it })
         }
@@ -567,7 +647,7 @@ class TunnelVpnService : VpnService() {
 
     private fun push(to: Messenger) {
         try {
-            to.send(VpnClient.snapshot(TunnelState.state, TunnelState.lastError, TunnelState.logLines(), TunnelState.connectedAt, TunnelState.waiting, RemoteConfig.versions(this), Usage(usedNow(), Quota.limit(this), Quota.today()), directVerdict))
+            to.send(VpnClient.snapshot(TunnelState.state, TunnelState.lastError, TunnelState.logLines(), TunnelState.connectedAt, shownWaiting(), RemoteConfig.versions(this), Usage(usedNow(), Quota.limit(this), Quota.today()), directVerdict))
         } catch (_: RemoteException) {
             clients -= to
         }
@@ -793,7 +873,7 @@ class TunnelVpnService : VpnService() {
     }
     private var networkRoundAt = -ROUND_PAUSE_MS
     private val switchOnNewNetwork = Runnable {
-        checkRelayDown()
+        checkOutage()
         if (TunnelState.waiting == Waiting.NO_SERVER && !awaitingVerdict) {
             networkRoundAt = SystemClock.uptimeMillis()
             onNoServer()
@@ -828,13 +908,18 @@ class TunnelVpnService : VpnService() {
 
     private fun relayUp() {
         mainHandler.removeCallbacks(switchOnNewNetwork)
+        // Not shown: updateWaiting right after takes NO_SERVER away and tells
+        // the UI, a push before it would flash "server unavailable".
+        newOutageEpisode(show = false)
         resetRound()
         resetBackoff()
         awaitingVerdict = false
         checkDay()
         checkActive()
         val ep = current ?: return
-        if (testEndpoint == null && ep != Endpoints.working(this, testRc)) Endpoints.setWorking(this, ep, testRc)
+        val net = netName() ?: return
+        // One from the network before, posted before followNetwork ran, would vouch for an untried one.
+        if (testEndpoint == null && net == currentNet) Endpoints.setForNet(this, net, ep, testRc)
     }
 
     // The current endpoint is down with a network that has internet. The
@@ -864,9 +949,16 @@ class TunnelVpnService : VpnService() {
             return
         }
         current = ep
+        currentNet = netName()
         awaitingVerdict = true
         val list = endpoints
         val n = list.indexOf(ep) + 1
+        if (why == WHY_NETWORK) {
+            // Not in the journal: no server is down, and Wi-Fi↔LTE would add a line on every change.
+            val wifi = defaultCaps?.second?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            AppLog.i("endpoint: #$n of ${list.size} for ${currentNet ?: if (wifi) "wifi" else "other"} ($why)")
+            return
+        }
         AppLog.i("endpoint: switched to #$n of ${list.size} ($why)")
         // No ": " in these: MainActivity reads "<name>: <ping>" lines as probes.
         TunnelState.log(
@@ -884,7 +976,7 @@ class TunnelVpnService : VpnService() {
     private var missedChange = false
 
     private fun onNewList(changed: Boolean) {
-        if (changed) Endpoints.setWorking(this, null, testRc)
+        if (changed) Endpoints.clearByNet(this, testRc)
         if (changed && (current == null || synchronized(lock) { stopping || rebuilding || TunnelState.state != VpnState.CONNECTED })) {
             // Connecting or rebuilding: the tunnel may still come up on the
             // old list's endpoint, and the check once it is up must know.
@@ -924,7 +1016,7 @@ class TunnelVpnService : VpnService() {
     }
     private val noServerFetch = object : Runnable {
         override fun run() {
-            checkRelayDown()
+            checkOutage(recheck = true)
             fetchConfig("no server")
             noServerFetchAt = SystemClock.uptimeMillis() + backoff(CONFIG_RETRY_MS, fetchLevel++)
             mainHandler.postAtTime(this, noServerFetchAt)
@@ -1163,6 +1255,7 @@ class TunnelVpnService : VpnService() {
             val routes = routesInTun.joinToString("\n") { r -> "${r.address}/${r.prefix}" }
             // Before start: Go's first verdict may reach relayUp while start still runs.
             current = it
+            currentNet = netName()
             backend.start(fd, it, cred, domains, routes, RouteCache.file(this).path, File(filesDir, DESYNC_FILE).path, host, goLogger)
             running = enabled to cred
             AppLog.i("Go tunnel started via ${it.host}")
@@ -1214,7 +1307,10 @@ class TunnelVpnService : VpnService() {
         // restart reproduces what was running, not what was asked last.
         vpnPrefs.edit().putStringSet(KEY_SERVICES, serviceIds).putBoolean(KEY_ADBLOCK, adBlock).putBoolean(KEY_DIRECT, direct).remove(KEY_NEED_CODE).apply()
         current = null
+        followed = null
+        followRoundAt = -ROUND_PAUSE_MS
         mainHandler.removeCallbacks(switchOnNewNetwork)
+        newOutageEpisode()
         networkRoundAt = -ROUND_PAUSE_MS
         resetRound()
         resetBackoff()
@@ -1394,6 +1490,7 @@ class TunnelVpnService : VpnService() {
                     netAppearedAt = android.os.SystemClock.elapsedRealtime()
                     newNetwork()
                     updateWaiting()
+                    checkOutage()
                     checkDay()
                     checkActive()
                 }
@@ -1441,6 +1538,9 @@ class TunnelVpnService : VpnService() {
             override fun onAvailable(network: Network) {
                 if (defaultValidated?.first != network) defaultValidated = null
                 defaultChangedAt = SystemClock.elapsedRealtime()
+                // Gone to a Wi-Fi without internet: "network restricted" goes at once.
+                newOutageEpisode()
+                checkOutage()
             }
 
             // On every change: the validation may also go.
@@ -1448,10 +1548,11 @@ class TunnelVpnService : VpnService() {
                 // The carrier's code may be empty right after a switch and come with a later call.
                 defaultCaps = network to caps
                 updateNetKey()
+                followNetwork()
                 val validated = network to caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
                 if (validated == defaultValidated) return
                 defaultValidated = validated
-                if (validated.second) mainHandler.post { checkRelayDown() }
+                if (validated.second) mainHandler.post { checkOutage() }
             }
 
             override fun onLost(network: Network) {
@@ -1501,6 +1602,57 @@ class TunnelVpnService : VpnService() {
         sentNet = net.networkHandle
         sentNetKey = key
         backend.setNetKey(key)
+    }
+
+    // The name endpoints are remembered by: a carrier only, by its code.
+    // Before the default network's callback (start, registration), the
+    // active network: from Android 9 the VPN's own capabilities carry the
+    // transport under it.
+    private fun netName(): String? {
+        val caps = defaultCaps?.second ?: runCatching {
+            getSystemService(ConnectivityManager::class.java).let { it.getNetworkCapabilities(it.activeNetwork) }
+        }.getOrNull()
+        if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) != true) return null
+        return carrier()?.filter(Char::isDigit)?.takeIf { it.isNotEmpty() }?.let { "cell:$it" }
+    }
+
+    // Main thread. The default network (handle, name) the last decision was for.
+    private var followed: Pair<Long, String?>? = null
+    // Its own, not networkRoundAt: that one would mute newNetwork's deferred switch.
+    private var followRoundAt = -ROUND_PAUSE_MS
+
+    // A new default network, or its carrier's code come late: to its
+    // remembered endpoint, else the list's first. Only on such a change: on
+    // every caps tick a network without a record would undo the round's move.
+    private fun followNetwork() {
+        val (net, caps) = defaultCaps ?: return
+        // switchEndpoint would drop it; the callback after CONNECTED and the rebuild's end call again.
+        if (testStand || current == null || synchronized(lock) { stopping || rebuilding || TunnelState.state != VpnState.CONNECTED }) return
+        val name = netName()
+        // Deciding before the code comes would cost a switch to the first and one back.
+        // A new network forgets the last one: a return to it is a change too. Not
+        // a code-less tick on the same one: the code back would undo the round's move.
+        if (name == null && caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+            if (followed?.first != net.networkHandle) followed = null
+            return
+        }
+        val key = net.networkHandle to name
+        if (key == followed) return
+        followed = key
+        val list = endpoints
+        val ep = name?.let { Endpoints.forNet(this, it, list, testRc) } ?: list.firstOrNull() ?: return
+        if (ep == current) {
+            currentNet = name
+            return
+        }
+        // The old network's failures are no count against this one, but as in
+        // newNetwork at most once per base pause: networks flapping between two dead choices.
+        if ((paused || roundFails > 0) && SystemClock.uptimeMillis() - followRoundAt >= ROUND_PAUSE_MS) {
+            followRoundAt = SystemClock.uptimeMillis()
+            resetRound()
+            resetRoundBackoff()
+        }
+        switchEndpoint(ep, WHY_NETWORK)
     }
 
     // MCC-MNC of the network the data SIM is on: roaming, the one we stand
@@ -1590,12 +1742,109 @@ class TunnelVpnService : VpnService() {
     // answer. NO_SERVER alone also comes on a Wi-Fi without internet or
     // behind a captive portal; Android's validation tells those apart. And
     // the verdict counts only past the time a new network takes to judge
-    // the relay (updateWaiting keeps the old one meanwhile).
-    private fun checkRelayDown() {
-        val now = SystemClock.elapsedRealtime()
-        if (TunnelState.waiting == Waiting.NO_SERVER && defaultValidated?.second == true &&
-            now - netAppearedAt >= NEW_NETWORK_SWITCH_MS && now - defaultChangedAt >= NEW_NETWORK_SWITCH_MS
-        ) daily("vpn_failed", "relay_down", "run")
+    // the relay (updateWaiting keeps the old one meanwhile), so a check
+    // before that looks again once it is over.
+    // On a cellular default network NO_SERVER may be the carrier's white
+    // lists: relay_down there only once the probe found the rest of the
+    // internet open. [recheck]: the no-server fetch's tick probes again
+    // over a verdict already taken.
+    private fun checkOutage(recheck: Boolean = false) {
+        mainHandler.removeCallbacks(settledCheck)
+        val again = recheck || recheckDue
+        recheckDue = false
+        if (TunnelState.waiting != Waiting.NO_SERVER) return
+        val settling = maxOf(netAppearedAt, defaultChangedAt) + NEW_NETWORK_SWITCH_MS - SystemClock.elapsedRealtime()
+        if (settling > 0) {
+            // A tick put off by a network that appeared beside the default is still a recheck.
+            recheckDue = again
+            mainHandler.postDelayed(settledCheck, settling)
+            return
+        }
+        val (network, caps) = defaultCaps ?: (null to null)
+        // The test stand's hosts would be the real internet's: only the extra's.
+        val hosts = testWhitelistHosts ?: RemoteConfig.whitelistHosts(this).takeUnless { testStand }
+        if (network != null && caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true &&
+            hosts != null && hosts.first.isNotEmpty() && hosts.second.isNotEmpty()
+        ) {
+            val key = network.networkHandle to outageGen
+            if (probingFor == null && relayDown && (outageFor != key || again)) startProbe(network, key, hosts)
+            if (outageFor != key || outage != Outage.SERVER_DOWN) return
+        }
+        if (defaultValidated?.second == true) daily("vpn_failed", "relay_down", "run")
+    }
+    private val settledCheck = Runnable { checkOutage() }
+    private var recheckDue = false
+
+    // Main thread only. The white-list probe's verdict, for the default
+    // network (its handle) and the outage episode it was taken in. The
+    // episode ends with the relay back, a new default network, a start or a
+    // stop. TunnelState keeps NO_SERVER: a value of its own there would set
+    // off the round, the fetches and the notification on each recompute.
+    private var outageGen = 0
+    private var probingFor: Pair<Long, Int>? = null
+    private var outageFor: Pair<Long, Int>? = null
+    private var outage: Outage? = null
+
+    private fun outageKey() = defaultCaps?.first?.networkHandle?.let { it to outageGen }
+
+    /** What the UI and the notification show. */
+    private fun shownWaiting() = TunnelState.waiting.let {
+        if (it == Waiting.NO_SERVER && outage == Outage.WHITELIST && outageFor == outageKey()) Waiting.WHITELIST else it
+    }
+
+    // The verdict changes past TunnelState: its listeners do not hear of it.
+    private fun showOutage() {
+        pushAll()
+        if (TunnelState.state == VpnState.CONNECTED) getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, createNotification())
+    }
+
+    private fun newOutageEpisode(show: Boolean = true) {
+        val was = shownWaiting()
+        outageGen++
+        outage = null
+        outageFor = null
+        if (show && was == Waiting.WHITELIST) showOutage()
+    }
+
+    // Connects to other people's sites only, never to our servers.
+    private fun startProbe(network: Network, key: Pair<Long, Int>, hosts: Pair<List<String>, List<String>>) {
+        probingFor = key
+        val (allowed, blocked) = hosts
+        Thread({
+            val (a, b) = runCatching { backend.whitelistProbe(network, allowed, blocked) }
+                .getOrElse { AppLog.e("whitelist probe", it, expected = true); 0 to 0 }
+            val v = whitelistVerdict(a, allowed.size, b)
+            AppLog.i("whitelist probe: allowed $a/${allowed.size}, blocked $b/${blocked.size} → ${v.name.lowercase()}")
+            mainHandler.post { onProbed(key, v) }
+        }, "WhitelistProbe").start()
+    }
+
+    // Main thread only. A verdict for a network or an episode gone is
+    // dropped; the check after it probes the current one. Over white lists
+    // only "server down" counts: one slow ya.ru on weak LTE must not bring
+    // "server unavailable" back for the hours till the next tick.
+    private fun onProbed(key: Pair<Long, Int>, v: Outage) {
+        probingFor = null
+        val keep = outageFor == key && outage == Outage.WHITELIST && v == Outage.UNCLEAR
+        if (!keep && key == outageKey() && TunnelState.state == VpnState.CONNECTED && relayDown && TunnelState.waiting == Waiting.NO_SERVER) {
+            val was = shownWaiting()
+            outage = v
+            outageFor = key
+            if (shownWaiting() != was) showOutage()
+            if (v == Outage.WHITELIST) whitelistDetected()
+        }
+        checkOutage()
+    }
+
+    // Main thread only. Days in white lists, by carrier: once a day each. No
+    // code yet (right after a switch): no event, and the day is not spent.
+    private fun whitelistDetected() {
+        val op = carrier()?.filter(Char::isDigit).orEmpty()
+        if (!collecting || op.isEmpty()) return
+        val key = eventKey("whitelist_detected", op)
+        if (vpnPrefs.getLong(key, -1) == Quota.today()) return
+        vpnPrefs.edit().putLong(key, Quota.today()).apply()
+        backend.event(this, "whitelist_detected", mapOf("op" to op))
     }
 
     // [src]: see srcOf; "run" for a failure of a running tunnel.
@@ -1617,8 +1866,12 @@ class TunnelVpnService : VpnService() {
         lastRebuildAt = 0L
         stopFetching()
         mainHandler.removeCallbacks(switchOnNewNetwork)
+        mainHandler.removeCallbacks(settledCheck)
         // Off the main thread too: the round's flags are the main thread's.
-        mainHandler.post { resetRound() }
+        mainHandler.post {
+            resetRound()
+            newOutageEpisode()
+        }
         current = null
         relayDown = false
         TunnelState.set(VpnState.ERROR, msg)
@@ -1724,8 +1977,9 @@ class TunnelVpnService : VpnService() {
                 if (!synchronized(lock) { stopping }) fail(e.message ?: e.javaClass.simpleName, reason = "rebuild", src = "run", detail = (e as? NoTun)?.detail)
             } finally {
                 synchronized(lock) { rebuilding = false }
-                // A list that landed meanwhile could not switch.
+                // A list or a network that landed meanwhile could not switch.
                 mainHandler.post { onNewList(changed = missedChange.also { missedChange = false }) }
+                mainHandler.post { followNetwork() }
             }
         }, "GoRebuild")
         tunnelThread = t
@@ -1764,11 +2018,14 @@ class TunnelVpnService : VpnService() {
             lastRebuildAt = 0L
             stopFetching()
             mainHandler.removeCallbacks(switchOnNewNetwork)
+            mainHandler.removeCallbacks(settledCheck)
             resetRound()
             current = null
             probeThread?.interrupt()
             probeThread = null
         }
+        // onRevoke comes on a binder thread.
+        mainHandler.post { newOutageEpisode() }
         AppLog.i("stopTunnel")
         val starting = tunnelThread
         Thread({
@@ -1840,6 +2097,7 @@ class TunnelVpnService : VpnService() {
                 when {
                     retryOnNetwork != null -> "Нет сети · подключится автоматически"
                     TunnelState.waiting == Waiting.NO_NETWORK -> "Нет сети · подключится автоматически"
+                    shownWaiting() == Waiting.WHITELIST -> "Мобильный интернет ограничен · подключится автоматически"
                     TunnelState.waiting == Waiting.NO_SERVER -> "Сервер недоступен · подключится автоматически"
                     else -> "VPN включён"
                 }
