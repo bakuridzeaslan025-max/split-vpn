@@ -644,6 +644,21 @@ class EndpointSwitchTest {
         assertTrue(log.any { it.endsWith("endpoint: #3 of 3 for cell:25020 (network)") })
     }
 
+    // Every decision on a new network is in the file log, a refusal once per network.
+    @Test
+    fun networkDecisionsAreLogged() {
+        onCell("")
+        start()
+        defaultNetwork(lte, NetworkCapabilities.TRANSPORT_CELLULAR)
+        capsTick(lte, NetworkCapabilities.TRANSPORT_CELLULAR)
+        shadowOf(tm).setNetworkOperator("25020")
+        capsTick(lte, NetworkCapabilities.TRANSPORT_CELLULAR)
+        assertEquals(emptyList<TunnelVpnService.Endpoint>(), be.endpointsSet)
+        val log = fileLog()
+        assertEquals(1, log.count { it.endsWith("endpoint: network $lte not followed (no carrier code yet)") })
+        assertTrue(log.any { it.endsWith("endpoint: #1 of 3 for cell:25020 kept, the first (network)") })
+    }
+
     // The code may come with a later callback: no move to the first and back meanwhile.
     @Test
     fun lateCarrierCodeSwitchesOnce() {
