@@ -955,8 +955,7 @@ class TunnelVpnService : VpnService() {
         val n = list.indexOf(ep) + 1
         if (why == WHY_NETWORK) {
             // Not in the journal: no server is down, and Wi-Fi↔LTE would add a line on every change.
-            val wifi = defaultCaps?.second?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
-            AppLog.i("endpoint: #$n of ${list.size} for ${currentNet ?: if (wifi) "wifi" else "other"} ($why)")
+            AppLog.i("endpoint: #$n of ${list.size} for ${netLabel(currentNet)} ($why)")
             return
         }
         AppLog.i("endpoint: switched to #$n of ${list.size} ($why)")
@@ -1308,6 +1307,7 @@ class TunnelVpnService : VpnService() {
         vpnPrefs.edit().putStringSet(KEY_SERVICES, serviceIds).putBoolean(KEY_ADBLOCK, adBlock).putBoolean(KEY_DIRECT, direct).remove(KEY_NEED_CODE).apply()
         current = null
         followed = null
+        followSkip = null
         followRoundAt = -ROUND_PAUSE_MS
         mainHandler.removeCallbacks(switchOnNewNetwork)
         newOutageEpisode()
@@ -1626,23 +1626,36 @@ class TunnelVpnService : VpnService() {
     // every caps tick a network without a record would undo the round's move.
     private fun followNetwork() {
         val (net, caps) = defaultCaps ?: return
+        if (testStand) return
         // switchEndpoint would drop it; the callback after CONNECTED and the rebuild's end call again.
-        if (testStand || current == null || synchronized(lock) { stopping || rebuilding || TunnelState.state != VpnState.CONNECTED }) return
+        val notNow = synchronized(lock) {
+            when {
+                current == null -> "no endpoint"
+                stopping -> "stopping"
+                rebuilding -> "rebuilding"
+                TunnelState.state != VpnState.CONNECTED -> "state ${TunnelState.state}"
+                else -> null
+            }
+        }
+        if (notNow != null) return followSkipped(net, notNow)
         val name = netName()
         // Deciding before the code comes would cost a switch to the first and one back.
         // A new network forgets the last one: a return to it is a change too. Not
         // a code-less tick on the same one: the code back would undo the round's move.
         if (name == null && caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
             if (followed?.first != net.networkHandle) followed = null
-            return
+            return followSkipped(net, "no carrier code yet")
         }
         val key = net.networkHandle to name
         if (key == followed) return
         followed = key
+        followSkip = null
         val list = endpoints
-        val ep = name?.let { Endpoints.forNet(this, it, list, testRc) } ?: list.firstOrNull() ?: return
+        val record = name?.let { Endpoints.forNet(this, it, list, testRc) }
+        val ep = record ?: list.firstOrNull() ?: return
         if (ep == current) {
             currentNet = name
+            AppLog.i("endpoint: #${list.indexOf(ep) + 1} of ${list.size} for ${netLabel(name)} kept, ${if (record != null) "its record" else "the first"} (network)")
             return
         }
         // The old network's failures are no count against this one, but as in
@@ -1654,6 +1667,19 @@ class TunnelVpnService : VpnService() {
         }
         switchEndpoint(ep, WHY_NETWORK)
     }
+
+    // Main thread. The last refusal logged: caps ticks repeat it on the same network.
+    private var followSkip: String? = null
+
+    private fun followSkipped(net: Network, why: String) {
+        val line = "endpoint: network $net not followed ($why)"
+        if (line == followSkip) return
+        followSkip = line
+        AppLog.i(line)
+    }
+
+    private fun netLabel(name: String?) =
+        name ?: if (defaultCaps?.second?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) "wifi" else "other"
 
     // MCC-MNC of the network the data SIM is on: roaming, the one we stand
     // in, whose DPI it is. No permission needed.
