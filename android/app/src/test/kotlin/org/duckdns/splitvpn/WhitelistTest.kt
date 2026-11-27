@@ -185,16 +185,108 @@ class WhitelistTest {
         whitelisted()
         val lte2 = ShadowNetwork.newInstance(8)
         network(lte2, NetworkCapabilities.TRANSPORT_CELLULAR)
+        assertEquals("one probe at a time", listOf(lte.networkHandle), be.whitelistProbes)
+        assertEquals(Waiting.NO_SERVER, shown.last())
         be.whitelistGate.countDown()
         awaitProbe()
-        assertEquals(Waiting.NO_SERVER, shown.last())
-        assertTrue(detected().isEmpty())
-        assertEquals(listOf(lte.networkHandle), be.whitelistProbes)
-        // The new network gets its own once it has settled.
-        advance(TunnelVpnService.NEW_NETWORK_SWITCH_MS)
+        // The old one's result dropped, the new network's probe goes at once, not once it has settled.
+        awaitProbes(2)
         awaitProbe()
         assertEquals(listOf(lte.networkHandle, lte2.networkHandle), be.whitelistProbes)
         assertEquals(Waiting.WHITELIST, shown.last())
+    }
+
+    // The start's NO_SERVER comes before the default network's caps: the
+    // probe goes with them, not after the switch time.
+    @Test
+    fun startOnLteProbesAtOnce() {
+        start()
+        netCallbacks().forEach { it.onAvailable(lte) }
+        be.whitelistAnswer = 2 to 0
+        verdict(true)
+        assertEquals(Waiting.NO_SERVER, TunnelState.waiting)
+        assertTrue(be.whitelistProbes.isEmpty())
+        defaultCallback().onAvailable(lte)
+        caps(lte, NetworkCapabilities.TRANSPORT_CELLULAR)
+        awaitProbe()
+        assertEquals(listOf(lte.networkHandle), be.whitelistProbes)
+        assertEquals(Waiting.WHITELIST, shown.last())
+    }
+
+    // Only the probe goes at once: relay_down waits for Go to judge the relay on the new network.
+    @Test
+    fun serverDownBeforeTheSwitchTimeIsRelayDownOnlyAfterIt() {
+        start()
+        network(lte, NetworkCapabilities.TRANSPORT_CELLULAR, validated = true)
+        be.whitelistAnswer = 2 to 1
+        verdict(true)
+        awaitProbe()
+        assertEquals(1, be.whitelistProbes.size)
+        assertTrue(relayDowns().isEmpty())
+        advance(TunnelVpnService.NEW_NETWORK_SWITCH_MS)
+        awaitProbe()
+        assertEquals(1, relayDowns().size)
+        assertEquals(1, be.whitelistProbes.size)
+    }
+
+    // A new LTE not ready yet fails the allowed hosts too: the settled check probes again.
+    @Test
+    fun unclearBeforeTheSwitchTimeProbesAgainAfterIt() {
+        start()
+        network(lte, NetworkCapabilities.TRANSPORT_CELLULAR)
+        be.whitelistAnswer = 0 to 0
+        verdict(true)
+        awaitProbe()
+        assertEquals(1, be.whitelistProbes.size)
+        assertEquals(Waiting.NO_SERVER, shown.last())
+        be.whitelistAnswer = 2 to 0
+        advance(TunnelVpnService.NEW_NETWORK_SWITCH_MS)
+        awaitProbes(2)
+        awaitProbe()
+        assertEquals(listOf(lte.networkHandle, lte.networkHandle), be.whitelistProbes)
+        assertEquals(Waiting.WHITELIST, shown.last())
+    }
+
+    // Connects on a not-ready network hang till the probe's deadline: an early
+    // probe that answers past the switch time probes again at once.
+    @Test
+    fun unclearFromAnEarlyProbeAfterTheSwitchTimeProbesAgainAtOnce() {
+        be.blockWhitelist = true
+        start()
+        network(lte, NetworkCapabilities.TRANSPORT_CELLULAR)
+        be.whitelistAnswer = 0 to 0
+        verdict(true)
+        awaitProbes(1)
+        advance(TunnelVpnService.NEW_NETWORK_SWITCH_MS)
+        be.whitelistGate.countDown()
+        // Not awaitServiceThreads: its looper idling would start the second probe before the new answer.
+        val deadline = System.currentTimeMillis() + 5_000
+        while (Thread.getAllStackTraces().keys.any { it.isAlive && it.name == "WhitelistProbe" } && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        be.whitelistAnswer = 2 to 0
+        ShadowLooper.idleMainLooper()
+        awaitProbes(2)
+        awaitProbe()
+        assertEquals(listOf(lte.networkHandle, lte.networkHandle), be.whitelistProbes)
+        assertEquals(Waiting.WHITELIST, shown.last())
+    }
+
+    // The new default network's own probe only: none over the old one's caps from onAvailable.
+    @Test
+    fun anotherLteProbesItselfOnly() {
+        whitelisted()
+        val lte2 = ShadowNetwork.newInstance(8)
+        network(lte2, NetworkCapabilities.TRANSPORT_CELLULAR)
+        awaitProbe()
+        assertEquals(listOf(lte.networkHandle, lte2.networkHandle), be.whitelistProbes)
+        assertEquals(Waiting.WHITELIST, shown.last())
+    }
+
+    @Test
+    fun noProbeOnLeavingForAWifi() {
+        whitelisted()
+        network(ShadowNetwork.newInstance(8), NetworkCapabilities.TRANSPORT_WIFI)
+        awaitProbe()
+        assertEquals(listOf(lte.networkHandle), be.whitelistProbes)
     }
 
     @Test
@@ -265,10 +357,10 @@ class WhitelistTest {
     }
 
     // LTE up for long beside a Wi-Fi without internet; the Wi-Fi goes: the
-    // probe comes once LTE has been the default for the switch time, not
+    // probe comes as LTE becomes the default, not after the switch time nor
     // with the no-server fetch's next tick.
     @Test
-    fun lteBecomingTheDefaultProbesAfterTheSecondPause() {
+    fun lteBecomingTheDefaultProbesAtOnce() {
         start()
         val wifi = ShadowNetwork.newInstance(8)
         netCallbacks().forEach { it.onAvailable(lte) }
@@ -278,12 +370,10 @@ class WhitelistTest {
         assertEquals(Waiting.NO_SERVER, TunnelState.waiting)
         advance(5_000)
         ReflectionHelpers.getField<ConnectivityManager.NetworkCallback>(svc, "netCallback").onLost(wifi)
-        defaultCallback().onAvailable(lte)
-        caps(lte, NetworkCapabilities.TRANSPORT_CELLULAR)
         be.whitelistAnswer = 2 to 0
-        advance(TunnelVpnService.NEW_NETWORK_SWITCH_MS - 1_000)
+        defaultCallback().onAvailable(lte)
         assertTrue(be.whitelistProbes.isEmpty())
-        advance(1_000)
+        caps(lte, NetworkCapabilities.TRANSPORT_CELLULAR)
         awaitProbe()
         assertEquals(listOf(lte.networkHandle), be.whitelistProbes)
         assertEquals(Waiting.WHITELIST, shown.last())
@@ -334,20 +424,22 @@ class WhitelistTest {
         assertEquals(Waiting.NO_SERVER, shown.last())
     }
 
-    // A tick that falls into the wait after a Wi-Fi appeared beside LTE still probes again.
+    // A tick that falls into the wait after a Wi-Fi appeared beside LTE
+    // probes again at once, and the wait's end does not probe a third time.
     @Test
-    fun aTickPutOffByANewNetworkStillRechecks() {
+    fun aTickDuringANewNetworksWaitRechecksOnce() {
         whitelisted()
         advance(TunnelVpnService.CONFIG_RETRY_MS - 10_000)
         ReflectionHelpers.getField<ConnectivityManager.NetworkCallback>(svc, "netCallback").onAvailable(ShadowNetwork.newInstance(8))
         ShadowLooper.idleMainLooper()
         be.whitelistAnswer = 2 to 2
         advance(10_000)
-        assertEquals(1, be.whitelistProbes.size)
-        advance(TunnelVpnService.NEW_NETWORK_SWITCH_MS)
         awaitProbe()
         assertEquals(2, be.whitelistProbes.size)
         assertEquals(Waiting.NO_SERVER, shown.last())
+        advance(TunnelVpnService.NEW_NETWORK_SWITCH_MS)
+        awaitProbe()
+        assertEquals(2, be.whitelistProbes.size)
     }
 
     private fun episode() {

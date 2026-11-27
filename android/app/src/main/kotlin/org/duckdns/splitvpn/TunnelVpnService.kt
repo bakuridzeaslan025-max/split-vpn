@@ -1307,6 +1307,7 @@ class TunnelVpnService : VpnService() {
         vpnPrefs.edit().putStringSet(KEY_SERVICES, serviceIds).putBoolean(KEY_ADBLOCK, adBlock).putBoolean(KEY_DIRECT, direct).remove(KEY_NEED_CODE).apply()
         current = null
         followed = null
+        sinceStart = true
         followSkip = null
         followRoundAt = -ROUND_PAUSE_MS
         mainHandler.removeCallbacks(switchOnNewNetwork)
@@ -1540,15 +1541,20 @@ class TunnelVpnService : VpnService() {
                 defaultChangedAt = SystemClock.elapsedRealtime()
                 // Gone to a Wi-Fi without internet: "network restricted" goes at once.
                 newOutageEpisode()
-                checkOutage()
+                // No checkOutage here: defaultCaps is still the old network's,
+                // a probe would go over it. The caps that follow check.
             }
 
             // On every change: the validation may also go.
             override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
                 // The carrier's code may be empty right after a switch and come with a later call.
+                val changed = defaultCaps?.first != network
                 defaultCaps = network to caps
                 updateNetKey()
                 followNetwork()
+                // The first caps of a new default network: the probe needs them,
+                // and the start's NO_SERVER or onAvailable came before them.
+                if (changed) checkOutage()
                 val validated = network to caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
                 if (validated == defaultValidated) return
                 defaultValidated = validated
@@ -1618,6 +1624,8 @@ class TunnelVpnService : VpnService() {
 
     // Main thread. The default network (handle, name) the last decision was for.
     private var followed: Pair<Long, String?>? = null
+    // No decision made since the start: followed == null does not tell the start from a code-less tick.
+    private var sinceStart = false
     // Its own, not networkRoundAt: that one would mute newNetwork's deferred switch.
     private var followRoundAt = -ROUND_PAUSE_MS
 
@@ -1648,9 +1656,16 @@ class TunnelVpnService : VpnService() {
         }
         val key = net.networkHandle to name
         if (key == followed) return
+        val first = sinceStart.also { sinceStart = false }
         followed = key
         followSkip = null
         val list = endpoints
+        // The first decision since the start, on the network current was chosen on
+        // (by the start from its record, or by the round since): nothing to undo.
+        if (first && name == currentNet) {
+            AppLog.i("endpoint: #${list.indexOf(current) + 1} of ${list.size} for ${netLabel(name)} kept, chosen on it (network)")
+            return
+        }
         val record = name?.let { Endpoints.forNet(this, it, list, testRc) }
         val ep = record ?: list.firstOrNull() ?: return
         if (ep == current) {
@@ -1772,33 +1787,41 @@ class TunnelVpnService : VpnService() {
     // before that looks again once it is over.
     // On a cellular default network NO_SERVER may be the carrier's white
     // lists: relay_down there only once the probe found the rest of the
-    // internet open. [recheck]: the no-server fetch's tick probes again
+    // internet open. The probe does not wait for the network to settle: it
+    // goes to other people's sites, and what Go knows of the relay does not
+    // change its verdict. [recheck]: the no-server fetch's tick probes again
     // over a verdict already taken.
     private fun checkOutage(recheck: Boolean = false) {
         mainHandler.removeCallbacks(settledCheck)
-        val again = recheck || recheckDue
+        val due = recheck || recheckDue
         recheckDue = false
         if (TunnelState.waiting != Waiting.NO_SERVER) return
-        val settling = maxOf(netAppearedAt, defaultChangedAt) + NEW_NETWORK_SWITCH_MS - SystemClock.elapsedRealtime()
-        if (settling > 0) {
-            // A tick put off by a network that appeared beside the default is still a recheck.
-            recheckDue = again
-            mainHandler.postDelayed(settledCheck, settling)
-            return
-        }
+        val settling = settlingLeft()
+        // A put-off recheck probes once the network has settled, not on any call before.
+        val again = recheck || due && settling <= 0
         val (network, caps) = defaultCaps ?: (null to null)
         // The test stand's hosts would be the real internet's: only the extra's.
         val hosts = testWhitelistHosts ?: RemoteConfig.whitelistHosts(this).takeUnless { testStand }
-        if (network != null && caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true &&
+        val key = network?.let { it.networkHandle to outageGen }
+        val byProbe = network != null && key != null && caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true &&
             hosts != null && hosts.first.isNotEmpty() && hosts.second.isNotEmpty()
-        ) {
-            val key = network.networkHandle to outageGen
-            if (probingFor == null && relayDown && (outageFor != key || again)) startProbe(network, key, hosts)
-            if (outageFor != key || outage != Outage.SERVER_DOWN) return
+        var probed = false
+        if (byProbe && probingFor == null && relayDown && (outageFor != key || again)) {
+            startProbe(network, key, hosts)
+            probed = true
         }
+        if (settling > 0) {
+            // A tick put off by a network that appeared beside the default is
+            // still a recheck, unless its probe went just now.
+            recheckDue = due && !probed
+            mainHandler.postDelayed(settledCheck, settling)
+            return
+        }
+        if (byProbe && (outageFor != key || outage != Outage.SERVER_DOWN)) return
         if (defaultValidated?.second == true) daily("vpn_failed", "relay_down", "run")
     }
     private val settledCheck = Runnable { checkOutage() }
+    private fun settlingLeft() = maxOf(netAppearedAt, defaultChangedAt) + NEW_NETWORK_SWITCH_MS - SystemClock.elapsedRealtime()
     private var recheckDue = false
 
     // Main thread only. The white-list probe's verdict, for the default
@@ -1835,13 +1858,14 @@ class TunnelVpnService : VpnService() {
     // Connects to other people's sites only, never to our servers.
     private fun startProbe(network: Network, key: Pair<Long, Int>, hosts: Pair<List<String>, List<String>>) {
         probingFor = key
+        val early = settlingLeft() > 0
         val (allowed, blocked) = hosts
         Thread({
             val (a, b) = runCatching { backend.whitelistProbe(network, allowed, blocked) }
                 .getOrElse { AppLog.e("whitelist probe", it, expected = true); 0 to 0 }
             val v = whitelistVerdict(a, allowed.size, b)
             AppLog.i("whitelist probe: allowed $a/${allowed.size}, blocked $b/${blocked.size} → ${v.name.lowercase()}")
-            mainHandler.post { onProbed(key, v) }
+            mainHandler.post { onProbed(key, v, early) }
         }, "WhitelistProbe").start()
     }
 
@@ -1849,7 +1873,8 @@ class TunnelVpnService : VpnService() {
     // dropped; the check after it probes the current one. Over white lists
     // only "server down" counts: one slow ya.ru on weak LTE must not bring
     // "server unavailable" back for the hours till the next tick.
-    private fun onProbed(key: Pair<Long, Int>, v: Outage) {
+    // [early]: the probe started before the network settled.
+    private fun onProbed(key: Pair<Long, Int>, v: Outage, early: Boolean) {
         probingFor = null
         val keep = outageFor == key && outage == Outage.WHITELIST && v == Outage.UNCLEAR
         if (!keep && key == outageKey() && TunnelState.state == VpnState.CONNECTED && relayDown && TunnelState.waiting == Waiting.NO_SERVER) {
@@ -1858,6 +1883,10 @@ class TunnelVpnService : VpnService() {
             outageFor = key
             if (shownWaiting() != was) showOutage()
             if (v == Outage.WHITELIST) whitelistDetected()
+            // An early probe may meet a cellular network not ready yet: once
+            // more when it has settled, at once if it already has. WHITELIST
+            // and SERVER_DOWN stand: each needs every allowed host to answer.
+            if (v == Outage.UNCLEAR && early) recheckDue = true
         }
         checkOutage()
     }
@@ -1983,6 +2012,8 @@ class TunnelVpnService : VpnService() {
                 return
             }
             rebuilding = true
+            // Its startGo takes netName() for the old current: a network changed meanwhile must not look chosen on.
+            sinceStart = false
             lastRebuildAt = System.currentTimeMillis()
             running ?: return
         }
