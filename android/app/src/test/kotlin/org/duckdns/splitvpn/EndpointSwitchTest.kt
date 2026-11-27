@@ -883,4 +883,80 @@ class EndpointSwitchTest {
         verdict(true)
         nextRoundIn(base)
     }
+
+    // The start chose a by the record, the round moved on to b: the first
+    // caps of the same carrier must not take it back to a.
+    @Test
+    fun firstTickAfterTheStartKeepsTheRound() {
+        Endpoints.setForNet(app, tele2, a)
+        onCell("25020")
+        start()
+        assertEquals(a.host, be.startedSni)
+        online()
+        verdict(true)
+        assertEquals(listOf(b), be.endpointsSet)
+        defaultNetwork(lte, NetworkCapabilities.TRANSPORT_CELLULAR)
+        assertEquals(listOf(b), be.endpointsSet)
+        assertTrue(fileLog().any { it.endsWith("endpoint: #2 of 3 for cell:25020 kept, chosen on it (network)") })
+    }
+
+    @Test
+    fun firstTickAfterTheStartKeepsTheRoundOnWifi() {
+        activeNetwork(NetworkCapabilities.TRANSPORT_WIFI)
+        start()
+        online()
+        verdict(true)
+        assertEquals(listOf(b), be.endpointsSet)
+        defaultNetwork(wifi, NetworkCapabilities.TRANSPORT_WIFI)
+        assertEquals(listOf(b), be.endpointsSet)
+    }
+
+    @Test
+    fun anotherNetworkRightAfterTheStartIsFollowed() {
+        Endpoints.setForNet(app, tele2, c)
+        onCell("25020")
+        start()
+        assertEquals(c.host, be.startedSni)
+        defaultNetwork(wifi, NetworkCapabilities.TRANSPORT_WIFI)
+        assertEquals(listOf(a), be.endpointsSet)
+    }
+
+    // No carrier code at the start: the code's record decides, as before.
+    @Test
+    fun startWithoutANameTakesTheRecordOnTheFirstTick() {
+        Endpoints.setForNet(app, tele2, b)
+        onCell("")
+        start()
+        assertEquals(a.host, be.startedSni)
+        shadowOf(tm).setNetworkOperator("25020")
+        defaultNetwork(lte, NetworkCapabilities.TRANSPORT_CELLULAR)
+        assertEquals(listOf(b), be.endpointsSet)
+    }
+
+    // The rebuild's start takes the name of the network it runs on, not of the one current was chosen on.
+    @Test
+    fun rebuildBeforeTheFirstTickFollowsTheNetworkAfter() {
+        Endpoints.setForNet(app, tele2, c)
+        onCell("25020")
+        svc.onStartCommand(Intent(TunnelVpnService.ACTION_START).putStringArrayListExtra(TunnelVpnService.EXTRA_SERVICES, arrayListOf("twitter")), 0, 1)
+        awaitConnected()
+        assertEquals(c.host, be.startedSni)
+        // Before the rebuild: its startGo names the network at once, and null
+        // here is the Wi-Fi's name too. Without the rebuild's guard the Wi-Fi's
+        // tick would look like the first decision on c's own network and keep c.
+        activeNetwork(NetworkCapabilities.TRANSPORT_WIFI)
+        be.blockStart = true
+        RouteCache.file(app).writeText("x.com 192.0.2.0 ${System.currentTimeMillis() / 1000}\n")
+        be.startedHost!!.routesStale()
+        ShadowLooper.idleMainLooper()
+        val deadline = System.currentTimeMillis() + 5_000
+        while ("stop" !in be.events && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        defaultNetwork(wifi, NetworkCapabilities.TRANSPORT_WIFI)
+        assertEquals(emptyList<TunnelVpnService.Endpoint>(), be.endpointsSet)
+        be.startGate.countDown()
+        awaitServiceThreads()
+        ShadowLooper.idleMainLooper()
+        assertEquals(listOf(a), be.endpointsSet)
+        RouteCache.file(app).delete()
+    }
 }
